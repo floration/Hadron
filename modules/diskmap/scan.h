@@ -65,6 +65,8 @@ struct ScanStats {
     u64 cloudFiles = 0, cloudBytes = 0, cloudDirs = 0; // placeholders skipped (bytes = logical size)
     u64 deniedDirs = 0;                                // folders that could not be listed
     u64 noIdDirs = 0;                                  // folders listed without FileIds (fallback)
+    u64 adsFiles = 0, adsBytes = 0;                    // named :$DATA streams counted (streams option)
+    bool streams = false;                              // the scan ran with the streams option on
     std::vector<std::pair<std::wstring, DWORD>> deniedSample;   // first few, display paths
     double seconds = 0;
     bool backupOk = false;          // SeBackupPrivilege was enabled on the scan thread
@@ -96,8 +98,16 @@ public:
     // root's name as shown ("C:\"). The root is treated as a drive root for the safe-to-delete rules,
     // which are drive-root relative. Returns false if cancelled or the root can't be listed.
     // SeBackupPrivilege is enabled on the calling thread only (ImpersonateSelf), and reverted on return.
+    // streams: also sum each counted file's named :$DATA streams (FindFirstStreamW) into its size.
+    // Off by default: it opens every file's stream list, which is slow on large drives.
     bool Run(const std::wstring& root, const std::wstring& display,
-             const std::function<bool()>& cancelled, ScanProgress* progress);
+             const std::function<bool()>& cancelled, ScanProgress* progress, bool streams = false);
+
+    // Root AMD/NVIDIA candidates: stamp SF_DRVPKG on each candidate folder and its whole subtree when
+    // a descendant non-reparse file setup.exe or a descendant folder Packages exists. In-memory only
+    // (no I/O). Called by Run before Finalize; public so --selftest can drive it on a synthetic tree.
+    void MarkInstallerFolders(const std::vector<u32>& candidates);
+    u32 AddName(const wchar_t* s, size_t n);
 
     const wchar_t* Name(u32 off) const { return names.data() + off; }
     std::wstring DirPath(u32 d) const;            // display path, no \\?\ prefix
@@ -112,9 +122,9 @@ public:
 private:
     bool RunImpl(const std::wstring& root, const std::wstring& display,
                  const std::function<bool()>& cancelled, ScanProgress* progress);
-    u32 AddName(const wchar_t* s, size_t n);
     void Finalize();
     std::wstring rootExt_;
+    bool streams_ = false;
 };
 
 u64 SafeSum(const u64* safeR);   // reasons 1..9

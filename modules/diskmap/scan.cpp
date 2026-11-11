@@ -133,11 +133,13 @@ private:
 }  // namespace
 
 bool Scan::Run(const std::wstring& root, const std::wstring& display,
-               const std::function<bool()>& cancelled, ScanProgress* prog) {
+               const std::function<bool()>& cancelled, ScanProgress* prog, bool streams) {
+    streams_ = streams;
     ThreadBackupPrivilege priv;   // reverted when Run returns, on every path
     bool r = RunImpl(root, display, cancelled, prog);
     stats.backupOk = priv.ok();
     stats.backupErr = priv.err();
+    stats.streams = streams;
     return r;
 }
 
@@ -162,6 +164,7 @@ bool Scan::RunImpl(const std::wstring& root, const std::wstring& display,
     std::vector<std::wstring> segs;
     std::vector<std::wstring> subNames;
     std::vector<BYTE> buf(64 * 1024);   // FILE_ID_BOTH_DIR_INFO batches
+    std::vector<u32> markerCands;       // root AMD/NVIDIA folders, decided after the scan
 
     while (!stack.empty()) {
         if (cancelled()) return false;
@@ -175,11 +178,10 @@ bool Scan::RunImpl(const std::wstring& root, const std::wstring& display,
         for (u32 x = di; x != 0; x = dirs[x].parent) segs.push_back(LowerName(Name(dirs[x].name), wcslen(Name(dirs[x].name))));
         std::reverse(segs.begin(), segs.end());
 
-        const u8 ctx = dirs[di].ctx;
-        u8 dsafe = dirs[di].safe;
-        // Root AMD/NVIDIA: flagged only if its own listing holds setup.exe or Packages, decided below
-        // from the entries we list anyway (no extra filesystem call).
-        const bool needMarker = !dsafe && rules.NeedsInstallerMarker(segs);
+        const u8 ctx = dirs[di].ctx, dsafe = dirs[di].safe;
+        // Root AMD/NVIDIA: flagged only if setup.exe or Packages is somewhere inside. Not knowable
+        // until its subtree is listed, so it is decided after the scan (MarkInstallerFolders).
+        if (!dsafe && rules.NeedsInstallerMarker(segs)) markerCands.push_back(di);
         const int depth = (int)dirs[di].depth;
         const u32 fileFirst = (u32)files.size();
         subNames.clear();
@@ -220,6 +222,24 @@ bool Scan::RunImpl(const std::wstring& root, const std::wstring& display,
                     stats.hardlinkDupBytes += f.size;
                     f.size = 0;
                     f.flags |= FF_HARDLINK_DUP;
+                }
+                // Optional alternate data streams: counted files only (never reparse, cloud or a
+                // duplicate link). The stream list is metadata; no stream data is read.
+                if (streams_ && !reparse && !(f.flags & FF_HARDLINK_DUP)) {
+                    std::wstring fp = Join(cur.path, e.name, e.len);
+                    WIN32_FIND_STREAM_DATA sd;
+                    HANDLE sh = FindFirstStreamW(fp.c_str(), FindStreamInfoStandard, &sd, 0);
+                    if (sh != INVALID_HANDLE_VALUE) {   // failure: count 0 for this file and carry on
+                        u64 extra = 0;
+                        do {
+                            size_t nl = wcslen(sd.cStreamName);
+                            if (wcscmp(sd.cStreamName, L"::$DATA") != 0 && nl > 6 &&
+                                wcscmp(sd.cStreamName + nl - 6, L":$DATA") == 0)
+                                extra += (u64)sd.StreamSize.QuadPart;
+                        } while (FindNextStreamW(sh, &sd));
+                        FindClose(sh);
+                        if (extra) { stats.adsFiles++; stats.adsBytes += extra; f.size += extra; }
+                    }
                 }
             }
             f.safe = dsafe ? dsafe : rules.FileSafe(segs, ln);
@@ -322,22 +342,6 @@ bool Scan::RunImpl(const std::wstring& root, const std::wstring& display,
             if (di == 0 && !listed) { rootErr = err; return false; }
         }
 
-        if (needMarker) {
-            bool marker = false;
-            for (u32 f = fileFirst; f < (u32)files.size() && !marker; f++) {
-                if (files[f].flags & FF_REPARSE) continue;   // a link named setup.exe is not installer data
-                const wchar_t* n = Name(files[f].name);
-                marker = IsInstallerMarker(LowerName(n, wcslen(n)), false);
-            }
-            for (size_t i = 0; i < subNames.size() && !marker; i++)
-                marker = IsInstallerMarker(LowerName(subNames[i]), true);
-            if (marker) {
-                dsafe = rules.DirSafe(segs, true);
-                dirs[di].safe = dsafe;
-                for (u32 f = fileFirst; f < (u32)files.size(); f++) files[f].safe = dsafe;
-            }
-        }
-
         dirs[di].fileFirst = fileFirst;
         dirs[di].fileCount = (u32)files.size() - fileFirst;
         dirs[di].kidFirst = (u32)kids.size();
@@ -363,10 +367,41 @@ bool Scan::RunImpl(const std::wstring& root, const std::wstring& display,
     }
 
     if (cancelled()) return false;
+    MarkInstallerFolders(markerCands);
     Finalize();
     stats.seconds = (double)(GetTickCount64() - t0) / 1000.0;
     ok = true;
     return true;
+}
+
+void Scan::MarkInstallerFolders(const std::vector<u32>& cands) {
+    std::vector<u32> st, sub;
+    for (u32 c : cands) {
+        bool marker = false;
+        sub.clear();
+        st.assign(1, c);
+        while (!st.empty()) {
+            u32 d = st.back(); st.pop_back();
+            sub.push_back(d);
+            const DirE& de = dirs[d];
+            for (u32 f = de.fileFirst; f < de.fileFirst + de.fileCount && !marker; f++) {
+                if (files[f].flags & FF_REPARSE) continue;   // a link named setup.exe is not installer data
+                const wchar_t* n = Name(files[f].name);
+                marker = IsInstallerMarker(LowerName(n, wcslen(n)), false);
+            }
+            for (u32 k = 0; k < de.kidCount; k++) {
+                u32 ch = kids[de.kidFirst + k];
+                const wchar_t* n = Name(dirs[ch].name);   // kids are plain folders; links are files
+                if (!marker) marker = IsInstallerMarker(LowerName(n, wcslen(n)), true);
+                st.push_back(ch);
+            }
+        }
+        if (!marker) continue;
+        for (u32 d : sub) {
+            dirs[d].safe = SF_DRVPKG;
+            for (u32 f = dirs[d].fileFirst; f < dirs[d].fileFirst + dirs[d].fileCount; f++) files[f].safe = SF_DRVPKG;
+        }
+    }
 }
 
 // Legacy Finalize (511-541): per-folder sums, files by size desc, bottom-up roll-up (children always

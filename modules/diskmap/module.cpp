@@ -137,10 +137,20 @@ u64 FreeOf(const Target& t) { return t.total > t.used ? t.total - t.used : 0; }
 
 // What "Not mapped" contains (deviation 6). Dehydrated cloud placeholders use almost no clusters, so
 // they are not part of it; compressed/sparse/WOF files counted at logical size push it the other way.
-const wchar_t* const kNotMappedWhy =
-    L"Not mapped = used space minus mapped bytes: NTFS metadata, unreadable folders, and the gap between "
-    L"file sizes and allocated clusters. Compressed, sparse and WOF files are counted at full logical size, "
-    L"so this can read low or 0 B even though NTFS metadata exists. Hard links count once; links aren't followed.";
+// Alternate data streams are in it unless the scan ran with "Check for data streams".
+std::wstring NotMappedWhy(bool streams) {
+    return std::wstring(L"Not mapped = used space minus mapped bytes: NTFS metadata, unreadable folders, ") +
+           (streams ? L"" : L"alternate data streams, ") +
+           L"and the gap between file sizes and allocated clusters. Compressed, sparse and WOF files are counted "
+           L"at full logical size, so this can read low or 0 B even though NTFS metadata exists. Hard links count "
+           L"once; links aren't followed.";
+}
+// --streams: the "Check for data streams" option on from the start (headless runs included).
+bool StreamsArg() {
+    CommandLine cl = CommandLine::Parse(GetCommandLineW());
+    for (auto& a : cl.rest) if (a == L"--streams") return true;
+    return false;
+}
 struct Click { RECT rc; int id; u32 data; };
 struct Hit { RECT r; u32 id; u32 top; u8 kind; u8 topKind; };
 struct Lump { u64 size = 0, count = 0; u64 cat[NCAT] = {}; u64 safeR[NSAFE] = {}; u8 dom = C_OTHER; };
@@ -148,7 +158,7 @@ struct ListE { u32 id; u8 kind; u64 size; };   // kind 0 file, 1 folder
 struct RowRef { u8 kind; u32 id; };            // Console list row: 0 file, 1 folder
 
 enum ClickId { ID_RESCAN = 1, ID_CANCEL = 2, ID_UP = 4, ID_DRIVE = 100, ID_CRUMB = 200, ID_CAT = 300,
-               ID_CLEARFILTER = 500, ID_TAB = 600, ID_SAFE = 700 };
+               ID_CLEARFILTER = 500, ID_TAB = 600, ID_SAFE = 700, ID_STREAMS = 800 };
 enum class St { Idle, Scanning, Done };
 enum class Focus { None, Click, Largest, List, Detail };
 
@@ -289,6 +299,7 @@ private:
     HWND hwnd_ = nullptr;
     ExtraFonts extra_;
     bool elevated_ = true;
+    bool streams_ = false;   // "Check for data streams" (off by default; --streams turns it on)
 
     St st_ = St::Idle;
     sys::Worker worker_;
@@ -451,6 +462,7 @@ HWND DiskMapModule::Create(IHost& host, HWND parent, const RECT& rc) {
         return nullptr;
     }
     if (Console()) focus_ = Focus::List;
+    streams_ = StreamsArg();
 
     // Optional "--drive X": start scanning that drive (validated against the drive list). Not in
     // --screenshot/--selftest, which load a fixture instead.
@@ -536,8 +548,9 @@ void DiskMapModule::LaunchWorker() {
     std::wstring root = target_.root, display = target_.display;
     sys::Worker* wk = &worker_;
     ScanProgress* pg = &prog_;
-    bool ok = worker_.Start(hwnd_, WM_DM_SCANDONE, [scan, root, display, wk, pg] {
-        scan->Run(root, display, [wk] { return wk->Cancelled(); }, pg);
+    bool streams = streams_;
+    bool ok = worker_.Start(hwnd_, WM_DM_SCANDONE, [scan, root, display, wk, pg, streams] {
+        scan->Run(root, display, [wk] { return wk->Cancelled(); }, pg, streams);
     }, 64u << 20);
     if (!ok) {
         lastError_ = L"Could not start the scan thread: " + sys::ErrorText(GetLastError());
@@ -778,7 +791,7 @@ void DiskMapModule::SyncDetail() {
         if (view_ == 0) {
             std::wstring sk = SkippedText();
             if (!sk.empty()) rows.push_back({L"Skipped", sk});
-            if (target_.total) rows.push_back({L"Not mapped", kNotMappedWhy});
+            if (target_.total) rows.push_back({L"Not mapped", NotMappedWhy(s.stats.streams)});
         }
         detail_.SetRows(std::move(rows));
         return;
@@ -965,7 +978,7 @@ void DiskMapModule::DrawToolbar(HDC dc) {
         for (size_t i = 0; i < drives_.size(); i++) {
             const Drive& d = drives_[i];
             RECT r = {x, cy - bh / 2, x + bw, cy + bh / 2};
-            if (r.right > rcTool_.right - Sc(260)) break;   // legacy: no overflow menu
+            if (r.right > rcTool_.right - Sc(500)) break;   // legacy: no overflow menu; room for the toggle
             bool active = (st_ != St::Idle && d.letter == target_.letter);
             bool hv = IsHover(ID_DRIVE, (u32)i);
             RoundFill(dc, r, Sc(8), active ? Mix(t.panel2, t.accent, 0.18) : (hv ? t.panel3 : t.panel2));
@@ -997,6 +1010,33 @@ void DiskMapModule::DrawToolbar(HDC dc) {
     RECT r = {rx - Sc(96), cy - Sc(16), rx, cy + Sc(16)};
     if (st_ == St::Scanning) Button(dc, r, L"Cancel", ID_CANCEL, false);
     else if (st_ == St::Done && !target_.fixture) Button(dc, r, L"Rescan", ID_RESCAN, true);
+
+    // "Check for data streams" toggle (off by default). On: a one-line cost note under it.
+    {
+        int tr = r.left - Sc(10), tl = tr - Sc(220);
+        int top = streams_ ? cy - Sc(21) : cy - Sc(13);
+        RECT b = {tl, top, tr, top + Sc(26)};
+        bool hv = IsHover(ID_STREAMS);
+        RoundFill(dc, b, Sc(6), hv ? t.panel3 : t.panel2);
+        RoundOutline(dc, b, Sc(6), streams_ ? t.accent : (hv ? Mix(t.border, t.text3, 0.5) : t.border));
+        int bx = b.left + Sc(9), bs = Sc(12), by = (b.top + b.bottom) / 2 - bs / 2;
+        RECT box = {bx, by, bx + bs, by + bs};
+        if (streams_) {
+            FillC(dc, box, t.accent);
+            RECT in = {box.left + Sc(3), box.top + Sc(3), box.right - Sc(3), box.bottom - Sc(3)};
+            FillC(dc, in, Lum(t.accent) > 140 ? RGB(10, 14, 22) : RGB(245, 247, 250));
+        } else {
+            FillC(dc, box, t.border);
+            RECT in = {box.left + 1, box.top + 1, box.right - 1, box.bottom - 1}; FillC(dc, in, t.panel);
+        }
+        RECT lt = {box.right + Sc(8), b.top, b.right - Sc(6), b.bottom};
+        Text(dc, L"Check for data streams", lt, f.caption, t.text1, TL);
+        AddClick(b, ID_STREAMS);
+        if (streams_) {
+            RECT nt = {tl, b.bottom + Sc(1), tr, b.bottom + Sc(17)};
+            Text(dc, L"slower: reads each file's stream list", nt, f.caption, t.text3, TL);
+        }
+    }
 }
 
 void DiskMapModule::SectionLabel(HDC dc, const wchar_t* s, int& y) {
@@ -1028,6 +1068,8 @@ std::wstring DiskMapModule::SkippedText() const {
     if (st.hardlinkDupFiles)
         add(n(st.hardlinkDupFiles, L" hard link counted once (", L" hard links counted once (") + FmtSize(st.hardlinkDupBytes) + L")");
     if (st.reparseDirs + st.linkFiles) add(n(st.reparseDirs + st.linkFiles, L" link not followed", L" links not followed"));
+    if (st.adsFiles)
+        add(n(st.adsFiles, L" file with data streams (", L" files with data streams (") + FmtSize(st.adsBytes) + L")");
     if (st.noIdDirs)
         add(n(st.noIdDirs, L" folder listed without file IDs (hard links there counted per link)",
                            L" folders listed without file IDs (hard links there counted per link)"));
@@ -1114,7 +1156,7 @@ void DiskMapModule::DrawSidebar(HDC dc) {
             RECT t2 = {R - Sc(70), y, R, y + Sc(18)}; Text(dc, rw.v, t2, f.caption, t.text2, TR);
             y += Sc(18);
         }
-        DrawWrapped(dc, kNotMappedWhy, L, R, y, t.text3);
+        DrawWrapped(dc, NotMappedWhy(s.stats.streams), L, R, y, t.text3);
     }
     if (view_ == 0 && s.stats.deniedDirs) {
         RECT dr = {L, y, R, y + Sc(18)};
@@ -1638,6 +1680,11 @@ void DiskMapModule::ActivateClick(const Click& c, bool ctrl) {
     (void)ctrl;
     switch (c.id) {
     case ID_RESCAN: if (st_ == St::Done && !target_.fixture) StartScan(target_); break;
+    case ID_STREAMS:   // flips the option and rescans what is shown (or being scanned) with it
+        streams_ = !streams_;
+        if (target_.fixture) { if (st_ == St::Done) { std::wstring d = target_.display; LoadFixture(d.c_str()); } }
+        else if (st_ != St::Idle) StartScan(target_);
+        break;
     case ID_CANCEL: worker_.Cancel(); haveQueued_ = false; break;
     case ID_UP: GoUp(); break;
     case ID_DRIVE:
@@ -1828,7 +1875,7 @@ void DiskMapModule::LoadFixture(const wchar_t* dir) {
     t.display = sys::ToShell(dir);
     target_ = t;
     auto s = std::make_unique<Scan>();
-    s->Run(t.root, t.display, [] { return false; }, nullptr);
+    s->Run(t.root, t.display, [] { return false; }, nullptr, streams_);
     if (!s->ok) {
         lastError_ = L"Could not read fixture " + t.display + L": " + sys::ErrorText(s->rootErr);
         st_ = St::Idle;
@@ -1980,7 +2027,7 @@ int DiskMapModule::RunCli(int argc, wchar_t** argv) {
     }
     check(IsInstallerMarker(L"setup.exe", false) && IsInstallerMarker(L"packages", true) &&
           !IsInstallerMarker(L"setup.exe", true) && !IsInstallerMarker(L"packages", false),
-          L"installer marker = child file setup.exe or child folder Packages");
+          L"installer marker = a file setup.exe or a folder Packages (links never count)");
     sg = {L"programdata", L"nvidia corporation", L"downloader"};
     check(R.DirSafe(sg) == SF_DRVPKG && !R.NeedsInstallerMarker(sg), L"ProgramData\\NVIDIA Corporation\\Downloader unchanged (no marker needed)");
     sg = {L"users", L"bob", L"appdata", L"local", L"microsoft", L"windows", L"explorer"};
@@ -1992,6 +2039,113 @@ int DiskMapModule::RunCli(int argc, wchar_t** argv) {
           L"root system files only at depth 0");
     check(DirCtx(C_WINDOWS, L"driverstore", 2) == C_DRIVERS, L"Windows\\DriverStore -> Drivers");
     check(DirCtx(C_PROGRAMS, L"temp", 2) == C_TEMP, L"temp beats Programs context");
+
+    // --- AMD/NVIDIA installer marker anywhere in the subtree (in-memory tree, no I/O) ---
+    {
+        Scan m;
+        auto D = [&](const wchar_t* n, u32 parent, u32 depth, u32 fileFirst, u32 fileCount, u32 kidFirst, u32 kidCount) {
+            DirE d; d.name = m.AddName(n, wcslen(n)); d.parent = parent; d.depth = depth;
+            d.fileFirst = fileFirst; d.fileCount = fileCount; d.kidFirst = kidFirst; d.kidCount = kidCount;
+            m.dirs.push_back(d);
+        };
+        auto F = [&](const wchar_t* n, u32 dir, u8 flags) {
+            FileE f; f.name = m.AddName(n, wcslen(n)); f.dir = dir; f.flags = flags; f.size = 100; m.files.push_back(f);
+        };
+        // 0 root: 1 amd, 2 nvidia, 6 nvidia2 | amd\x(3)\y(4)\Setup.exe | nvidia\foo(5): readme.txt, a
+        // setup.exe that is a link, and a folder link named Packages | nvidia2\sub(7)\Packages(8)
+        D(L"root", 0, 0, 0, 0, 0, 3);
+        D(L"amd", 0, 1, 0, 1, 3, 1);
+        D(L"nvidia", 0, 1, 1, 1, 4, 1);
+        D(L"x", 1, 2, 2, 0, 5, 1);
+        D(L"y", 3, 3, 2, 1, 6, 0);
+        D(L"foo", 2, 2, 3, 2, 6, 0);
+        D(L"nvidia2", 0, 1, 5, 0, 6, 1);
+        D(L"sub", 6, 2, 5, 0, 7, 1);
+        D(L"Packages", 7, 3, 5, 0, 8, 0);
+        m.kids = {1, 2, 6, 3, 5, 4, 7, 8};
+        F(L"other.bin", 1, 0);                              // 0: amd
+        F(L"Packages", 2, FF_REPARSE | FF_REPARSE_DIR);     // 1: nvidia (folder link)
+        F(L"Setup.exe", 4, 0);                              // 2: amd\x\y
+        F(L"readme.txt", 5, 0);                             // 3: nvidia\foo
+        F(L"setup.exe", 5, FF_REPARSE);                     // 4: nvidia\foo (file link)
+        m.MarkInstallerFolders({1, 2, 6});
+        check(m.dirs[1].safe == SF_DRVPKG && m.dirs[3].safe == SF_DRVPKG && m.dirs[4].safe == SF_DRVPKG &&
+              m.files[0].safe == SF_DRVPKG && m.files[2].safe == SF_DRVPKG,
+              L"nested marker (amd\\x\\y\\setup.exe) flags root amd and every folder and file under it");
+        check(m.dirs[2].safe == SF_NONE && m.dirs[5].safe == SF_NONE &&
+              m.files[1].safe == SF_NONE && m.files[3].safe == SF_NONE && m.files[4].safe == SF_NONE,
+              L"root nvidia with no marker is not flagged (a setup.exe link and a Packages link don't count)");
+        check(m.dirs[6].safe == SF_DRVPKG && m.dirs[7].safe == SF_DRVPKG && m.dirs[8].safe == SF_DRVPKG,
+              L"nested Packages folder flags the candidate and its subtree");
+    }
+
+    // --- marker + data streams on disk: a small tree the selftest builds (never deleted, reused) ---
+    {
+        wchar_t tmp[MAX_PATH + 1];
+        DWORD tn = GetTempPathW(MAX_PATH + 1, tmp);
+        std::wstring mr = (tn && tn <= MAX_PATH) ? sys::ToExtended(tmp) : std::wstring();
+        if (!mr.empty() && mr.back() != L'\\') mr += L'\\';
+        mr += L"hadron-diskmap-marker-selftest";
+        auto mk = [](const std::wstring& path) {
+            for (size_t i = 7; i <= path.size(); i++)
+                if (i == path.size() || path[i] == L'\\') CreateDirectoryW(path.substr(0, i).c_str(), nullptr);
+        };
+        auto put = [&](const std::wstring& path, DWORD size, DWORD disp) {
+            mk(path.substr(0, path.rfind(L'\\')));
+            HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, disp, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_EXISTS;
+            std::vector<BYTE> b(size, 0x5A);
+            DWORD wr = 0;
+            bool ok = !size || (WriteFile(h, b.data(), size, &wr, nullptr) && wr == size);
+            CloseHandle(h);
+            return ok;
+        };
+        bool built = !mr.empty() && put(mr + L"\\AMD\\x\\y\\Setup.exe", 1000, CREATE_NEW) &&
+                     put(mr + L"\\AMD\\x\\data.bin", 2000, CREATE_NEW) &&
+                     put(mr + L"\\NVIDIA\\foo\\readme.txt", 500, CREATE_NEW) &&
+                     put(mr + L"\\streams\\host.bin", 3000, CREATE_NEW);
+        check(built, L"marker/stream tree available");
+        if (built) {
+            // Named stream host.bin:hx (5,000 B). Only trusted if the OS lists it as a stream: Wine has
+            // no NTFS streams and may create nothing, or a plain file, instead.
+            put(mr + L"\\streams\\host.bin:hx", 5000, CREATE_ALWAYS);
+            bool adsThere = false;
+            WIN32_FIND_STREAM_DATA sd;
+            HANDLE sh = FindFirstStreamW((mr + L"\\streams\\host.bin").c_str(), FindStreamInfoStandard, &sd, 0);
+            if (sh != INVALID_HANDLE_VALUE) {
+                do { if (wcscmp(sd.cStreamName, L":hx:$DATA") == 0 && sd.StreamSize.QuadPart == 5000) adsThere = true; }
+                while (FindNextStreamW(sh, &sd));
+                FindClose(sh);
+            }
+            auto scanTree = [&](bool streams, Scan& t) { return t.Run(mr, sys::ToShell(mr), [] { return false; }, nullptr, streams) && t.ok; };
+            auto findDir = [](const Scan& t, const wchar_t* n) {
+                for (u32 i = 1; i < t.dirs.size(); i++) if (t.dirs[i].depth == 1 && _wcsicmp(t.Name(t.dirs[i].name), n) == 0) return i;
+                return 0u;
+            };
+            auto hostSize = [](const Scan& t) {
+                for (const FileE& f : t.files) if (wcscmp(t.Name(f.name), L"host.bin") == 0) return f.size;
+                return (u64)0;
+            };
+            Scan off, on;
+            bool okOff = scanTree(false, off), okOn = scanTree(true, on);
+            check(okOff && okOn, L"marker/stream tree scanned (streams off and on)");
+            if (okOff && okOn) {
+                u32 amd = findDir(off, L"amd"), nv = findDir(off, L"nvidia");
+                check(amd && off.dirs[amd].safe == SF_DRVPKG && off.dirs[amd].safeR[SF_DRVPKG] == 3000,
+                      L"scan: root AMD with a nested Setup.exe -> Driver installer leftovers, whole subtree (3,000 B)");
+                check(nv && off.dirs[nv].safe == SF_NONE && off.dirs[nv].safeR[SF_DRVPKG] == 0,
+                      L"scan: root NVIDIA with no marker anywhere is not flagged");
+                eq(hostSize(off), 3000, L"streams off: host.bin counted without its named stream");
+                eq(off.stats.adsFiles, 0, L"streams off: no stream tally");
+                if (adsThere) {
+                    eq(hostSize(on), 8000, L"streams on: host.bin counted with its 5,000 B named stream");
+                    eq(on.stats.adsBytes, 5000, L"streams on: stream bytes tallied");
+                } else {
+                    wprintf(L"  [SKIP] named data stream: this OS created no host.bin:hx stream (no NTFS streams); run on Windows/NTFS\n");
+                }
+            }
+        }
+    }
 
     // --- fixture scan ---
     CommandLine cl = CommandLine::Parse(GetCommandLineW());
@@ -2007,7 +2161,7 @@ int DiskMapModule::RunCli(int argc, wchar_t** argv) {
                     sys::ToShell(root.substr(0, root.rfind(L'\\'))).c_str());
         if (!note.empty()) wprintf(L"  note: %ls\n", note.c_str());
         Scan s;
-        bool ran = s.Run(root, sys::ToShell(root), [] { return false; }, nullptr);
+        bool ran = s.Run(root, sys::ToShell(root), [] { return false; }, nullptr, StreamsArg());
         check(ran && s.ok, L"scan completed");
         if (ran && s.ok) {
             const DirE& r0 = s.dirs[0];

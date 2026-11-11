@@ -38,8 +38,8 @@ const SafeInfo kSafe[NSAFE] = {
      L"Files you already deleted. Empty the Recycle Bin to get this space back.",
      L"reasoning", L"Everything here is a file someone already chose to delete."},
     {L"App & browser caches",
-     L"Folders named Cache, cache2, Code Cache or GPUCache under AppData. Browsers and most apps rebuild these. DiskMap skips caches inside installed programs (Local\\Programs, node_modules, site-packages), so it won't flag part of an app; still, close the app first \x2014 the next launch or page load may be slower.",
-     L"reasoning", L"Matched by folder name (cache, cache2, Code Cache, GPUCache) under AppData, excluding per-user installs (Local\\Programs, node_modules, site-packages); not checked per app."},
+     L"Folders named Cache, cache2, Code Cache, GPUCache or INetCache under AppData. Browsers and most apps rebuild these. Folders named exactly Cache inside Local\\Programs, node_modules or site-packages are skipped, because those hold installed programs; other cache folders are matched by name only. Close the app first \x2014 the next launch or page load may be slower.",
+     L"reasoning", L"Matched by folder name (cache, cache2, Code Cache, GPUCache, INetCache) under AppData; only the plain \"cache\" rule excludes per-user installs (Local\\Programs, node_modules, site-packages). Not checked per app."},
     {L"Shader caches",
      L"Compiled GPU shaders. Games and drivers rebuild them; until they do, loads can be longer and gameplay can stutter, by an amount that depends on the game. Test it on a game you play.",
      L"reasoning", L"Drivers and games compile shaders on demand when no cached copy exists."},
@@ -47,8 +47,8 @@ const SafeInfo kSafe[NSAFE] = {
      L"Explorer's thumbnail and icon cache. Rebuilt automatically as you browse folders (Disk Cleanup can clear it too).",
      L"reasoning", L"Explorer regenerates thumbnails and icons from the files themselves."},
     {L"Driver installer leftovers",
-     L"A root folder named AMD or NVIDIA where those driver installers unpack. The installed driver runs from Windows' driver store, not from here. DiskMap flags it only when it holds a Setup.exe or a Packages folder; check it's installer files and nothing of yours.",
-     L"reasoning", L"The AMD and NVIDIA installers unpack to X:\\AMD and X:\\NVIDIA by default; flagged only when the folder holds setup.exe or a Packages folder."},
+     L"A root folder named AMD or NVIDIA where those driver installers unpack. Installing copies the driver into Windows; it doesn't run from here. DiskMap flags it only when a Setup.exe or a Packages folder is found inside it, so a folder of your own with that name isn't flagged; check it's installer files and nothing of yours.",
+     L"reasoning", L"The AMD and NVIDIA installers unpack to X:\\AMD and X:\\NVIDIA by default; flagged only when setup.exe or a Packages folder is found somewhere inside."},
 };
 
 const wchar_t* const kR = L"reasoning";
@@ -79,8 +79,8 @@ const std::vector<SafeRule> kDirRules = {
     {SF_CACHE,   L"users\\*\\appdata\\**\\cache2", kR, L"Firefox-style disk cache (folder name match)."},
     {SF_CACHE,   L"users\\*\\appdata\\**\\code cache", kR, L"Chromium/Electron compiled-script cache (folder name match)."},
     {SF_CACHE,   L"users\\*\\appdata\\**\\gpucache", kR, L"Chromium/Electron GPU cache (folder name match)."},
-    {SF_DRVPKG,  L"amd", kR, L"Root AMD folder holding setup.exe or a Packages folder (installer unpack).", nullptr, true},
-    {SF_DRVPKG,  L"nvidia", kR, L"Root NVIDIA folder holding setup.exe or a Packages folder (installer unpack).", nullptr, true},
+    {SF_DRVPKG,  L"amd", kR, L"Root AMD folder containing (anywhere inside) setup.exe or a Packages folder (installer unpack).", nullptr, true},
+    {SF_DRVPKG,  L"nvidia", kR, L"Root NVIDIA folder containing (anywhere inside) setup.exe or a Packages folder (installer unpack).", nullptr, true},
     {SF_DRVPKG,  L"programdata\\nvidia corporation\\downloader", kR, L"NVIDIA app/GeForce Experience driver downloads."},
 };
 

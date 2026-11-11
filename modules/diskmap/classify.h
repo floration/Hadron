@@ -63,10 +63,10 @@ public:
     static const Rules& Get();
     // segs: lower-cased, root-relative path segments of a directory (root = empty). First match wins;
     // a rule whose exclusion matches, or that needs an installer marker the folder lacks, is skipped.
-    // hasInstallerMarker: the folder's own listing held setup.exe or a Packages folder (IsInstallerMarker).
+    // hasInstallerMarker: setup.exe or a Packages folder was found anywhere inside (IsInstallerMarker).
     u8 DirSafe(const std::vector<std::wstring>& segs, bool hasInstallerMarker = false) const;
     // True when the folder would be flagged if it held an installer marker but isn't without one: the
-    // scanner then decides after listing that folder, from entries it already has (no extra I/O).
+    // scanner then decides after the scan, from its in-memory subtree (Scan::MarkInstallerFolders).
     bool NeedsInstallerMarker(const std::vector<std::wstring>& segs) const;
     // A file in an unflagged directory: only tried at depths a file rule can match (legacy g_fileDepth).
     u8 FileSafe(std::vector<std::wstring>& segs, const std::wstring& lname) const;
@@ -88,8 +88,8 @@ bool Glob(const wchar_t* p, const wchar_t* s);
 bool MatchSegs(const std::vector<std::wstring>& p, size_t pi, const std::vector<std::wstring>& s, size_t si);
 std::vector<std::wstring> SplitPattern(const wchar_t* p);
 
-// Installer-unpack marker for the root AMD/NVIDIA rule: an immediate child file setup.exe or an
-// immediate child folder Packages (lname lower-cased).
+// Installer-unpack marker for the root AMD/NVIDIA rule: a file setup.exe or a folder Packages anywhere
+// in the folder's subtree (lname lower-cased; links never count).
 bool IsInstallerMarker(const std::wstring& lname, bool isDir);
 
 // ---- classification ----------------------------------------------------------------------------
