@@ -1997,12 +1997,13 @@ double Contrast(COLORREF a, COLORREF b) {
     double x = RelLum(a), y = RelLum(b);
     return (std::max(x, y) + 0.05) / (std::min(x, y) + 0.05);
 }
-// A filled block with text on it (the selection, tags): white text, as Windows draws on its accent, while white
-// gets at least 3:1, with the fill darkened just enough to reach 4.5:1 (Windows blue 0078D7 is 4.50 by itself);
-// black text on a light fill. The hue stays the accent's.
+// A filled block with text on it (the selection, tags): white text, as Windows draws on its accent; black text when
+// white is well short (under 4:1) and black reaches 4.5:1. If the chosen text is still under 4.5:1, the fill is
+// moved away from it just enough (Windows blue 0078D7 gives white 4.50 and is darkened about 3%). The hue stays.
 void InverseVideo(COLORREF base, COLORREF* fill, COLORREF* ink) {
     const COLORREF white = RGB(255, 255, 255), black = RGB(0, 0, 0);
-    *ink = Contrast(white, base) >= 3.0 ? white : black;
+    double w = Contrast(white, base);
+    *ink = (w < 4.0 && Contrast(black, base) >= 4.5) ? black : white;
     *fill = base;
     for (int i = 1; i <= 12 && Contrast(*ink, *fill) < 4.5; i++) *fill = Mix(base, *ink == white ? black : white, i * 0.03);
 }
