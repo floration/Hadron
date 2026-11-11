@@ -1,0 +1,4 @@
+// modules/bios/resources/bios.rc — the bios module's resource fragment. Module-prefixed names only;
+// the exe .rc owns ICON 1 and the manifest (docs/ARCHITECTURE.md "Build outputs and resources").
+// The path is relative to the repo root, which CMake passes as an include directory.
+BIOS_SETTINGS RCDATA "modules/bios/data/settings.db"

@@ -5,15 +5,25 @@
 | Phase 0: legacy baselines + fixtures + goldens | done (not yet PR'd) | lead | claude/project-thread-7nnuw6 | - |
 | docs/legacy/diskmap.md | done | module-builder | merged into branch | - |
 | docs/legacy/bios-explorer.md | done | module-builder | merged into branch | - |
-| Phase 1: core skeleton (host/sys, hello, CMake, CI) | built; compiles MinGW, renders in Wine | lead | claude/project-thread-7nnuw6 | #1 |
-| Port `diskmap` (Baseline + Console) | not started | module-builder | - | - |
-| Port `bios` + snapshots | not started | module-builder | - | - |
-| `runas` module (new) | design written | lead | claude/project-thread-7nnuw6 | - |
+| Phase 1: core skeleton (host/sys, hello, CMake, CI) | merged | lead | claude/project-thread-7nnuw6 | #1 |
+| Port `diskmap` (Baseline + Console) | merged; owner's-PC checks pending | module-builder | module/diskmap | #1 |
+| Port `bios` + snapshots + KB v2 | review + kb-audit passed; in PR; owner's-PC live read pending | module-builder ×2 | module/bios, kb/bios | #3 |
 | `core/fs` header + design note | not started | lead | - | - |
-| `runas` module build | blocked on core/ui list widget | lead | - | - |
+| `runas` module | merged; owner's-PC launch checks pending | module-builder | module/runas | #2 |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)
+
+### 2026-11-11 (lead, Opus) — update 4
+- PR #1 (core, core/ui, diskmap) and PR #2 (runas) merged.
+- `bios` port: module (live UEFI read on a Worker, thread-only SeSystemEnvironmentPrivilege, SMBIOS board/BIOS
+  guard, in-app Save/Load/Compare snapshots with own zip+inflate, export with basis lines) and KB v2
+  (`tools/bios/genkb.py` fails on unsourced numbers; kb-auditor passed after 3 rounds, 42 findings fixed).
+  Reviewer passed after 2 rounds. CI now gates the generator output and runs bios selftests + screenshots.
+- Owner's-PC checks still open: diskmap selftest on real NTFS; runas SYSTEM/TI/another user/limited; bios live read
+  and whether SMBIOS reports `A.F0` (guard maps it to 7E06vAF).
+- Core gaps raised by builders: ListView per-cell colour hook; CreateModuleContent forwarding WM_MODULE_BASE+n,
+  timers, WM_MOUSELEAVE, WM_GETDLGCODE; a per-module CLI argument hook.
 
 ### 2026-11-11 (lead, Opus) — update 3
 - **core/ui built** on the same branch (PR #1): the theme system and the shared widgets.

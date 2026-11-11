@@ -56,52 +56,8 @@ enum {
 // Where keyboard/typing focus sits.
 enum class Focus { None, Path, Args, Work, Click, List };
 
-// A minimal single-line edit painted like core/ui SearchBox, but with its own placeholder.
-struct Edit {
-    std::wstring text;
-    size_t caret = 0;
-    std::wstring placeholder;
-
-    void Set(const std::wstring& s) { text = s; caret = text.size(); }
-    bool OnChar(wchar_t ch) {
-        if (ch == 0x08) {   // backspace
-            if (caret > 0) { text.erase(caret - 1, 1); caret--; return true; }
-            return false;
-        }
-        if (ch < 0x20) return false;
-        text.insert(text.begin() + caret, ch); caret++;
-        return true;
-    }
-    bool OnKey(WPARAM vk) {
-        switch (vk) {
-            case VK_DELETE: if (caret < text.size()) { text.erase(caret, 1); return true; } return false;
-            case VK_LEFT:   if (caret > 0) { caret--; return true; } return false;
-            case VK_RIGHT:  if (caret < text.size()) { caret++; return true; } return false;
-            case VK_HOME:   if (caret != 0) { caret = 0; return true; } return false;
-            case VK_END:    if (caret != text.size()) { caret = text.size(); return true; } return false;
-        }
-        return false;
-    }
-    void Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) const {
-        RoundFill(dc, rc, S(6, c.dpi), c.theme.panel2, focused ? c.theme.accent : c.theme.border);
-        int pad = S(10, c.dpi);
-        RECT tr{rc.left + pad, rc.top, rc.right - pad, rc.bottom};
-        if (text.empty()) {
-            TextLeft(dc, placeholder, tr, c.fonts.ui, c.theme.text3);
-        } else {
-            TextLeft(dc, text, tr, c.fonts.ui, c.theme.text1);
-        }
-        if (focused && !text.empty()) {
-            SelectObject(dc, c.fonts.ui);
-            SIZE sz{0, 0};
-            std::wstring upto = text.substr(0, caret);
-            GetTextExtentPoint32W(dc, upto.c_str(), (int)upto.size(), &sz);
-            VLine(dc, rc.left + pad + sz.cx, rc.top + S(6, c.dpi), rc.bottom - S(6, c.dpi), c.theme.accent);
-        } else if (focused) {
-            VLine(dc, rc.left + pad, rc.top + S(6, c.dpi), rc.bottom - S(6, c.dpi), c.theme.accent);
-        }
-    }
-};
+// Text fields are core/ui TextField (selection, clipboard, context menu).
+using Edit = hx::ui::TextField;
 
 struct Tool { const wchar_t* label; std::wstring target; };
 struct Click { RECT rc; int id; int data; };
@@ -198,6 +154,8 @@ private:
     bool demo_ = false;
 
     Edit path_, args_, work_;
+    Edit* DragEdit() { return path_.Dragging() ? &path_ : args_.Dragging() ? &args_ : work_.Dragging() ? &work_ : nullptr; }
+    const RECT& EditRect(const Edit* e) const { return e == &path_ ? rcPath_ : e == &args_ ? rcArgs_ : rcWork_; }
     Who who_ = Who::ThisAdmin;
     TokenMode mode_ = TokenMode::Full;
     bool allowElevated_ = false;          // OFF at every start, never persisted (rule 4)
@@ -265,7 +223,9 @@ LRESULT RunAsModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS | DLGC_WANTARROWS | DLGC_WANTCHARS;
     case WM_SETCURSOR:
         if (LOWORD(l) == HTCLIENT) {
-            SetCursor(LoadCursorW(nullptr, hoverId_ > 0 ? IDC_HAND : IDC_ARROW));
+            POINT cp; GetCursorPos(&cp); ScreenToClient(h, &cp);
+            bool inEdit = PtInRect(&rcPath_, cp) || PtInRect(&rcArgs_, cp) || PtInRect(&rcWork_, cp);
+            SetCursor(LoadCursorW(nullptr, inEdit ? IDC_IBEAM : hoverId_ > 0 ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
         break;
@@ -292,10 +252,17 @@ LRESULT RunAsModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
         host_->SetStatus(resultLine_.c_str());
         Invalidate();
         return 0;
+    case WM_CAPTURECHANGED:
+        path_.CancelDrag(); args_.CancelDrag(); work_.CancelDrag();
+        return 0;
     case WM_LBUTTONDOWN:
         SetFocus(h);
         [[fallthrough]];
-    case WM_LBUTTONUP: case WM_MOUSEMOVE: case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_CHAR:
+    case WM_LBUTTONDBLCLK: case WM_RBUTTONDOWN:
+        SetFocus(h);
+        if (m == WM_RBUTTONDOWN) return 0;
+        [[fallthrough]];
+    case WM_LBUTTONUP: case WM_MOUSEMOVE: case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_CHAR: case WM_RBUTTONUP:
         if (OnInput(m, w, l)) Invalidate();
         return 0;
     }
@@ -314,7 +281,7 @@ HWND RunAsModule::Create(IHost& host, HWND parent, const RECT& rc) {
     list_.onActivate = [this](int i) {
         if (i < 0 || i >= (int)runs_.size()) return;
         const LastRun& r = runs_[i];
-        path_.Set(r.path); args_.Set(r.args); work_.Set(L"");
+        path_.SetText(r.path); args_.SetText(r.args); work_.SetText(L"");
         who_ = (Who)r.who; mode_ = (TokenMode)r.mode;
         if (who_ == Who::AnotherUser && !r.account.empty()) {
             for (size_t k = 0; k < accounts_.size(); k++)
@@ -696,7 +663,7 @@ void RunAsModule::Paint(HDC dc, const RECT& rc) {
 
 void RunAsModule::Browse() {
     std::vector<wchar_t> file(2048, 0);
-    const std::wstring& init = path_.text;
+    const std::wstring& init = path_.Text();
     size_t n = std::min(init.size(), (size_t)2046);
     std::copy(init.begin(), init.begin() + n, file.begin());
     OPENFILENAMEW ofn{};
@@ -707,7 +674,7 @@ void RunAsModule::Browse() {
     ofn.nMaxFile = 2048;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     if (GetOpenFileNameW(&ofn)) {
-        path_.Set(file.data());
+        path_.SetText(file.data());
         focus_ = Focus::Path;
         Invalidate();
     }
@@ -787,7 +754,7 @@ void RunAsModule::DoRun(const LaunchRequest& req) {
 }
 
 void RunAsModule::RunTarget() {
-    if (path_.text.empty()) {
+    if (path_.Text().empty()) {
         resultLine_ = L"Choose a program or file first.";
         resultBad_ = true;
         Invalidate();
@@ -795,9 +762,12 @@ void RunAsModule::RunTarget() {
     }
     if (!Gate(who_)) return;
     LaunchRequest req;
-    req.path = path_.text;
-    req.args = args_.text;
-    req.workingDir = work_.text;
+    req.path = path_.Text();
+    // Explorer's "Copy as path" wraps the path in quotes; the launch wants it bare.
+    if (req.path.size() >= 2 && req.path.front() == L'"' && req.path.back() == L'"')
+        req.path = req.path.substr(1, req.path.size() - 2);
+    req.args = args_.Text();
+    req.workingDir = work_.Text();
     req.who = who_;
     req.mode = mode_;
     ZeroPassword();
@@ -897,6 +867,10 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     POINT p{x, y};
     switch (msg) {
     case WM_MOUSEMOVE: {
+        if (Edit* e = DragEdit()) {
+            if (!(w & MK_LBUTTON)) { e->CancelDrag(); return true; }   // button released elsewhere
+            return e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);
+        }
         int nid = -1, nd = 0;
         for (int i = (int)clicks_.size() - 1; i >= 0; i--)
             if (PtInRect(&clicks_[i].rc, p)) { nid = clicks_[i].id; nd = clicks_[i].data; break; }
@@ -905,9 +879,9 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         return ch;
     }
     case WM_LBUTTONDOWN: {
-        if (PtInRect(&rcPath_, p)) { focus_ = Focus::Path; return true; }
-        if (PtInRect(&rcArgs_, p)) { focus_ = Focus::Args; return true; }
-        if (PtInRect(&rcWork_, p)) { focus_ = Focus::Work; return true; }
+        if (PtInRect(&rcPath_, p)) { focus_ = Focus::Path; path_.OnMouse(hwnd_, msg, x, y, rcPath_, c); return true; }
+        if (PtInRect(&rcArgs_, p)) { focus_ = Focus::Args; args_.OnMouse(hwnd_, msg, x, y, rcArgs_, c); return true; }
+        if (PtInRect(&rcWork_, p)) { focus_ = Focus::Work; work_.OnMouse(hwnd_, msg, x, y, rcWork_, c); return true; }
         if (PtInRect(&rcList_, p)) {
             focus_ = Focus::List;
             list_.OnMouse(msg, x, y, rcList_, c);
@@ -922,7 +896,18 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         return false;
     }
     case WM_LBUTTONUP:
+        if (Edit* e = DragEdit()) return e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);
         return list_.OnMouse(msg, x, y, rcList_, c);
+    case WM_LBUTTONDBLCLK: case WM_RBUTTONUP: {
+        Edit* e = PtInRect(&rcPath_, p) ? &path_ : PtInRect(&rcArgs_, p) ? &args_ : PtInRect(&rcWork_, p) ? &work_ : nullptr;
+        // A double-click on the history list is its re-fill gesture (the list times the second
+        // button-down); anywhere else it is ignored, so a double-click can't run a button twice.
+        if (!e) return msg == WM_LBUTTONDBLCLK && PtInRect(&rcList_, p) ? OnInput(WM_LBUTTONDOWN, w, l) : false;
+        focus_ = e == &path_ ? Focus::Path : e == &args_ ? Focus::Args : Focus::Work;
+        if (msg == WM_RBUTTONUP) Invalidate();   // show the focus before the menu opens
+        e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);
+        return true;
+    }
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(w);
         POINT sp{x, y}; ScreenToClient(hwnd_, &sp);
@@ -940,9 +925,9 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         WPARAM vk = w;
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (vk == VK_TAB) { CycleFocusStops(shift); return true; }
-        if (focus_ == Focus::Path) { if (vk == VK_RETURN) { RunTarget(); return true; } return path_.OnKey(vk); }
-        if (focus_ == Focus::Args) { if (vk == VK_RETURN) { RunTarget(); return true; } return args_.OnKey(vk); }
-        if (focus_ == Focus::Work) { if (vk == VK_RETURN) { RunTarget(); return true; } return work_.OnKey(vk); }
+        if (focus_ == Focus::Path) { if (vk == VK_RETURN) { RunTarget(); return true; } return path_.OnKey(vk, hwnd_); }
+        if (focus_ == Focus::Args) { if (vk == VK_RETURN) { RunTarget(); return true; } return args_.OnKey(vk, hwnd_); }
+        if (focus_ == Focus::Work) { if (vk == VK_RETURN) { RunTarget(); return true; } return work_.OnKey(vk, hwnd_); }
         if (focus_ == Focus::List) {
             if (vk == VK_UP || vk == VK_DOWN || vk == VK_PRIOR || vk == VK_NEXT ||
                 vk == VK_HOME || vk == VK_END || vk == VK_RETURN) {
