@@ -141,8 +141,10 @@ name<TAB><preset name>
   between items; an item name that is empty, over 256 characters, or holds a control character, `\` or `/`, or
   starts or ends with a space; a preset name that is empty, over 80 characters, holds a control character, or
   starts or ends with a space; more than 4096 items; an empty file, no items, or a file over 1 MiB.
-- `ImportPresetFile` checks attributes before it opens the file: a folder, or a file with
-  `RECALL_ON_DATA_ACCESS`, `RECALL_ON_OPEN` or `OFFLINE` (a cloud placeholder), is refused unread (hard rule 1).
+- `ImportPresetFile` opens one handle on the entry itself (`FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`)
+  and reads its attributes from that handle (`FileAttributeTagInfo`) before any byte. A folder, a link (reparse point,
+  so a link to a placeholder can't trigger a recall), or a file with `RECALL_ON_DATA_ACCESS`, `RECALL_ON_OPEN` or
+  `OFFLINE` (a cloud placeholder) is refused unread (hard rule 1). It reads in a loop up to one byte past 1 MiB.
 - Removing a preset writes a tombstone `presets\removed-<stamp>.txt` (`HXPRESET-REMOVED\t1`, then the file name);
   no file in the data folder is ever deleted. The list skips tombstoned files.
 - Export opens with `CREATE_NEW`. If the file exists, it says so and writes nothing; the user picks another name.
@@ -150,7 +152,8 @@ name<TAB><preset name>
 **Measurement** (`measure\measure-<yyyyMMdd-HHmmss>[-N].txt`, kind `measure`), in the shared `HXSVC` format:
 - `M` lines: `boot` (UTC boot time, from now minus `GetTickCount64`), `build`, `created` (UTC), `machine`, `phase`
   (`before` or `after`), `plan` (the plan's title, or empty), `uptime` (whole minutes after boot).
-- `V` lines: `ram_used` and `ram_total` (`ullTotalPhys - ullAvailPhys`, `ullTotalPhys`), `commit` and
+- `V` lines: `ram_used` and `ram_total` (`ullTotalPhys - ullAvailPhys`, `ullTotalPhys`: the physical memory Windows
+  can use, a little less than installed), `commit` and
   `commit_limit` (`ullTotalPageFile - ullAvailPageFile`, `ullTotalPageFile`), `processes` and `svchost` (a Toolhelp32
   snapshot; `svchost.exe` by image name, case-insensitive). Bytes for memory.
 - The reader refuses a record that is missing any of these values.
@@ -365,6 +368,9 @@ name<TAB><preset name>
     items Hadron's KB doesn't know (third-party, as for built-in presets: e.g. `Fax` and `nvlddmkm` on the fixture), and
     drivers the KB doesn't mark safe to change. Each is dropped with one note naming them ("item(s) that every preset
     leaves alone"). Unlike a built-in preset, a custom one may raise a start type (it is the user's own list).
+    A stricter start for an item whose KB entry names hardware gets `BuildPreset`'s hardware check (review R2): kept
+    (blocked) while the hardware is present or was seen, unticked for a hot-plug class never seen, kept without
+    hardware information; the row shows the evidence.
   - *Rows Hadron can't do.* Missing items, items of the other tab and unreadable items are counted in notes. A build
     other than the PC's adds a note. TrustedInstaller-owned rows are blocked unless the TI toggle is on, as in every plan.
   - *Where a preset comes from.* "Save ticks as custom preset" on a preset or single plan saves the included,
@@ -383,7 +389,11 @@ name<TAB><preset name>
   - The fairness text is "test it" guidance without numbers: same apps, same minutes after boot, repeat the pair,
     and test frame rates in the game itself.
   - Measurements of another machine (machine GUID) are never paired. A pair whose minutes after boot, Windows build
-    or installed memory differ is shown with a warning saying so.
+    or usable physical memory differ is shown with a warning saying so.
+  - "Between them" (review R6) names every Hadron apply of that machine whose undo log has a `B` record and at least
+    one row, stamped after the before was recorded and before the after's boot (`AppliesBetween`). When there is
+    none it says "No Hadron apply was recorded between these two: the difference is not from a Hadron change."
+  - The basis reads "owner-measured (measured on this PC by you)".
 
 ## Deviations from the spec
 - **Hardware evidence is devnode-based only** (spec §5.5; Analyze docs D3; DECISIONS.md, proxy). Two things the

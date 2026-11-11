@@ -15,7 +15,8 @@ the summary for review.
     dependency check, confirm, snapshot, undo log and apply, unchanged. The undo log's source is
     `custom:<tab>:<name>`.
   - The guard is the built-in presets' guard: never-touch, never-preset, no KB entry (third-party), drivers not marked
-    safe. Dropped items are named in one plan note.
+    safe. Dropped items are named in one plan note. A stricter start for a hardware-bound item gets the presets'
+    hardware check (kept while the hardware is present or seen, unticked for an unseen hot-plug class).
   - Plain-text format `HXPRESET 1` with a `hadron`/`build`/`tab`/`name` header and one `name<TAB>start-type` line
     per item. The parser is our own and strict; each refusal says which line failed.
   - Export: a Browse (Save as) dialog, then `CREATE_NEW`. An existing file is refused with a message and never replaced.
@@ -29,13 +30,15 @@ the summary for review.
     page (Console Ctrl+M) offers both.
   - The compare table is titled `owner-measured`. It shows Before, After, and After − before, plus each side's
     conditions.
-  - Warnings appear when minutes after boot, build or installed RAM differ.
+  - Warnings appear when minutes after boot, build or usable physical memory differ.
+  - "Between them" names the Hadron applies recorded between the before and the after's boot, from the undo logs,
+    or says that none was, so the difference is not from a Hadron change.
   - "Test it: a fair comparison" gives the guidance: same apps, same minutes after boot, repeat the pair, test frame
     rates in the game. It contains no numbers.
   - The page says Hadron never predicts savings. The only numbers shown are recorded values.
 
 ## Tests
-- `--selftest`: 337 checks, 0 failed (282 on main). New checks:
+- `--selftest`: 346 checks, 0 failed (282 on main). New checks:
   - export → file → import → export byte-identical;
   - an export onto an existing file is refused;
   - 21 import refusals plus the 4096-item cap, each with its line;
@@ -45,6 +48,9 @@ the summary for review.
   - a custom apply on the fake backend, then Undo;
   - store save, duplicate refusal and remove;
   - the measurement record byte round trip, the missing-value refusal, pairing and a live `TakeMeasurement`;
+  - review fixes: the import attribute check (folder, link, each placeholder attribute), a folder and an oversized file
+    refused through the handle, the hardware guard (bthserv kept, FrameServer unticked, no hardware information kept),
+    `AppliesBetween`, a queued rebuild outside the plan view, "no plan opened" reasons, the "Between them" text;
   - UI flows: the save form, the import refusal and acceptance, Console F12/F2/Esc, and the 800x560 click-target
     layout of both pages in both layouts.
 - `tests/tools/services_check.sh`: passes (KB, fixture, both selftests, 10 + 1 golden plans, screenshots).
@@ -52,8 +58,9 @@ the summary for review.
   new warnings.
 
 ## Goldens
-- New: `tests/golden/services/plan-services-custom.txt`, the fixture's "Gaming rig" custom plan. Every existing
-  golden is byte-unchanged.
+- New: `tests/golden/services/plan-services-custom.txt`, the fixture's "Gaming rig" custom plan (13 items, with
+  bthserv and FrameServer for the hardware guard: bthserv kept, FrameServer and Spooler unticked as hot-plug classes).
+  Every existing golden is byte-unchanged.
 
 ## Screenshots
 `services-{presets,import-error,plan-custom,save-preset,measure}-{baseline,console}.png`, dark theme, rendered by
@@ -62,8 +69,9 @@ the summary for review.
 ## Open items
 - `CMakeLists.txt` (root) changed: it adds `custom.cpp` and `measure.cpp`, the `HX_HADRON_VERSION` define for the
   preset header, and `comdlg32` for the Open/Save dialogs. No `core/` change was needed.
-- The `OFFLINE`/recall-attribute import refusal is not exercised under Wine: the file system there doesn't keep the
-  attribute. Windows CI runs it.
+- The `OFFLINE`/recall-attribute import refusal on a real file is not exercised under Wine: the file system there
+  doesn't keep the attribute. Windows CI runs it; the attribute check itself is tested on every attribute.
+- An import now refuses a link (reparse point) to a preset file too; the user picks the target instead.
 - `Fax` and third-party items are dropped from custom presets because they have no KB entry, as for built-in presets.
   If the KB gains an entry for them (fix/svcdrv-kb), the drop note changes and `plan-services-custom.txt` may need
   regenerating.
