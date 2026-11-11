@@ -17,8 +17,9 @@ Fields
   basis       owner-measured | published | reasoning | folklore   (required for tier 1; rule 7)
   basis_note  owner-measured: the conditions; published: the URL(s); otherwise one line
 
-Numbers (rule 7): every quantity in user-facing text is written [[text|kind|ref]], kind owner-measured (ref =
-conditions) or published (ref = https URL(s) actually read). genkb.py renders the plain text, emits the markers as the
+Numbers (rule 7): every quantity in user-facing text is written [[text|kind|ref]], kind owner-measured or published.
+ref is one or more @KEY names (space-separated) from SOURCES: OWNER* keys hold an owner-measured condition, the others
+an https URL actually read. genkb.py renders the plain text, emits the markers as the
 K line's sources field, and fails on any unmarked number. A number with no source is rewritten without it.
 Never invent a URL; never cite a page that was not read.
 """
@@ -30,15 +31,10 @@ def R(power='', balanced='', single='', multi='', latency=''):
     return dict(power=power, balanced=balanced, single=single, multi=multi, latency=latency)
 
 
-def _src(text):
-    """Expand @KEY references (in [[...]] markers and basis notes) to SOURCES values."""
-    import re
-    return re.sub(r'@([A-Z0-9_]+)', lambda m: SOURCES[m.group(1)], text)
-
-
 def E(rx, title, expl, recs, note, impact, basis='', basis_note=''):
-    return dict(rx=rx, title=title, expl=_src(expl), recs={g: _src(v) for g, v in recs.items()}, note=_src(note),
-                impact=tuple(_src(t) for t in impact), basis=basis, basis_note=_src(basis_note))
+    """One KB record. @KEY references stay unexpanded here; genkb.py checks and expands them."""
+    return dict(rx=rx, title=title, expl=expl, recs=recs, note=note, impact=tuple(impact),
+                basis=basis, basis_note=basis_note)
 
 
 def fx(fps, games=None, apps=None, claim=''):
@@ -46,7 +42,8 @@ def fx(fps, games=None, apps=None, claim=''):
 
 
 # ---- sources actually read (cited in [[...]] markers and basis notes) ----
-# A marker ref may name these as @KEY; E() expands them. Each URL was fetched and read on 2026-11-11.
+# Marker refs and basis notes name these as @KEY; genkb.py expands them. Each URL was fetched and read on 2026-11-11.
+# Keys starting with OWNER are owner-measured conditions; every other key must be an https URL.
 SOURCES = {
     # Intel spec page, Core i7-14700K: 20 cores (8P + 12E), 28 threads, max turbo 5.6 GHz, TBM 3.0 5.6 GHz,
     # P-core max turbo 5.5 GHz, P-core base 3.4 GHz, base power 125 W, max turbo power 253 W, TjMax 100 C.
@@ -56,11 +53,12 @@ SOURCES = {
     'REG12B': 'https://www.theregister.com/2024/09/26/intel_0x12b_raptor_lake/',
     # Tom's Hardware quoting Intel: 0x129 'will limit voltage requests above 1.55V'.
     'TOMS129': 'https://www.tomshardware.com/pc-components/cpus/intel-details-microcode-update-patch-has-negligible-performance-impacts-requires-bios-update',
-    # ComputerBase, 2024-07: Intel Default Settings on a Z790 board for the i7-14700K: PL1 = PL2 = 253 W,
-    # ICCMax 307 A, Performance profile only.
+    # ComputerBase 2024-07-17/18: Asus ROG Maximus Z790 Dark Hero with "Intel Default Settings": i7-14700K
+    # PL1 = PL2 = 253 W, ICCMax 307 A, Performance profile only. Secondary: a board vendor's implementation;
+    # Intel's own table on that page is an image.
     'CB_IDS': 'https://www.computerbase.de/2024-07/asus-mainboard-intel-default-settings/',
     # The owner's own measurement (owner-measured basis): not a published source.
-    'OWNERPF': "owner's i9-9900K, Overwatch, 1% lows, about +20% with the Hardware Prefetcher disabled",
+    'OWNERPF': "Hadron's author: i9-9900K, Overwatch, 1% lows, about +20% with the Hardware Prefetcher disabled",
 }
 
 # ---- shared strings ----
@@ -71,7 +69,8 @@ VOLT = ('No direct fps effect. Voltage only decides stability, temperatures and 
         'only if you are hitting thermal or power limits.')
 KF = 'On CPUs without integrated graphics (Intel F models) this setting has no effect.'
 MEMTEST = ('Change one timing at a time and test with a memory stress test (TestMem5 with an extreme/absolut config, Karhu, '
-           'or y-cruncher) for at least an hour before trusting it. Memory errors corrupt files silently.')
+           'or y-cruncher) in a long run before trusting it; a short pass can miss errors that appear only once the sticks '
+           'warm up. Memory errors can corrupt files silently.')
 
 
 def TIGHT(what='Lower'):
@@ -80,10 +79,10 @@ def TIGHT(what='Lower'):
 
 
 N0 = ('None.', 'None.', 'None.', '')
-MEMFX_BIG = fx('One of the timings that most affects memory latency, which shows up directly in CPU-bound 1% lows. Tightening it from the XMP value can give a few percent in CPU-bound games.',
+MEMFX_BIG = fx('One of the timings that most affects memory latency, which shows up in CPU-bound 1% lows. Tightening it from the XMP value can help; test it: compare 1% lows in a CPU-bound scene over several identical runs.',
                'Smaller effect unless the game is CPU-bound.', 'Small for most apps. Memory-heavy work (compression, simulation) benefits.',
                'XMP timings are loose on purpose so every kit boots. Most kits have headroom, but each kit is different.')
-MEMFX_MID = fx('Small but real effect on memory latency or bandwidth in CPU-bound games, usually under a few percent.',
+MEMFX_MID = fx('Small effect on memory latency or bandwidth in CPU-bound games. Test it: compare 1% lows over several identical runs.',
                'Small.', 'Small.', '')
 MEMFX_SMALL = fx('Tiny. Rarely worth tuning by hand.', 'Tiny.', 'Tiny.', '')
 SIGFX = fx('None directly. This only decides whether a memory speed or timing set is stable.', None, None,
@@ -118,11 +117,11 @@ E('Turbo Boost Max Technology 3\\.0', 'Turbo Boost Max 3.0',
   recs=R(power='Enabled', balanced='Enabled', single='Enabled', multi='Enabled', latency='~Either. No effect with a fixed ratio (recommended for this goal)'),
   note='No effect under a fixed all-core ratio.',
   impact=(
-    'Small. Games use more than the two favoured cores. None under a fixed ratio.',
+    'Small. Games use more than the favoured cores. None under a fixed ratio.',
     'Small.',
     'Lightly threaded apps gain one speed bin on the favoured cores (Intel lists [[5.6 GHz|published|@ARK]] with Turbo Boost Max 3.0 vs [[5.5 GHz|published|@ARK]] P-core max turbo for an i7-14700K).',
     "Marketing makes it sound bigger than it is. On an i7-14700K the favoured cores are [[about 100 MHz|published|@ARK]] faster (Intel's spec page lists both clocks)."),
-  basis='published', basis_note='@ARK'),
+  basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^EIST$', 'EIST (SpeedStep)',
   expl='Lets the CPU drop its clock and voltage when lightly loaded. Saves a lot of idle power. Turning it off keeps clocks high at all times.',
   recs=R(power='Enabled', balanced='Enabled', single='Enabled', multi='Enabled', latency='~Either. No effect with a fixed ratio'),
@@ -144,11 +143,11 @@ E('^Intel Speed Shift Technology$', 'Intel Speed Shift (HWP)',
     'Accurate for dynamic clocks. Irrelevant with a fixed ratio and EIST off.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Intel C-State$|^CPU C-States?(Support)?$|^C-State$', 'CPU C-States',
-  expl='Allows idle cores to power down. Saves idle power and heat, and frees power/thermal headroom for busy cores. Waking from a deep C-state takes tens of microseconds.',
+  expl='Allows idle cores to power down. Saves idle power and heat, and frees power/thermal headroom for busy cores. Waking from a deep C-state takes longer than from a shallow one.',
   recs=R(power='Enabled', balanced='Auto', single='Enabled', multi='Auto', latency='~Disabled lowers wake-up latency but raises idle power/heat'),
-  note="With C-states off, idle cores stay at load voltage and run warmer. The 13th/14th-gen damage came mainly from very high voltage requests during boost (Intel's 0x129 microcode limits requests [[above 1.55 V|published|@TOMS129]]). A moderate fixed voltage at idle is a smaller risk, but not zero.",
+  note='With C-states off, idle cores stay at load voltage and run warmer. Intel lists elevated voltage requests during idle and light activity (fixed in microcode [[0x12B|published|@REG12B]]) among the causes of 13th/14th-gen degradation, alongside high requests under load, which 0x129 limits [[above 1.55 V|published|@TOMS129]]. A high fixed voltage at idle is a risk too; keep it as low as your stress tests allow.',
   impact=(
-    'Off can shave microseconds of wake-up time from threads that briefly sleep. Some players measure slightly better 1% lows or input latency, but it is often within run-to-run noise. Busy game threads rarely reach deep C-states.',
+    'Off can shave microseconds of wake-up time from threads that briefly sleep. Any gain in 1% lows or input latency is small and easily lost in run-to-run noise; test it with a frame-time logger over several identical runs each way. Busy game threads rarely reach deep C-states.',
     'Usually no measurable change.',
     'No throughput change. Idle power and temperatures rise.',
     'Intel\'s "no performance cost" is true for averages and slightly overstated for latency. Tweak-guide claims of big fps gains are overstated.'),
@@ -214,23 +213,23 @@ E('^Race To Halt', 'Race To Halt',
     'Small either way.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Hardware Prefetcher$', 'Hardware Prefetcher',
-  expl="Predicts which memory the CPU will need next and loads it into cache early. The effect depends on the workload. It helps code that reads memory in order: loading, decompression, encoding, most apps. It can hurt code with random access patterns, such as many game engines and databases, and all-core work that already saturates memory bandwidth. In those cases wrong guesses evict useful data and waste bandwidth. One measurement: Hadron's author got [[about +20%|owner-measured|@OWNERPF]] better 1% lows in Overwatch with it off on his earlier i9-9900K. That is a different CPU from his current i7-14700KF (and probably from yours), and one game. Results differ by CPU and game, so test it on yours rather than assume.",
+  expl="Predicts which memory the CPU will need next and loads it into cache early. The effect depends on the workload. It helps code that reads memory in order: loading, decompression, encoding, most apps. It can hurt code with random access patterns, such as many game engines and databases, and all-core work that already saturates memory bandwidth. In those cases wrong guesses evict useful data and waste bandwidth. One measurement, not a rule: Hadron's author measured [[about +20%|owner-measured|@OWNERPF]] better 1% lows in Overwatch with it disabled, on an i9-9900K. That is one game on a different, older CPU, so it may not carry over to yours. Test it: same scene or replay, compare 1% lows over 3+ runs each way.",
   recs=R(power='Enabled', balanced='Enabled', single='~Test both. Usually Enabled helps single-thread apps; some games run better Disabled', multi='~Test both. Disabled can help bandwidth-bound all-core loads; Enabled helps streaming work (encoding, compression)', latency='~Test both in your own games and compare 1% lows over several identical runs'),
   note='How to test: same scene or replay, uncapped fps if possible, compare 1% and 0.1% lows across 3+ runs each way. AIDA64 latency alone does not tell you which is faster in games. 12th-14th gen have much larger L2 caches per core than older Intel CPUs, so a result from a 9900K may not carry over.',
   impact=(
-    "Can help lows a lot in some shooters and hurt in others. Hadron's author measured [[about +20%|owner-measured|@OWNERPF]] better 1% lows in Overwatch with it off, on an i9-9900K, a different CPU from his current i7-14700KF. Test it per game: same scene, compare 1% lows over several runs each way.",
+    "Varies by game and CPU. Hadron's author measured [[about +20%|owner-measured|@OWNERPF]] better 1% lows in Overwatch with it disabled on an i9-9900K, a different CPU. Test it per game: same scene, compare 1% lows over several runs each way.",
     'Mixed. Streaming open-world games lean towards Enabled.',
     'Enabled usually wins for encoding, compression, compiling and loading. Off can help some bandwidth-bound all-core work.',
     'Intel ships it on because it wins on average across benchmarks. "Always better" is overstated for random-access game engines.'),
-  basis='owner-measured', basis_note="@OWNERPF (a different CPU from the owner's current i7-14700KF). The rest of the entry is reasoning from how the hardware works."),
+  basis='owner-measured', basis_note='@OWNERPF. A different CPU; test it on yours. The rest of the entry is reasoning from how the hardware works.'),
 E('^Adjacent Cache Line Prefetch$', 'Adjacent Cache Line Prefetch',
-  expl='Always fetches the paired 64-byte neighbour of every line the CPU requests. It helps sequential access, but on random access it doubles memory traffic for nothing. It is the prefetcher most often disabled for bandwidth-heavy servers and HPC.',
+  expl='When a cache line is loaded into L2, also fetches the neighbouring line that completes its aligned pair. That helps sequential access; with scattered (random) access the extra line is often unused, which wastes memory bandwidth.',
   recs=R(power='Enabled', balanced='Enabled', single='~Test both. Usually Enabled', multi='~Test both. Disabled often helps bandwidth-bound all-core loads', latency='~Test both in your games. Disabled can improve 1% lows in random-access-heavy titles'),
   note='Test it separately from the Hardware Prefetcher so you know which one made the difference.',
   impact=(
     'Off can improve lows in random-access-heavy games, and it is game-dependent. Test it separately from the Hardware Prefetcher.',
     'Mixed.',
-    'Enabled for most apps. Off is a common win for bandwidth-bound servers and HPC.',
+    'Enabled for most apps. Off can help some bandwidth-bound all-core work; time it both ways.',
     'Same as the Hardware Prefetcher: tuned for the average benchmark, not for every game.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Intel Virtualization Tech$', 'Intel VT-x',
@@ -238,10 +237,10 @@ E('^Intel Virtualization Tech$', 'Intel VT-x',
   recs=R(power='~Your choice', balanced='~Enabled if you use VMs/WSL2', single='~Your choice', multi='~Your choice', latency='~Your choice'),
   note='',
   impact=(
-    'VT-x itself costs nothing. Windows features that need it (Memory Integrity/VBS, Hyper-V, WSL2) can cost a few percent of fps and some 1% lows in CPU-bound games.',
+    'VT-x itself costs nothing. Windows features that need it (Memory Integrity/VBS, Hyper-V, WSL2) can cost fps in some CPU-bound games; test with Memory Integrity on and off.',
     'Same as FPS titles.',
     'Required for VMs, WSL2, Docker and Sandbox.',
-    'Microsoft says VBS has minimal impact, but independent game tests have measured losses in some titles. Turning VT-x off only "helps" because it forces VBS off. Turning Memory Integrity off in Windows gets the same result.'),
+    'Microsoft says VBS has minimal impact. Whether it costs fps on your system depends on the game: test it by running the same benchmark with Memory Integrity on and off. Turning VT-x off only "helps" because it forces VBS off; turning Memory Integrity off in Windows gets the same result.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Intel VT-D Tech$', 'Intel VT-d',
   expl='Lets VMs use real devices directly (IOMMU) and protects against rogue DMA. No effect on gaming performance.',
@@ -278,7 +277,7 @@ E('^Game Boost$', 'Game Boost (MSI)',
   recs=R(power='Disabled', balanced='Disabled', single='Disabled', multi='Disabled', latency='Disabled'),
   note='Turn it off when tuning manually.',
   impact=(
-    'Depends on the preset. It is generic and usually requests high voltage, so a manual tune beats it.',
+    'Depends on the preset. It is generic and can request more voltage than your CPU needs, so a manual tune can do better.',
     'Same as FPS titles.',
     'Same as games.',
     'One-click overclock marketing. It often overvolts, which is a bad idea on 14th gen.'),
@@ -318,7 +317,7 @@ E('^Ring Ratio$|^Ring Ratio Min$', 'Ring (cache) ratio',
   recs=R(power='~Auto', balanced='~Auto', single='~Highest stable', multi='~Highest stable', latency='~Highest stable'),
   note='',
   impact=(
-    'One of the bigger knobs for CPU-bound, high-fps games: a higher ring clock lowers cache and memory latency. It can be worth a few percent.',
+    'One of the bigger knobs for CPU-bound, high-fps games: a higher ring clock lowers cache and memory latency. Test it: compare 1% lows in a CPU-bound scene over several identical runs.',
     'Smaller effect unless CPU-bound.',
     'Small for most apps.',
     'Underrated by marketing, which focuses on core clocks.'),
@@ -328,7 +327,7 @@ E('^Ring Down Bin$', 'Ring Down Bin',
   recs=R(power='Enabled', balanced='Auto', single='Disabled', multi='~Either', latency='Disabled'),
   note='',
   impact=(
-    'Disabled keeps the ring clock higher under load. Small but real gain in CPU-bound games.',
+    'Disabled keeps the ring clock higher under load, which can help CPU-bound games slightly; test it as for Ring Ratio.',
     'Small.',
     'Small.',
     'Accurate.'),
@@ -344,7 +343,7 @@ E('^CPU Core Voltage Mode$', 'CPU Core Voltage Mode',
     'Voltage is not performance. It only lets a clock be stable.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^CPU Core Voltage$', 'CPU Core Voltage',
-  expl="Voltage used in Override/Adaptive mode (in mV). Intel's microcode (0x129 and newer) limits voltage requests [[above 1.55 V|published|@TOMS129]]; stay well below that.",
+  expl="Voltage used in Override/Adaptive mode (in mV). Intel's microcode (0x129 and newer) limits voltage requests [[above 1.55 V|published|@TOMS129 @REG12B]]; stay well below that.",
   recs=R(power='~Auto', balanced='~Auto', single='~Auto', multi='~Lowest stable', latency='~Lowest stable'),
   note=SAFE14,
   impact=(
@@ -352,7 +351,7 @@ E('^CPU Core Voltage$', 'CPU Core Voltage',
     VOLT,
     VOLT,
     'Voltage is not performance. It only lets a clock be stable.'),
-  basis='published', basis_note='@TOMS129'),
+  basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^CPU Lite Load$', 'CPU Lite Load (AC loadline)',
   expl="MSI's voltage presets. Lower mode numbers request less voltage: cooler and safer for 14th gen, but too low causes crashes.",
   recs=R(power='~Lower mode, then stress-test', balanced='~Intel Default', single='~Intel Default', multi='~Lowest stable', latency='~Intel Default'),
@@ -361,7 +360,7 @@ E('^CPU Lite Load$', 'CPU Lite Load (AC loadline)',
     VOLT,
     VOLT,
     VOLT,
-    "MSI's higher Lite Load modes overvolt for stability margin. Lower modes are often stable and run cooler."),
+    "MSI's higher Lite Load modes overvolt for stability margin. Lower modes request less voltage and run cooler if they stay stable; stress-test each step."),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^CPU Lite Load Control$', 'CPU Lite Load Control',
   expl='Selects Normal (preset modes) or Advanced (manual AC/DC loadline).',
@@ -412,17 +411,17 @@ E('^Thermal Velocity Boost$|^Enhanced Thermal Velocity Boost$|^TVB Ratio Clippin
     'Same as FPS titles.',
     'Same as games.',
     'The fix for the eTVB algorithm lives in the microcode, not in this switch: it arrived in [[0x125|published|@REG12B]] and is included in [[0x12B|published|@REG12B]].'),
-  basis='published', basis_note='@REG12B'),
+  basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^IA ICC Max Current Limit Override$', 'IA ICCMax',
-  expl="Maximum current the CPU cores may draw. Intel's default setting for the i7-14700K is [[307 A|published|@CB_IDS]] (0 = default).",
-  recs=R(power='~0 (default)', balanced='~0 (default)', single='~0 (default)', multi="~Do not exceed Intel's default ([[307 A|published|@CB_IDS]] for an i7-14700K)", latency='~0 (default)'),
+  expl='Maximum current the CPU cores may draw. The value is in quarter-amp steps, as the BIOS help text explains (0 = default). With Intel Default Settings (Performance profile), as an Asus Z790 board applies them, an i7-14700K is set to [[307 A|published|@CB_IDS]], which is entered here as 1228. Other CPUs differ; check yours.',
+  recs=R(power='~0 (default)', balanced='~0 (default)', single='~0 (default)', multi="~Do not raise it above your CPU's Intel default", latency='~0 (default)'),
   note=SAFE14,
   impact=(
     'None. Games do not reach the current limit.',
     'None.',
     'Caps peak current in heavy all-core work.',
     'Raising it mainly lets current and voltage climb in all-core loads. No gaming benefit.'),
-  basis='published', basis_note='@CB_IDS'),
+  basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Intel Adaptive Thermal Monitor$', 'Thermal throttling protection',
   expl='Throttles the CPU at its maximum temperature. Leave enabled.',
   recs=R(power='Enabled', balanced='Enabled', single='Enabled', multi='Enabled', latency='Enabled'),
@@ -458,14 +457,14 @@ E('^Active E-Cores$', 'Active E-Cores',
   recs=R(power='All', balanced='All', single='All', multi='All', latency='~All on Windows 11; test 0 on Windows 10'),
   note='',
   impact=(
-    'Off can improve lows in some titles. This is mostly on Windows 10, where game and background threads can land on E-cores, and it can let the ring clock higher. The gain is smaller on Windows 11.',
+    'Off can improve lows in some titles. This is mostly on Windows 10, where game and background threads can land on E-cores, and on some CPUs it can let the ring clock higher. The gain is smaller on Windows 11.',
     'Heavily threaded games and shader compilation can get worse with E-cores off.',
     'Large multi-core loss: an i7-14700K has [[12 of its 20 cores|published|@ARK]] as E-cores.',
     'Intel says Thread Director makes hybrid scheduling seamless. That needs Windows 11, and even there it is not perfect. "E-cores always hurt games" is overstated too.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Extreme Memory Profile\\(XMP\\)$', 'XMP',
   expl='Runs the RAM at its rated speed and timings instead of the slow JEDEC default.',
-  recs=R(power='~Disabled saves a few watts', balanced='Profile 1', single='Profile 1', multi='Profile 1', latency='Profile 1'),
+  recs=R(power='~Disabled saves a little power', balanced='Profile 1', single='Profile 1', multi='Profile 1', latency='Profile 1'),
   note="Stress-test memory after enabling; the fastest kits are hard on the CPU's memory controller.",
   impact=(
     'One of the biggest levers: memory speed and latency strongly affect CPU-bound 1% lows, often a clear gain vs the JEDEC default. Test it: compare 1% lows in a CPU-bound scene with a frame-time logger over a few identical runs.',
@@ -494,13 +493,13 @@ E('^Memory Fast Boot$', 'Memory Fast Boot',
     'Only affects boot time.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('ASPM|^L1 Substates$|^PCIe Native Power Management$', 'PCIe ASPM (link power saving)',
-  expl='Lets PCIe links (GPU, NVMe, chipset) drop into low-power states. Saves several watts at idle; waking adds microseconds and can cause stutter with some devices.',
+  expl='Lets PCIe links (GPU, NVMe, chipset) drop into low-power states. Saves some idle power; waking adds microseconds and can cause stutter with some devices.',
   recs=R(power='~Enabled / Auto / L1', balanced='Auto', single='Auto', multi='Auto', latency='Disabled'),
   note='',
   impact=(
     'The GPU link stays active under load, so fps rarely changes. A few devices have buggy wake-ups that cause hitches.',
     'Rarely measurable.',
-    'Minor. ASPM on saves a few watts at idle.',
+    'Minor. ASPM on saves some idle power.',
     'Tweak guides overstate it. The vendor "no impact" is mostly true, though some devices are buggy.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Re-Size BAR Support$|^PCIE Resizable BAR Support$', 'Resizable BAR',
@@ -511,7 +510,7 @@ E('^Re-Size BAR Support$|^PCIE Resizable BAR Support$', 'Resizable BAR',
     "Usually zero to small in esports shooters, and some titles lose fps. NVIDIA's driver only turns it on for whitelisted games, so enabling it in BIOS is low risk on NVIDIA. On AMD and Intel GPUs it applies to every game.",
     'Some AAA titles gain several percent; a few lose. Test it per game with the same benchmark run on and off.',
     'None.',
-    'Marketing quotes best cases. The real average gain is a few percent and depends on the game.'),
+    'Marketing quotes best cases. The gain depends on the game and GPU; test the games you play.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Above 4G memory|^Above 4GB MMIO', 'Above 4G Decoding',
   expl='Allows devices to use address space above the 32-bit (4G) boundary. Required for Resizable BAR.',
@@ -598,7 +597,7 @@ E('^Security Device Support$|^TPM State$', 'TPM',
   recs=R(power='~Your choice', balanced='~Enable', single='~Your choice', multi='~Your choice', latency='~Enable if your games need it'),
   note='',
   impact=(
-    'Intel PTT has no measured fps cost. The well-known fTPM stutter was an AMD bug.',
+    'Intel PTT has no known fps cost. The well-known fTPM stutter was an AMD bug.',
     NOFX,
     NOFX,
     'Accurate.'),
@@ -751,7 +750,7 @@ E('^Relaxed Ordering$|^Extended Tag$|^No Snoop$|^Maximum Payload$|^Maximum Read 
 E('^DMI Link Speed$|^DMI|^CDR Relock|^Program Static Phase1 Eq$|^New FOM for CPU DMI$|^Bundle\\d+$|^Lane \\d+$|^Fia Programming$|^Compliance Test Mode$|^Assertion on Link Down GPIOs$|^PCIe function swap$|^Detect Non-Compliance Device$|^PCI Express Slot Selection$|^PCI_E\\d Gen Mode$|^Port8xh Decode', 'DMI / PCIe link internals',
   expl="The DMI link connects the CPU to the chipset (everything not on the CPU's own lanes: chipset M.2 slots, SATA, USB, LAN). These set its speed and signal tuning, plus per-lane PCIe options.",
   recs=R(),
-  note='Lowering DMI speed halves chipset bandwidth.',
+  note="Each step down in DMI generation roughly halves the chipset link's bandwidth (shared by chipset M.2, SATA, USB and LAN).",
   impact=N0,
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^RAID\\d+$|^Intel\\(R\\) Optane|^Enable VMD Global Mapping$|^VMD (Config|Mem)', 'RAID / VMD',
@@ -870,7 +869,7 @@ E('^SA GV$|^SAGV Switch Factor|^Threshold For Switch (Up|Down)$|^(First|Second|T
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^iEXPO$|^Memory profile$', 'Memory profile (XMP/EXPO)',
   expl='Loads the speed, timings and voltages stored on the RAM by the manufacturer. Without a profile the RAM runs at slow JEDEC defaults.',
-  recs=R(power='~Disabled saves a few watts', balanced='~Profile 1', single='~Profile 1', multi='~Profile 1', latency='~Profile 1'),
+  recs=R(power='~Disabled saves a little power', balanced='~Profile 1', single='~Profile 1', multi='~Profile 1', latency='~Profile 1'),
   note=MEMTEST,
   impact=(
     'One of the biggest fps settings: XMP vs JEDEC defaults often shows clearly in CPU-bound 1% lows. Test it: compare 1% lows in a CPU-bound scene over a few identical runs.',
@@ -987,7 +986,7 @@ E('^tREFI(x\\d+)?$|^OREFRI$', 'tREFI (refresh interval)',
   recs=R(power='~Auto', balanced='~Auto', single='~Raise after XMP is stable, then test', multi='~Raise after XMP is stable, then test', latency='~Raise after XMP is stable, then test'),
   note='Keep the RAM cool (a fan over the DIMMs helps). Errors from a too-high tREFI may only appear when the sticks get warm. ' + MEMTEST,
   impact=(
-    'Big effect on memory throughput and lows when raised from the conservative default, together with tRFC.',
+    'Raising it from the conservative default can help memory throughput and lows, together with tRFC; test it after stability testing.',
     'Moderate when CPU-bound.',
     'Moderate for memory-heavy work.',
     'Standard spec values are set for worst-case temperature. Most desktops run far cooler, which is why there is headroom.'),
@@ -1107,7 +1106,7 @@ E('^Controller \\d+, Channel \\d+ Control$|^Force Single Rank$|^DDR\\d+_\\d+DPC$
   impact=N0,
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^DRAM Voltage$|^DRAM DIMM[AB]\\d+ Voltage$|^Memory Voltage$|^Eventual DRAM Voltage$|^DRAM Voltage Mode$', 'DRAM VDD voltage',
-  expl='Main supply voltage of the RAM chips. XMP kits run above the JEDEC default voltage; the profile sets the value. More voltage helps tighter timings and higher speeds at the cost of heat.',
+  expl='Main supply voltage of the RAM chips. Most XMP kits run above the JEDEC default voltage; the profile sets the value. More voltage helps tighter timings and higher speeds at the cost of heat.',
   recs=R(power='~Auto', balanced='~Auto (XMP value)', single='~XMP value', multi='~XMP value', latency='~XMP value; raise only in small steps for tuning, with airflow over the DIMMs and a stress test'),
   note='DDR5 errors get more likely as the sticks get hot. Watch DIMM temperature in HWiNFO when raising voltage.',
   impact=VOLTFX,
@@ -1169,7 +1168,7 @@ E('^Numbers of (P|E)-Core of Group|^Target (P|E)-Core Turbo Ratio Group|^(P|E)-C
     ''),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^AVX-?\\d* Support$|^AVX$', 'AVX / AVX-512 instructions',
-  expl='Enables AVX instructions. Disabling AVX2 makes some programs crash or refuse to start, and many modern games require AVX2. AVX-512 is fused off on 12th-14th gen consumer chips.',
+  expl='Enables AVX instructions. Disabling AVX2 makes some programs crash or refuse to start, and many modern games require AVX2. AVX-512 is fused off on 13th/14th-gen and later 12th-gen consumer chips.',
   recs=R(power='Enabled', balanced='Enabled', single='Enabled', multi='Enabled', latency='Enabled'),
   note='Never disable AVX2: several games require it.',
   impact=(
@@ -1273,24 +1272,24 @@ E('^OC Retry Count$|^Memory OC Retry Count$|^CPU Memory Changed Detect$|^OC Quic
   impact=N0,
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^CPU Current Limit\\(A\\)$|^VR Current Limit$|^Fast Vmode Itrip ICC Limit$|^TDC (Enable|Current Limit|Time Window|Lock)$|^IRMS$|^Core VR Fast Vmode$', 'CPU current limits',
-  expl="The maximum current the CPU (or its voltage regulator) may draw, instantly (IccMax) or averaged over time (TDC). Intel's default for the i7-14700K is [[307 A|published|@CB_IDS]].",
-  recs=R(power='~Intel default', balanced='~Intel default', single='~Intel default', multi="~Do not exceed Intel's default ([[307 A|published|@CB_IDS]] for an i7-14700K)", latency='~Intel default'),
+  expl='The maximum current the CPU (or its voltage regulator) may draw, instantly (IccMax) or averaged over time (TDC). Units differ per setting; read the BIOS help (some take quarter-amp or eighth-amp steps). For IccMax, Intel Default Settings (Performance profile), as an Asus Z790 board applies them, set an i7-14700K to [[307 A|published|@CB_IDS]]. Leave TDC on Auto.',
+  recs=R(power='~Intel default', balanced='~Intel default', single='~Intel default', multi="~Do not raise it above your CPU's Intel default", latency='~Intel default'),
   note='Raising current limits mainly lets voltage and power climb in all-core loads. Part of the 14th-gen safety story: keep within spec.',
   impact=(
     'None. Games do not reach the current limit.',
     'None. Games do not reach the current limit.',
     'Caps peak current in heavy all-core work.',
     'No gaming benefit from raising it.'),
-  basis='published', basis_note='@CB_IDS'),
+  basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^AC Loadline$|^DC Loadline$|^VR Config Enable$', 'AC/DC loadline',
-  expl="Tells the CPU how much voltage droop to expect, so it can request the right voltage. AC loadline raises the requested voltage under load; DC loadline only corrects power readings. Many boards shipped AC loadlines far above Intel's default, overvolting the CPU.",
+  expl="Tells the CPU how much voltage droop to expect, so it can request the right voltage. AC loadline raises the requested voltage under load; DC loadline only corrects power readings. Board defaults have not always matched Intel's recommended loadline.",
   recs=R(power='~Intel default or lower if stable', balanced='~Intel default', single='~Intel default', multi='~Intel default or lower if stable', latency='~Intel default or lower if stable'),
-  note='One of the biggest contributors to 13th/14th-gen overvolting. Matched AC/DC values keep power readings honest. No effect with an Override core voltage.',
+  note='Intel lists motherboard power-delivery settings that exceed its guidance among the causes of 13th/14th-gen degradation ([[0x12B|published|@REG12B]] article). Matched AC/DC values keep power readings honest. No effect with an Override core voltage.',
   impact=(
     'None directly. Lower AC loadline means lower voltage and temps at the same clock, if stable.',
     'None directly. Lower AC loadline means lower voltage and temps at the same clock, if stable.',
     'None directly. Lower AC loadline means lower voltage and temps at the same clock, if stable.',
-    'Board defaults were often far above Intel\'s spec. Intel\'s "Intel Default Settings" profile fixes that.'),
+    "Intel Default Settings applies Intel's recommended values."),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^PS Current Threshold|^PS\\d Enable$|^Min Voltage (Override|Runtime|C\\d)$', 'VR power states',
   expl='Voltage-regulator low-power phases (PS1-PS4) used at light load to save power, and minimum voltage floors.',
@@ -1310,7 +1309,7 @@ E('^IMON (Slope|Offset|Prefix)$|^PSYS|^VccIn Aux Icc Max$|^VccIN Aux IMON|^Vsys/
     'None directly.',
     'None directly.',
     'None directly.',
-    'IMON tricks are a hidden way some boards inflated benchmark scores.'),
+    'Changing IMON makes reported power lower than real power, so power limits stop working as set.'),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^CPU Over Voltage Protection$|^CPU Over Current Protection$|^CPU Thermal Alert$|^CPU VRM Over Temperature Protection$', 'VRM protections',
   expl='Board voltage-regulator safety limits: over-voltage, over-current, temperature alerts and VRM over-temperature shutdown.',
@@ -1341,7 +1340,7 @@ E('^CPU DLVR Control$', 'CPU DLVR Control',
   impact=N0,
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Power Limit \\d+ Override$|^Power Limit \\d+$|^Power Limit \\d+ Lock$|^Power Limit \\d+ Time Window$|^Platform PL\\d|^ATX Telemetry Unit$|^Dual Tau Boost$', 'CPU power limits (PL1-PL4)',
-  expl="PL1 is the long-term power limit, PL2 the short boost limit (for the Tau time window), PL3 and PL4 are fast peak limits. Intel's default for an i7-14700K is [[253 W|published|@ARK @CB_IDS]] for both PL1 and PL2 (its Maximum Turbo Power).",
+  expl="PL1 is the long-term power limit, PL2 the short boost limit (for the Tau time window), PL3 and PL4 are fast peak limits. With Intel Default Settings (Performance profile), as an Asus Z790 board applies them, an i7-14700K is set to PL1 = PL2 = [[253 W|published|@CB_IDS]], which equals the [[253 W|published|@ARK]] Maximum Turbo Power on Intel's spec page.",
   recs=R(power='~Lower PL1/PL2 (for example to the [[125 W|published|@ARK]] Processor Base Power of an i7-14700K)', balanced='~Intel default', single='~Intel default', multi='~Intel default or higher with strong cooling', latency='~Intel default'),
   note='Set by CPU Cooler Tuning on MSI boards. Games draw well below these limits.',
   impact=(
@@ -1349,7 +1348,7 @@ E('^Power Limit \\d+ Override$|^Power Limit \\d+$|^Power Limit \\d+ Lock$|^Power
     'Same, except very CPU-heavy titles.',
     'Large effect on all-core rendering and encoding.',
     ''),
-  basis='published', basis_note='@ARK @CB_IDS'),
+  basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^Boot performance mode$', 'Boot performance mode',
   expl='Clock speed the CPU uses while the BIOS runs, before Windows takes over.',
   recs=R(),
@@ -1433,7 +1432,7 @@ E('^Intel Trusted Execution Technology$|^Alias Check Request$|^DPR Memory Size|^
 E('Fan|^Temperature Source$|^Temperature select Main page$|^step (up|down) time$|^RESEARCH_|^STR_RESEARCH|^CPU \\d+$|^PUMP \\d+$|^System \\d+$|^VOLTAGE VIEWER|^BTN \\d+|^UiDB DragDropFrame|^HWM_SEARCH FAIL$|^please check$|^CPU temperature Warning Control$', 'Fan control / hardware monitor',
   expl='MSI Smart Fan settings: fan type (PWM or DC), temperature source, the 4-point fan curve (temperature vs speed) and how fast fans ramp up and down. Some entries only store the layout of the Hardware Monitor screen.',
   recs=R(),
-  note='Set fan curves in the Hardware Monitor screen (F6 in advanced mode).',
+  note='Set fan curves in the HARDWARE MONITOR screen (in Advanced mode, select HARDWARE MONITOR at the top of the screen).',
   impact=(
     'None, unless the CPU is so hot that it throttles.',
     'None, unless the CPU is so hot that it throttles.',
@@ -1551,9 +1550,9 @@ E('^CPU PCIe Lanes Configuration$|^PCHX\\d Switch$|^M\\d_\\d Switch$|^PCIE & M\\
   recs=R(power='Auto', balanced='Auto', single='Auto', multi='Auto', latency='Auto'),
   note='Check the board manual for which slots share lanes.',
   impact=(
-    'x16 vs x8 for a single GPU costs a few percent at most on fast cards.',
-    'x16 vs x8 for a single GPU costs a few percent at most on fast cards.',
-    'x16 vs x8 for a single GPU costs a few percent at most on fast cards.',
+    'Running the GPU at x8 instead of x16 usually costs little, but it depends on the card, the PCIe generation and the game; compare the same benchmark run in each mode.',
+    'Running the GPU at x8 instead of x16 usually costs little, but it depends on the card, the PCIe generation and the game; compare the same benchmark run in each mode.',
+    'Running the GPU at x8 instead of x16 usually costs little, but it depends on the card, the PCIe generation and the game; compare the same benchmark run in each mode.',
     ''),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E("^PCI Latency Timer$|^PCI-X Latency Timer$|^VGA Palette Snoop$|^PERR# Generation$|^SERR# Generation$|^SR-IOV Support$|^BME DMA Mitigation$|^Don\\'t Reset VC-TC Mapping$", 'Legacy PCI options',
@@ -1591,7 +1590,7 @@ E('^State After G\\d$|^Restore after AC Power Loss', 'Power-loss behaviour',
   impact=N0,
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('^PCH LAN Controller$|^Foxville I\\d+ LAN Controller$|^Foxville I\\d+ Wake on LAN Support$', 'Onboard LAN',
-  expl='Enables the onboard Intel 2.5G Ethernet controller and its wake-on-LAN.',
+  expl='Enables the onboard Intel Ethernet controller and its wake-on-LAN.',
   recs=R(),
   note='Disable only if you never use wired Ethernet.',
   impact=(
@@ -1738,15 +1737,15 @@ E('Trusted Computing|PTT Configuration|Security Configuration|Secure Boot|Key Ma
   recs=R(),
   note='Firmware protection and anti-rollback stop malicious BIOS changes. Leave on.',
   impact=(
-    'None. Intel PTT has no measured fps cost.',
-    'None. Intel PTT has no measured fps cost.',
-    'None. Intel PTT has no measured fps cost.',
+    'None. Intel PTT has no known fps cost.',
+    'None. Intel PTT has no known fps cost.',
+    'None. Intel PTT has no known fps cost.',
     ''),
   basis='reasoning', basis_note='From how the hardware works; not measured. Workload-dependent effects: test them.'),
 E('PCH-FW Configuration|ME ', 'Intel ME firmware',
   expl="Options for the Intel Management Engine, the chipset's built-in firmware processor that handles power, security and (on business chips) remote management.",
   recs=R(),
-  note='Disabling ME is not supported on this board and can break boot or power management.',
+  note='ME State only puts ME into a temporarily disabled mode; it cannot be removed. Features that run on ME, such as Intel PTT (the firmware TPM used by Windows 11 and BitLocker), may stop working while it is disabled.',
   impact=(
     'None.',
     'None.',
