@@ -75,24 +75,31 @@ keeps at most 3 paths); else FALLBACK. Regexes are case-insensitive.
 - a marker has another kind, a ref that is not `@KEY`(s), an unknown key, a key of the wrong type, or a text with
   no digit / over 40 characters;
 - a number is not inside a marker (text fields and basis_note);
-- text contains an owner-specific phrase: `14700KF`, "your PC", "Your 14700", `53x`, `7E06`, "his current"
-  (case-insensitive). The `B` line is not text and is exempt.
+- text, an expanded marker ref or a `SOURCES` value contains an owner-specific phrase (case-insensitive, any
+  whitespace including NBSP): `14700 KF`/`14700KF`, "your PC", "your 14700", `53x`, `7E06`, "his earlier/current/own",
+  "owner's", "my PC/CPU/board/rig/1xxxx". The approved way to cite the owner's measurement is "Hadron's author".
+  The `B` line is not text and is exempt.
+- a marker inside `basis_note` breaks the same marker rules as in text (it is rendered, never shipped literally).
 
-It prints **warnings** (not failures) for vague quantities worth a second look: "a few percent", "several watts",
-"halves", "doubles", "tens of", "an hour".
+It prints **warnings** (not failures) for things worth a second look: "a few percent", "several watts", "halves",
+"half", "doubles", "twice", "-fold", "tens of", "an hour", "N times faster/more/…", `DDR5-4800`-style speeds not
+preceded by "e.g.", and "gained/improved/lost/increased 1% lows". Reviewed phrases are allow-listed per entry in
+`SOFT_ALLOW` (DMI "roughly halves", Gear mode "runs it at half").
 
 `python3 tools/bios/genkb.py --selftest` checks the heuristic on positive and negative cases, the marker and basis
 rules, the denylist and the escaping, and exits 1 on any failure. Run it after changing genkb.
 
 ### Number heuristic
 
-Case-insensitive. A number (optionally signed, `~`, or a range `a-b` / `a to b`), then an optional space or hyphen,
-then one of: `% percent ms µs μs us ns s seconds min minutes hours mV mOhm mΩ Ω W watts V volts A amps MHz GHz KB MB
-GB bytes GB/s MB/s GT/s MT/s Gbps °C C x × fps cycles`, not followed by a letter or digit. Also decimal `G` link
+Case-insensitive. A number (optionally signed, `~`, or a range `a-b` / `a to b`), then any spaces or hyphens, then
+one of: `% ‰ percent ms µs μs us ns ps s sec(s) seconds min minutes hr(s) hours day(s) week(s) year(s) nm dB mV mA mW
+kW mOhm mΩ kΩ Ω ohm(s) W watts V volts A amps Hz kHz MHz GHz KB MB GB TB KiB MiB GiB TiB bytes GB/s MB/s GT/s MT/s
+Gbps Mbps Gbit °C °F C degree(s) x × times fold fps cycles`, not followed by a letter or digit. Also decimal `G` link
 speeds such as `2.5G`. A number glued to a preceding letter, digit or `.` is not a quantity (`DDR5`, `M.2`, `0x12B`).
 
 Not flagged, because they are names or identifiers rather than quantity claims:
-- the metric names "1% lows" and "0.1% lows" (also "1% and 0.1% lows"); "21% lows" is still flagged;
+- the metric names "1% lows" and "0.1% lows" (also "1% and 0.1% lows"); "21% lows" and "+1% lows" are still
+  flagged;
 - spec-style identifiers: `DDR5-4800`, `Gen4`, `x16`/`x8` lane widths, model numbers (`i7-14700K`, `9900K`),
   microcode ids (`0x12B`), `PL1`/`PL2`, "Gear 2", "TPM 2.0", "Windows 11", "Above 4G" (the setting's name);
 - unitless counts and setting values (e.g. "0 = default", "3+ runs", "entered here as 1228"). These are reviewed by

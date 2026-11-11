@@ -31,27 +31,38 @@ GOALS = ('power', 'balanced', 'single', 'multi', 'latency')
 MARK_MAX = 40
 
 # ---- number heuristic ------------------------------------------------------------------------------------------
-# A number (optionally signed, "~", or a range "a-b" / "a to b"), then an optional space or hyphen, then a unit.
-# Case-insensitive. Based on docs/legacy/bios-explorer.md section 7, extended (kb-auditor round 1).
+# A number (optionally signed, "~", or a range "a-b" / "a to b"), then any spaces or hyphens, then a unit.
+# Case-insensitive. Based on docs/legacy/bios-explorer.md section 7, extended (kb-auditor rounds 1 and 2).
 # Not matched, because no unit follows the number or the number is glued to a word: DDR5-4800, Gen4, x16/x8,
 # 14700K, 9900K, 0x12B, PL1, TPM 2.0, Windows 11, M.2, "Gear 2", "4G" (the name of the 4 GB address boundary).
 UNIT = ('(?:'
-        r'GB/s|MB/s|GT/s|MT/s|Gbps|GHz|MHz|mOhm|mΩ|mV|ms|µs|μs|us|ns|minutes?|min|hours?|seconds?|s|'
-        r'bytes?|KB|MB|GB|watts?|W|volts?|V|amps?|A|percent|%|°\s?C|C|Ω|×|x|fps|cycles'
+        r'GB/s|MB/s|GT/s|MT/s|Gbps|Mbps|Gbit|GHz|MHz|kHz|Hz|mOhm|mΩ|kΩ|ohms?|Ω|mV|mA|mW|kW|'
+        r'ms|µs|μs|us|ns|ps|nm|dB|minutes?|min|hours?|hrs?|seconds?|secs?|days?|weeks?|years?|s|'
+        r'bytes?|KiB|MiB|GiB|TiB|KB|MB|GB|TB|watts?|W|volts?|V|amps?|A|percent|%|‰|°\s?C|°\s?F|degrees?|C|'
+        r'times|fold|×|x|fps|cycles'
         ')')
 NUMBER_RE = re.compile(
-    r'(?<![\w.])[+~±-]?\d+(?:\.\d+)?(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?[\s-]?' + UNIT + r'(?!\w)'
+    r'(?<![\w.])[+~±-]?\d+(?:\.\d+)?(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?[\s-]*' + UNIT + r'(?!\w)'
     r'|(?<![\w.])\d+\.\d+G(?!\w)',          # decimal G link speeds, e.g. 2.5G Ethernet
     re.I)
-# "1% lows" and "0.1% lows" are metric names, not quantities ("1% and 0.1% lows" included).
-METRIC_RE = re.compile(r'(?<![\d.])(?:0\.)?1%(?=\s+(?:and\s+0\.1%\s+)?lows)')
+# "1% lows" and "0.1% lows" are metric names, not quantities ("1% and 0.1% lows" included). A sign or digit
+# before it ("+1% lows", "21% lows") makes it a quantity again.
+METRIC_RE = re.compile(r'(?<![\d.+±~-])(?:0\.)?1%(?=\s+(?:and\s+0\.1%\s+)?lows)')
 MARK_RE = re.compile(r'\[\[([^\[\]|]+)\|([^\[\]|]+)\|([^\[\]]+)\]\]')
 KEY_RE = re.compile(r'@([A-Z0-9_]+)')
 
 # Owner-specific text never ships in the KB (rule 7 / legacy section 7 #27). Case-insensitive.
-OWNER_DENY = re.compile(r'14700KF|your PC\b|your 14700|\b53x\b|7E06|his current', re.I)
-# Vague quantities worth a second look; reported as warnings, never failures.
-SOFT_WARN = re.compile(r'a few percent|several watts|\bhalves\b|\bdoubles\b|tens of|an hour', re.I)
+# \s also matches NBSP. "Hadron's author" is the approved way to refer to the owner's measurement.
+OWNER_DENY = re.compile(r'14700\s*KF|\byour\s+PC\b|\byour\s+14700|\b53x\b|7E06|\bhis\s+(?:earlier|current|own)\b|'
+                        r"\bowner['’]?s\b|\bmy\s+(?:PC|CPU|board|rig|1\d{4})", re.I)
+# Vague quantities and spec claims worth a second look; reported as warnings, never failures.
+SOFT_WARN = re.compile(r'a few percent|several watts|\bhalves\b|\bdoubles\b|tens of|an hour|\bhalf\b|\btwice\b|'
+                       r'-fold\b|\b(?:\d+|two|three|four|five|ten|hundred|many|several|few)\s+times\s+(?:faster|slower|more|less|higher|lower|as)\b|(?<!e\.g\. )\bDDR\d-\d{4}\b|'
+                       r'\b(?:gained|improved|lost|increased)\s+(?:0\.)?1%\s+lows', re.I)
+# Reviewed and accepted soft warnings: (entry title, the warned phrase in context).
+# "times" is only warned in comparisons ("ten times faster"); "frame times" and "at all times" are not quantities.
+SOFT_ALLOW = [('DMI / PCIe link internals', re.compile(r'roughly halves', re.I)),
+              ('Gear mode', re.compile(r'runs it at half \(', re.I))]   # Gear 2's definition, not an estimate
 
 
 def esc(s):
@@ -110,6 +121,9 @@ def render(text, where, sources, out_sources, errors, warnings=None):
         val, err = resolve_ref(ref, kind, sources)
         if err and kind in NUMBER_KINDS:
             errors.append('%s: [[%s]] %s' % (where, shown, err))
+        dm = OWNER_DENY.search(val)
+        if dm:
+            errors.append('%s: [[%s]] source text is owner-specific: %r' % (where, shown, dm.group(0)))
         out_sources.append((shown, kind, val))
         return '\x00' * len(shown)   # placeholder so the number check skips marked text
     masked = MARK_RE.sub(sub, text)
@@ -123,22 +137,28 @@ def render(text, where, sources, out_sources, errors, warnings=None):
         errors.append('%s: owner-specific text %r in: %s' % (where, m.group(0), plain))
     if warnings is not None:
         for w in SOFT_WARN.finditer(plain):
+            if any('"%s"' % t in where and rx.search(plain) for t, rx in SOFT_ALLOW):
+                continue
             warnings.append('%s: vague quantity %r' % (where, w.group(0)))
     return plain
 
 
-def render_basis(e, where, tier1, sources, errors):
-    """Check basis/basis_note; return the basis_note with @KEYs expanded."""
+def render_basis(e, where, tier1, sources, errors, out_sources=None):
+    """Check basis/basis_note; return the basis_note with markers rendered and @KEYs expanded."""
     b, note = e.get('basis', ''), e.get('basis_note', '')
     if not b:
         if tier1:
             errors.append('%s: tier-1 entry has no basis' % where)
-        return note
-    if b not in BASES:
+    elif b not in BASES:
         errors.append('%s: unknown basis %r' % (where, b))
-    for n in unmarked_numbers(MARK_RE.sub('', KEY_RE.sub('', note))):
-        errors.append('%s basis_note: unsourced number %r in: %s' % (where, n, note))
-    keys = KEY_RE.findall(note)
+    # Markers in basis_note get the same validation as in text; @KEYs outside markers are names, not numbers.
+    marks = out_sources if out_sources is not None else []
+    plain = render(MARK_RE.sub(lambda m: m.group(0).replace('@', '\x02'), note).replace('@', '\x03')
+                   .replace('\x02', '@'), '%s basis_note' % where, sources, marks, errors)
+    plain = re.sub(r'\x03([A-Z0-9_]+)', lambda m: '@' + m.group(1), plain)
+    if not b:
+        return plain
+    keys = [k for k in KEY_RE.findall(MARK_RE.sub('', note))]
     for k in keys:
         if k not in sources:
             errors.append('%s basis_note: unknown source @%s' % (where, k))
@@ -149,7 +169,7 @@ def render_basis(e, where, tier1, sources, errors):
         errors.append('%s: published basis must name an https source (@KEY) in basis_note' % where)
     if 'http://' in note:
         errors.append('%s: basis_note has a non-https URL' % where)
-    expanded = KEY_RE.sub(lambda m: sources.get(m.group(1), m.group(0)), note)
+    expanded = KEY_RE.sub(lambda m: sources.get(m.group(1), m.group(0)), plain)
     dm = OWNER_DENY.search(expanded)
     if dm:
         errors.append('%s basis_note: owner-specific text %r' % (where, dm.group(0)))
@@ -167,8 +187,8 @@ def entry_texts(e):
 
 
 def k_line(i, e, where, tier1, sources, errors, warnings):
-    bnote = render_basis(e, where, tier1, sources, errors)
     srcs, r = [], {}
+    bnote = render_basis(e, where, tier1, sources, errors, srcs)
     for label, text in entry_texts(e):
         r[label] = render(text, '%s %s' % (where, label), sources, srcs, errors, warnings)
     f = ['K', str(i), esc(r['title']), esc(r['explanation'])]
@@ -203,6 +223,8 @@ def build(src, dst):
 
     bad_src = [k for k, v in sources.items() if not k.startswith('OWNER') and not re.fullmatch(r'https://\S+', v)]
     errors = ['SOURCES[%r] is not an https:// URL' % k for k in bad_src]
+    errors += ['SOURCES[%r] is owner-specific: %r' % (k, OWNER_DENY.search(v).group(0))
+               for k, v in sources.items() if OWNER_DENY.search(v)]
     warnings = []
     tiers = [('T1', kb.T1, True), ('NAME', kb.NAME, False), ('MENU', kb.MENU, False), ('FALLBACK', [kb.FALLBACK], False)]
     out, idx, ranges = [v_line, 'B\t%s\t%s' % (BOARD, BIOS_VERSION)], 0, {}
@@ -280,6 +302,11 @@ FLAG = [  # must be flagged as unsourced numbers
     '100 °C', '100°C', '100 C', '53x', '55-56x', '4×', '144 fps', '50 cycles', 'DDR5 at 6400 MT/s', '16 GT/s',
     '5 GB/s', '500 MB/s', '10 Gbps', '64-byte line', '64 bytes', '2.5G Ethernet', '10 percent', '30 seconds',
     '5 min', '2 hours', '3 s', '21% lows', '1 to 3%', '0.2 MS', '4 GB of address space',
+    # round 2
+    '240Hz', '1000 Hz polling', '8 kHz', '500 mA', '5 mW', '1 kW', '2 TB', '1 TiB', '16 GiB', '512 KiB', '64 MiB',
+    '100 Mbps', '10 Gbit', '10 kΩ', '50 ohms', '1 ohm', '20 ps', '10 nm', '3 dB', '200 °F', '90 degrees',
+    '1 degree', '5 ‰', '30 secs', '1 sec', '2 hrs', '1 hr', '3 days', '1 day', '2 weeks', '5 years', '1 year',
+    '10 times faster', '2-fold', '5   ms', '5 - - ms', '+1% lows', '-1% lows', '~1% lows', '±1% lows',
 ]
 PASS = [  # must not be flagged
     '1% lows', '0.1% lows', 'compare 1% and 0.1% lows', 'DDR5-4800', 'Gen4', 'x16 vs x8', 'x8+x8', 'i7-14700K',
@@ -287,6 +314,17 @@ PASS = [  # must not be flagged
     'Above 4G Decoding', 'the 32-bit (4G) boundary', '3+ runs', '0 = default', 'entered here as 1228', 'PS1-PS4',
     'S4/S5', '12th-14th gen', 'a 4-point fan curve', '2-DIMM-per-channel', 'USB 2 speed mode', 'Turbo Boost Max 3.0',
     '1N is fastest', 'Gear 4 costs latency', 'C0/C1', 'Package C-State', 'tRRD_S', 'DDR5 on 14th gen',
+    # round 2
+    'TPM 2.0 and a Secure Boot-capable UEFI', 'e.g. DDR5-6000', "Hadron's author", 'a Gen 5 SSD', 'S0ix',
+    'Windows 10 does not', 'DDR5 errors', 'up to DDR5 5600 kits', '2 sticks',
+]
+WARN = [  # (text, title, expect a soft warning)
+    ('roughly half the bandwidth', 'X', True), ('twice as fast', 'X', True), ('a 2-fold gain', 'X', True),
+    ('ten times faster', 'X', True), ('frame times', 'X', False), ('frame times more consistent', 'X', False), ('at all times', 'X', False),
+    ('Gear 2 runs it at half (needed for DDR5)', 'Gear mode', False), ('runs at DDR5-4800', 'X', True), ('e.g. DDR5-6000', 'X', False),
+    ('it gained 1% lows', 'X', True), ('improved 0.1% lows', 'X', True), ('compare 1% lows', 'X', False),
+    ('a few percent', 'X', True), ('roughly halves the bandwidth', 'DMI / PCIe link internals', False),
+    ('roughly halves the bandwidth', 'Other', True),
 ]
 
 
@@ -299,7 +337,8 @@ def selftest():
         hits = unmarked_numbers(t)
         if hits:
             fails.append('false positive %r in %r' % (hits, t))
-    src = {'URL': 'https://example.org/a', 'BAD': 'http://example.org', 'OWNERX': "author's CPU, game, metric"}
+    src = {'URL': 'https://example.org/a', 'BAD': 'http://example.org', 'OWNERX': "author's CPU, game, metric",
+           'OWNERBAD': "owner's own PC, game"}
 
     def run(text):
         errs, s = [], []
@@ -320,6 +359,17 @@ def selftest():
         ('Your PC is set to Override', 'owner-specific'),
         ('on the 14700KF', 'owner-specific'),
         ('his current CPU', 'owner-specific'),
+        ('the 14700 KF', 'owner-specific'),
+        ('set on your\u00a0PC', 'owner-specific'),
+        ('his earlier CPU', 'owner-specific'),
+        ('his  own board', 'owner-specific'),
+        ("the owner's CPU", 'owner-specific'),
+        ("the owner’s CPU", 'owner-specific'),
+        ('on my rig', 'owner-specific'),
+        ('on my 14700', 'owner-specific'),
+        ('my CPU', 'owner-specific'),
+        ("Hadron's author measured [[+20%|owner-measured|@OWNERX]]", None),
+        ('[[+20%|owner-measured|@OWNERBAD]] better', 'source text is owner-specific'),
     ]
     for text, want in cases:
         plain, s, errs = run(text)
@@ -331,6 +381,26 @@ def selftest():
     plain, s, errs = run('rated [[5.6 GHz|published|@URL]] turbo')
     if plain != 'rated 5.6 GHz turbo' or s != [('5.6 GHz', 'published', 'https://example.org/a')]:
         fails.append('render/sources wrong: %r %r' % (plain, s))
+    for t, title, want in WARN:
+        w = []
+        render(t, 'K 1 (T1 #1 "%s") note' % title, src, [], [], w)
+        if bool(w) != want:
+            fails.append('soft warning for %r (%s): expected %s, got %r' % (t, title, want, w))
+    # basis_note markers: validated like text, rendered (no literal [[ ]] ships), sources collected
+    for note, want in [('[[50%|reasoning|x]] guess', 'has kind'), ('[[50%|published|@BAD]]', 'not an https'),
+                       ('@OWNERX: [[about +20%|owner-measured|@OWNERX]] faster', None)]:
+        errs, s = [], []
+        out = render_basis({'basis': 'owner-measured', 'basis_note': note}, 'B', True, src, errs, s)
+        got = '; '.join(errs)
+        if (want is None and errs) or (want is not None and want not in got):
+            fails.append('basis_note marker %r: expected %r, got %r' % (note, want, got))
+        if '[[' in out or ']]' in out:
+            fails.append('basis_note marker shipped literally: %r' % out)
+    errs, s = [], []
+    out = render_basis({'basis': 'owner-measured', 'basis_note': '@OWNERX: [[about +20%|owner-measured|@OWNERX]] faster'},
+                       'B', True, src, errs, s)
+    if out != "author's CPU, game, metric: about +20% faster" or s != [('about +20%', 'owner-measured', src['OWNERX'])]:
+        fails.append('basis_note render wrong: %r %r' % (out, s))
     for note, basis, want in [('@URL', 'published', None), ('@OWNERX. Different CPU.', 'owner-measured', None),
                               ('no url', 'published', 'https source'), ('@URL', 'owner-measured', 'OWNER'),
                               ('Measured 20% faster.', 'reasoning', 'unsourced number'), ('', '', 'no basis'),
@@ -342,11 +412,12 @@ def selftest():
             fails.append('basis %r/%r: expected %r, got %r' % (basis, note, want, got))
     if esc('a\\b\tc\r\nd') != 'a\\\\b c\\nd' or unesc(esc('a\\b\nc')) != 'a\\b\nc':
         fails.append('esc/unesc round trip')
-    total = len(FLAG) + len(PASS) + len(cases) + 1 + 7 + 1
+    total = len(FLAG) + len(PASS) + len(cases) + len(WARN) + 4 + 1 + 7 + 1
     for f in fails:
         print('FAIL ' + f)
-    print('selftest: %d checks (%d flag, %d pass, %d marker, 7 basis, 2 render/escape), %d failed'
-          % (total, len(FLAG), len(PASS), len(cases), len(fails)))
+    print('selftest: %d checks (%d flag, %d pass, %d marker/denylist, %d soft-warning, 4 basis_note marker, '
+          '7 basis, 2 render/escape), %d failed'
+          % (total, len(FLAG), len(PASS), len(cases), len(WARN), len(fails)))
     return 1 if fails else 0
 
 
