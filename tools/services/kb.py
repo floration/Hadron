@@ -1083,3 +1083,175 @@ info('wmiApSrv', 'WMI Performance Adapter',
 info('LanmanWorkstation', 'Workstation',
      'The SMB client: connections to shared folders and printers on other computers.',
      '@IOT says those connections are unavailable.', 'DND', 'NG')
+
+# Drivers, explanation only (proxy Q5). Inbox drivers present on every 19045 install or loaded for common hardware.
+# Microsoft publishes no list of drivers that are safe to disable (r3 §2.3); these entries only say what each driver
+# does. `published` only where the cited page names the driver and says what the text says; the rest is reasoning.
+# Storage drivers never get a stock value, and Hadron's guards (boot path, filters, floor) apply as before.
+
+def drv(name, title, expl, if_off='', basis='reasoning', note=''):
+    info(name, title, expl, if_off, basis=basis, kind='drv',
+         note=note or 'From the driver\'s role in Windows; Hadron found no Microsoft page that describes it.')
+
+
+_BOOT_PATH = ('If the boot disk sits on it, Windows can\'t start without it (Stop 0x7B, reasoning); Hadron never changes '
+              'drivers on the boot disk\'s path.')
+
+# Storage and disk class.
+drv('storport', 'Storport storage port driver',
+    'The system-supplied storage port driver that most modern storage controller drivers (miniports) plug into.',
+    _BOOT_PATH, 'published', '@STORPORT: "a system-supplied storage port driver" for high-performance buses and RAID '
+                             'adapters.')
+drv('stornvme', 'Microsoft NVMe driver (StorNVMe)', 'The inbox driver for NVMe SSDs.',
+    'NVMe drives that use it disappear. ' + _BOOT_PATH, 'published',
+    '@STORNVME: "the system-supplied storage miniport driver that provides access to high-speed NVMe devices".')
+drv('storahci', 'Microsoft AHCI driver (StorAHCI)', 'The inbox driver for SATA controllers in AHCI mode.',
+    'SATA drives on an AHCI controller that uses it disappear. ' + _BOOT_PATH, 'published',
+    '@STORAHCI: a Storport miniport that supports SATA AHCI controllers and replaced MSAHCI.')
+for _n, _t, _d in (('ACPI', 'ACPI driver', 'Talks to the firmware\'s ACPI tables: power buttons, sleep states, thermal '
+                                           'zones and many motherboard devices.'),
+                   ('disk', 'Disk class driver', 'Presents every disk drive to Windows, whatever the controller.'),
+                   ('partmgr', 'Partition Manager', 'Finds the partitions on each disk.'),
+                   ('volmgr', 'Volume Manager', 'Creates the volumes Windows mounts from partitions.'),
+                   ('volsnap', 'Volume Shadow Copy driver', 'Keeps shadow copies of volumes for Volume Shadow Copy and '
+                                                            'System Restore.'),
+                   ('volume', 'Volume driver', 'The device driver for each mounted volume.')):
+    drv(_n, _t, _d, 'Windows can fail to start with Stop 0x7B (inaccessible boot device): @STOP7B says its Start '
+                    'value must be Boot.', 'published',
+        '@STOP7B lists it among the services whose Start value must be 0 (Boot) when troubleshooting Stop 0x7B. What '
+        'it does is reasoning.')
+drv('mountmgr', 'Mount Point Manager', 'Assigns drive letters and mount points to volumes.',
+    'Volumes get no drive letters, the Windows volume included (reasoning).')
+drv('fvevol', 'BitLocker Drive Encryption filter', 'Reads and writes BitLocker-encrypted volumes.',
+    'BitLocker-encrypted volumes can\'t be read, including a BitLocker system drive (reasoning).')
+drv('USBSTOR', 'USB mass storage driver', 'The inbox driver for USB flash drives and USB disks (Bulk-Only).',
+    'USB flash drives and many USB disks stop appearing (reasoning).', 'published',
+    '@USBCLASSES lists Usbstor.sys as Windows\' driver for the USB Mass Storage class.')
+drv('UASPStor', 'USB Attached SCSI (UAS) driver', 'The inbox driver for fast USB disks that use the UAS protocol.',
+    'USB disks that use UAS stop appearing (reasoning).', 'published',
+    '@USBCLASSES lists Uaspstor.sys for USB Mass Storage devices using UAS (subclass 06, protocol 62).')
+
+# File-system stack and filters.
+drv('FltMgr', 'Filter Manager', 'Hosts every file-system minifilter (antivirus, cloud files, backup and more).',
+    'Every minifilter stops with it, Defender\'s included (reasoning).', 'published',
+    '@FLTMGR: "a system-supplied kernel-mode driver" that minifilters register with; it is installed with Windows '
+    'and becomes active when a minifilter loads.')
+drv('Ntfs', 'NTFS file system', 'The NTFS file system driver; Windows itself lives on NTFS.',
+    'NTFS volumes can\'t be read, the Windows volume included (reasoning).')
+drv('FileInfo', 'File Information filter', 'A minifilter that supplies file information to other Windows components.',
+    'Windows components that read file information through it can fail (reasoning).')
+drv('Wof', 'Windows Overlay Filter', 'Serves files stored compressed (CompactOS and compressed system files).',
+    'Files stored compressed can\'t be read; on a CompactOS install that includes system files (reasoning).')
+drv('bindflt', 'Windows Bind Filter', 'A minifilter that maps one folder\'s view onto another, used by app '
+                                     'packaging and containers.',
+    'Apps and containers that rely on bound folders can fail (reasoning).')
+
+# Networking: NDIS, TCP/IP and the firewall.
+drv('NDIS', 'NDIS', 'The Network Driver Interface Specification library that every network adapter driver plugs into.',
+    'No network adapter works (reasoning).')
+drv('Tcpip', 'TCP/IP protocol driver', 'The TCP/IP stack (IPv4 and IPv6).',
+    'No TCP/IP networking at all (reasoning).')
+drv('AFD', 'Ancillary Function Driver for Winsock', 'The kernel side of Winsock: programs\' network sockets go '
+                                                    'through it.',
+    'Programs can\'t open network sockets (reasoning).')
+drv('NetBT', 'NetBIOS over TCP/IP', 'NetBIOS over TCP/IP, used by older file and printer sharing.',
+    'Older NetBIOS-based sharing and name resolution stop (reasoning).')
+drv('tdx', 'NetIO legacy TDI support driver', 'Supports old TDI-style network drivers on top of the TCP/IP stack.',
+    'Old network software that uses TDI can fail (reasoning).')
+drv('nsiproxy', 'NSI proxy service driver', 'The kernel side of the Network Store Interface (nsi).',
+    'Network configuration notifications to programs stop (reasoning).')
+drv('mpsdrv', 'Windows Defender Firewall authorization driver', 'Kernel part of Windows Defender Firewall.',
+    'Firewall enforcement can fail (reasoning).')
+drv('HTTP', 'HTTP service driver (HTTP.sys)', 'The kernel HTTP listener that Windows features and some programs use '
+                                              'to serve HTTP.',
+    'Programs and Windows features that listen for HTTP through it fail (reasoning).')
+
+# USB host and HID input.
+drv('USBXHCI', 'USB xHCI host controller driver', 'Drives USB 3 (xHCI) host controllers, which also run the USB 2 '
+                                                    'ports on modern boards.',
+    'Every USB port on that controller stops, keyboards and mice included (reasoning).', 'published',
+    '@USBHOST: "The xHCI driver is the USB 3.0 host controller driver."')
+drv('UCX01000', 'USB Host Controller Extension', 'The common layer between the USB hub driver and the xHCI driver.',
+    'USB on xHCI controllers stops (reasoning).', 'published',
+    '@USBHOST: all I/O requests from upper drivers reach the host controller extension before the xHCI driver.')
+drv('USBHUB3', 'USB hub driver (USB 3)', 'Manages USB hubs and ports and enumerates the devices plugged into them.',
+    'Devices plugged into those ports aren\'t enumerated (reasoning).', 'published',
+    '@USBHOST: the hub driver manages USB hubs and their ports and enumerates attached devices.')
+drv('usbccgp', 'USB composite device driver', 'Splits USB devices with several functions (a headset with buttons, a '
+                                              'keyboard with media keys) into one device per function.',
+    'Composite USB devices lose their functions (reasoning).', 'published',
+    '@USBHOST: "the Microsoft-provided parent driver for composite devices".')
+drv('HidUsb', 'USB HID transport driver', 'Carries USB keyboards, mice, controllers and other HID devices to the HID '
+                                          'class driver.',
+    'USB keyboards, mice and game controllers stop (reasoning).', 'published',
+    '@USBCLASSES lists Hidclass.sys and Hidusb.sys as Windows\' drivers for the USB HID class.')
+drv('kbdhid', 'Keyboard HID driver', 'Turns HID keyboard input into scan codes for the keyboard class driver.',
+    'USB and Bluetooth keyboards stop (reasoning).', 'published',
+    '@HIDKBM: the HID client mapper driver for keyboards, which converts HID usages into scan codes.')
+drv('mouhid', 'Mouse HID driver', 'Turns HID mouse input (movement, buttons, wheel) into mouse input for the mouse '
+                                  'class driver.',
+    'USB and Bluetooth mice and touchpads stop (reasoning).', 'published',
+    '@HIDKBM: the HID client mapper driver for mice and touchpads.')
+drv('kbdclass', 'Keyboard class driver', 'The class driver behind every keyboard.',
+    'No keyboard works, not even at sign-in (reasoning).', 'published',
+    '@HIDKBM: the keyboard class driver "provides functionality for all keyboards and keypads on the system".')
+drv('mouclass', 'Mouse class driver', 'The class driver behind every mouse and touchpad.',
+    'No mouse works (reasoning).', 'published',
+    '@HIDKBM: the mouse class driver "provides functionality for all mice and touchpads on the system".')
+drv('i8042prt', 'PS/2 keyboard and mouse driver', 'The function driver for PS/2-style keyboards and mice.',
+    'PS/2 keyboards and mice stop (reasoning).', 'published',
+    '@HIDKBM names I8042prt as the function driver for a PS/2-style keyboard and mouse.')
+
+# Audio.
+drv('HDAudBus', 'High Definition Audio bus driver', 'The bus driver for High Definition Audio controllers: onboard '
+                                                    'audio and GPU HDMI/DisplayPort audio sit on it.',
+    'Onboard audio and HDMI/DisplayPort audio stop (reasoning).')
+drv('usbaudio', 'USB Audio driver (class 1)', 'The inbox driver for USB Audio class 1 devices.',
+    'USB headsets and DACs that use it stop (reasoning).', 'published',
+    '@USBCLASSES lists Usbaudio.sys for the USB Audio class.')
+drv('usbaudio2', 'USB Audio 2.0 driver', 'The inbox driver for USB Audio 2.0 devices.',
+    'USB Audio 2.0 headsets and DACs that use the inbox driver stop (reasoning).', 'published',
+    '@USBAUDIO2: "Starting with Windows 10, release 1703, a USB Audio 2.0 driver is shipped with Windows", '
+    'usbaudio2.sys.')
+
+# Display class.
+drv('DXGKrnl', 'DirectX graphics kernel', 'The kernel graphics subsystem every display driver plugs into.',
+    'No GPU driver can run (reasoning).')
+drv('BasicDisplay', 'Microsoft Basic Display Driver', 'The fallback display driver Windows uses when no GPU driver is '
+                                                      'installed or working.',
+    'Windows has no fallback picture while a GPU driver is missing, broken or being reinstalled (reasoning).',
+    'published', '@BASICDISPLAY: a generic display driver that ships with Windows, used when a vendor graphics driver '
+                 'isn\'t present or isn\'t working, and during a graphics driver reinstall.')
+drv('BasicRender', 'Microsoft Basic Render Driver', 'Software rendering (WARP) exposed as a graphics adapter.',
+    'Software rendering for systems without a working render driver stops (reasoning).', 'published',
+    '@BASICDISPLAY: BasicDisplay is always used with BasicRender, which exposes WARP from an adapter in the kernel.')
+
+# Core and security.
+drv('pci', 'PCI bus driver', 'Enumerates and configures PCI Express devices (GPU, NVMe, network and USB controllers).',
+    'Every PCI Express device disappears; Windows can\'t start (reasoning).')
+drv('Wdf01000', 'Kernel Mode Driver Framework', 'The framework (KMDF) most modern drivers are built on.',
+    'Every KMDF driver fails to load, many storage, USB and input drivers among them (reasoning).')
+drv('CNG', 'Kernel cryptography (CNG)', 'Kernel cryptography for Windows and drivers.',
+    'Windows can\'t start normally (reasoning).')
+drv('KSecDD', 'Kernel security support driver', 'Kernel-side security services for sign-in and secure channels.',
+    'Windows can\'t start normally (reasoning).')
+drv('TPM', 'TPM driver', 'Talks to the Trusted Platform Module (firmware TPM or chip).',
+    'BitLocker with TPM, Windows Hello keys and anti-cheats that check the TPM can fail (reasoning).')
+drv('mssmbios', 'SMBIOS driver', 'Exposes the firmware\'s SMBIOS tables (board, BIOS and memory details) to Windows.',
+    'Tools that read SMBIOS, Hadron\'s BIOS pages included, lose that data (reasoning).')
+drv('Beep', 'Beep driver', 'Plays the legacy system beep.', 'The legacy system beep stops (reasoning).')
+drv('Npfs', 'Named Pipe File System', 'Named pipes, which much local communication between Windows processes uses.',
+    'Windows can\'t run normally (reasoning).')
+drv('Msfs', 'Mailslot File System', 'Mailslots, an old one-way messaging channel between processes.',
+    'Programs that use mailslots fail (reasoning).')
+drv('Mup', 'Multiple UNC Provider', 'Routes \\\\server\\share paths to the right network file system.',
+    'Network paths (\\\\server\\share) stop opening (reasoning).')
+drv('WdBoot', 'Defender boot driver', 'Defender Antivirus\'s early-launch anti-malware driver.',
+    '@DEFCOMPAT says not to disable, stop or modify the services Defender uses; that this driver is part of that '
+    'stack is reasoning.')
+drv('WdNisDrv', 'Defender network inspection driver', 'The kernel part of Defender Antivirus\'s network inspection.',
+    '@DEFCOMPAT says not to disable, stop or modify the services Defender uses; that this driver is part of that '
+    'stack is reasoning.')
+drv('hvservice', 'Hypervisor service driver', 'Starts and manages the Windows hypervisor (Hyper-V, WSL2, Memory '
+                                              'Integrity).',
+    'Features that need the hypervisor stop: Hyper-V, WSL2, Windows Sandbox and Memory Integrity (reasoning).')
