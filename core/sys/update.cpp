@@ -240,7 +240,9 @@ bool HttpHop(const std::wstring& url, uint64_t maxBytes, uint64_t deadline, std:
                                  WINHTTP_FLAG_SECURE)};
     if (!req.h) { *err = HttpErr(L"WinHttpOpenRequest", GetLastError()); return false; }
     // Let AbortNetwork() (the UI thread, on close or opt-out) close this request: WinHTTP then fails the
-    // blocking call at once instead of waiting out its timeout.
+    // blocking call at once instead of waiting out its timeout. Known window: an abort landing between two
+    // calls makes the next call use a closed handle, which WinHTTP rejects with ERROR_INVALID_HANDLE; no new
+    // handle is created on that path (the hop returns and the next one sees `cancel`), so it can't be reused.
     struct Reg {
         HInet& r;
         explicit Reg(HInet& x) : r(x) { std::lock_guard<std::mutex> g(g_netMx); g_req = r.h; }
@@ -324,6 +326,11 @@ Version FileVersion(const std::wstring& path) {
     return v;
 }
 
+// a\\b without doubling the separator when `a` is a root such as \\?\\E:\\.
+std::wstring Join(const std::wstring& a, const std::wstring& b) {
+    return (!a.empty() && (a.back() == L'\\' || a.back() == L'/')) ? a + b : a + L"\\" + b;
+}
+
 std::wstring FinalPath(HANDLE h) {
     DWORD n = GetFinalPathNameByHandleW(h, nullptr, 0, FILE_NAME_NORMALIZED);
     if (!n) return {};
@@ -338,7 +345,9 @@ std::wstring FinalPath(HANDLE h) {
 // the parent was checked). The handle is opened without FILE_SHARE_DELETE, so while the caller holds it the
 // folder can't be renamed or replaced by a junction. parentFinal empty = don't check the location.
 HANDLE OpenRealDir(const std::wstring& path, const std::wstring& parentFinal, const std::wstring& leaf, std::wstring* why) {
-    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+    // FILE_TRAVERSE makes the open share-checked (an attributes-only open isn't), so leaving out
+    // FILE_SHARE_DELETE really does stop anyone renaming the folder while we hold it.
+    HANDLE h = CreateFileW(path.c_str(), FILE_TRAVERSE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (h == INVALID_HANDLE_VALUE) { *why = ToShell(path) + L": " + ErrorText(GetLastError()); return nullptr; }
     BY_HANDLE_FILE_INFORMATION fi{};
@@ -349,7 +358,7 @@ HANDLE OpenRealDir(const std::wstring& path, const std::wstring& parentFinal, co
         *why = ToShell(path) + L" is a link or not a folder"; CloseHandle(h); return nullptr;
     }
     if (!parentFinal.empty()) {
-        std::wstring fin = FinalPath(h), want = parentFinal + L"\\" + leaf;
+        std::wstring fin = FinalPath(h), want = Join(parentFinal, leaf);
         if (fin.empty() || CompareStringOrdinal(fin.c_str(), (int)fin.size(), want.c_str(), (int)want.size(), TRUE) != CSTR_EQUAL) {
             *why = ToShell(path) + L" resolves to " + (fin.empty() ? std::wstring(L"(unknown)") : ToShell(fin));
             CloseHandle(h); return nullptr;
@@ -412,7 +421,11 @@ bool Install(const std::vector<uint8_t>& bytes, const Version& want, const std::
 
     // The exe's folder, then .hadron-old and the stamp folder, each checked (and held open, so it can't be
     // swapped for a link) before anything is created inside it.
-    std::wstring dirX = ToExtended(dir), oldRoot = dirX + L"\\.hadron-old", oldDir = oldRoot + L"\\" + stamp;
+    // The folder comes from the full exe path (ToExtended("E:") would be E:'s current directory, not E:\\).
+    std::wstring exeFull = ToExtended(exe);
+    std::wstring dirX = exeFull.substr(0, exeFull.find_last_of(L"\\/") + 1);   // keeps the trailing separator
+    if (dirX.size() > 4 && dirX.back() == L'\\' && dirX[dirX.size() - 2] != L':') dirX.pop_back();   // not a root
+    std::wstring oldRoot = Join(dirX, L".hadron-old"), oldDir = Join(oldRoot, stamp);
     std::wstring why;
     HANDLE hDir = OpenRealDir(dirX, L"", L"", &why);
     if (!hDir) { *err = L"refused to keep the old exe: " + why; dropTmp(); return false; }
@@ -635,7 +648,11 @@ Result CheckAndInstall(bool install, const std::atomic<bool>* cancel) {
     if (body.size() < 2 || body[0] != 'M' || body[1] != 'Z') { r.message = L"Update isn't a Windows exe; not installed"; return r; }
     if (cancel && cancel->load()) { r.outcome = Outcome::Cancelled; r.message = L"Update cancelled"; return r; }
 
-    if (!Install(body, rel.version, exe, &err, cancel)) { r.message = L"Update failed: " + err; return r; }
+    if (!Install(body, rel.version, exe, &err, cancel)) {
+        r.outcome = cancel && cancel->load() ? Outcome::Cancelled : Outcome::Failed;
+        r.message = r.outcome == Outcome::Cancelled ? std::wstring(L"Update cancelled") : L"Update failed: " + err;
+        return r;
+    }
     r.outcome = Outcome::Installed;
     r.message = L"Hadron " + ToString(rel.version) + L" installed. Restart to use it";
     return r;
