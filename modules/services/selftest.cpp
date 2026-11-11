@@ -442,7 +442,8 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
               L"R3: the Company lookup reads only local drive paths, never UNC, \\\\?\\UNC\\ or device paths");
         check(CompanyAttrsAllowed(FILE_ATTRIBUTE_ARCHIVE) && !CompanyAttrsAllowed(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) &&
                   !CompanyAttrsAllowed(FILE_ATTRIBUTE_RECALL_ON_OPEN) && !CompanyAttrsAllowed(FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_ARCHIVE) &&
-                  !CompanyAttrsAllowed(INVALID_FILE_ATTRIBUTES),
+                  !CompanyAttrsAllowed(INVALID_FILE_ATTRIBUTES) &&
+                  !CompanyAttrsAllowed(FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_ARCHIVE),   // N1: a link is a leaf
               L"R3: the Company lookup never opens a cloud placeholder or offline file (RECALL_ON_DATA_ACCESS, RECALL_ON_OPEN, OFFLINE)");
         check(Crc32("123456789", 9) == 0xCBF43926u, L"CRC-32 check value");
         std::vector<SvcItem> v(3);

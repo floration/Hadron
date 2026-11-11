@@ -1,0 +1,34 @@
+# svcdrv Finalize: mini Design pass
+
+e3cfd92, fixture renders only (`/home/user/Hadron/build`, Wine, 1600x1000 @96 dpi). 44 shots in
+`/mnt/project-files/pipeline/svcdrv/finalize/mini-design/`: `md-<layout>-*` (list x 4 themes, suite dark/light, plans
+bloat/stripped/minimum/default/stock, stock on Drivers, interrupted, TI on, drivers) plus the script's `finalize` set (`fin-*`).
+Cat. 5 = UI consistency, 6 = text. Nothing blocking: no overlap of controls, no unreadable text-on-fill (Console WARN
+tag on boring is black on #AA781E, 5.4:1), the stock plan shows its reason in both layouts, and no "Nothing to change." is left.
+
+## Issues
+
+| # | Image | What's wrong | Suggested fix | Cat |
+|---|---|---|---|---|
+| 1 | md-*-interrupted-dark, fin-*-interrupted-boring | Banner reads "(20261110-213012 UTC, Pure bloat removal (Services)): 1 of 3…": doubled ")" and a raw log stamp. ui.md says the banner shows "YYYY-MM-DD HH:MM UTC"; the TI banner has the same raw stamp ("…(Services), 20261110-213012 UTC") | plan.cpp:1350 InterruptedText and :1383 TiLeftText: format `lg.stamp`/`c.stamp` as "2026-11-10 21:30 UTC" and drop the outer parens ("An apply of Pure bloat removal (Services) did not finish (2026-11-10 21:30 UTC): …") | 6 |
+| 2 | md-baseline-plan-*-dark/light, fin-baseline-plan-ti-light | "Apply is off: Fixture data: applying is off." Three clauses, two colons, says "off" twice. Console reads "(Fixture data: applying is off.)" | M:2561: when `why` already names the state, print it alone, e.g. "Apply is off: this is fixture data." | 6 |
+| 3 | md-baseline-list-*, -suite-*, -drivers-dark, fin-baseline-* | Baseline list Name cells are 15px and the other cells 12px. The plan grid uses 12px names, so the two Baseline grids differ. baseline.md §2 decided "one 12px cell size"; core commit e5ee164 reverted it | Either restore the one-size cell font (lead's core call) or amend baseline.md §2 to record the revert and why | 5 |
+| 4 | md-baseline-suite-dark/light | In the suite the Company column is gone (Name ~180, Display ~125). baseline.md §3 promises Company in the suite ("third-party … is how bloat stands out"); Q7's wider Name pushed it out | Cap the suite Name at the 140 floor when that keeps Company, or drop Display name before Company in the suite; update §3 if Company is meant to drop | 5 |
+| 5 | md-baseline-drivers-dark, fin-baseline-drivers-light, fin-baseline-thirdparty-dark | Drivers header "Display na…" is cut, though ui.md says the header shortens before it cuts. In the suite the filter placeholder cuts to "Filter by name, compa…" (§3: "no longer ellipsises") | Use the short title ("Display") whenever the full one doesn't fit; in the suite use the short placeholder "Filter" or widen the box to its min text | 5 |
+| 6 | fin-baseline-plan-ti-light | With `--select dmwappushservice` the Baseline plan leaves the selected row on the last line, and the top row (vmicheartbeat) is half hidden under the header. Console (fin-console-plan-ti-light) centres the row and snaps to whole rows | Centre the selection on first show of a plan in Baseline (as §5 does for the list) and start the scroll on a whole row | 5 |
+| 7 | md-console-drivers-dark, fin-console-drivers-light vs fin-baseline-drivers-light | For a Boot/System driver Baseline shows the current "Boot" pill selected; Console's start strip shows only Auto/Manual/Disabled with none selected, so the current value isn't on the strip | Console: draw the current Boot/System value as a disabled, selected cell, the same as Baseline | 5 |
+| 8 | md-console-suite-dark/light | The short F-bar tier reads "F2 Tab", "F6 TI:off", "F8 Stock-". "Stock-" is a private shorthand for "no data", and "Tab" doesn't say which tab | "F2 Drivers"/"Services" (it fits), "F8 Stock?" or "F8 Stock (none)", "F6 TI off" | 6 |
+| 9 | md-*-plan-stock-dark, md-*-plan-stock-drivers-light | In an empty stock plan the summary still says "Nothing changes until you press/click Apply. Click [x] or press Space to tick", shows a disabled "Apply 0 changes", and repeats the reason three times (bullet, centre, button); the detail pane is blank | With 0 rows: drop the tick/Apply sentence, keep only the centred reason, and put a one-line hint in the detail pane ("Nothing to show: no Windows-stock data for this build") | 5 |
+| 10 | md-baseline-drivers-dark, fin-baseline-thirdparty-dark, fin-console-thirdparty-dark | nvlddmkm's detail says the same thing twice: a warn line "Not in any preset: third-party or unknown: no Hadron KB entry…" and then the section "Not in Hadron's KB: No KB text for it, so it is never in a preset (third-party or unknown…)" | Keep the section and cut the warn line to "A single change is still possible where Windows allows it." | 6 |
+| 11 | md-*-plan-default-dark | Plan Basis says "recorded: first.txt, read from this PC's service manager…". `first.txt` is an internal file name. Console's F1 Basis legend lists published/measured/reasoning/folklore but not "recorded" | "recorded: Hadron's first-run snapshot of this PC (2026-11-01 18:30)"; add "recorded" to the F1 legend | 6 |
+| 12 | fin-console-help-dark vs md-baseline-list-* legend | A pending restart is "!" in Console ("manual!") and " (pending)" in Baseline. "Windows stock: no value with a measured or published basis in Hadron's KB yet" (detail) and "no data for this build yet" (chip/F8) say one fact two ways | Pick one marker per layout on purpose and note it in console.md, or use "(pending)" in both. Reuse the chip's wording in the detail: "Windows stock: no data for this build yet" | 5 |
+| 13 | fin-baseline-plan-ti-light, fin-console-plan-ti-light | The plan reason "needs TrustedInstaller: written while impersonating it (toggle on)" uses the mechanism word "impersonating" | "needs TrustedInstaller: Hadron writes it as TrustedInstaller (toggle on)" | 6 |
+| 14 | md-baseline-list-*, md-baseline-plan-* | The Why and Start cells cut the part that carries the meaning: "Auto (delayed) +trig…", "Intel integrated graphics only; kept …" (when it's kept is lost). Console shows the full text | Baseline plan: let the Why column take the Basis column's width when narrow, or add a tooltip/one-line wrap; Start: use "+t" as Console does when it doesn't fit | 5 |
+
+## Checked, fine
+- Contrast: white on the accent selection (0078D7, E81123), the TI ON warn fill (baseline and console), and the WARN/INFO tags in
+  all four themes. The disabled Apply looks disabled in both layouts.
+- TI-on banner and toggle in both layouts. The F6 cell is underlined when on. Turn off is present.
+- Both layouts in the suite: no overlap with the sidebar or the status bar. The F-bar never draws under LIST.
+- Known Wine limits (not issues): Console falls back to a proportional font (no Consolas), and a few glyphs in the empty-state line
+  hint heavier (font substitution).

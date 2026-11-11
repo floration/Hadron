@@ -397,18 +397,57 @@ bool CompanyPathAllowed(const std::wstring& path) {
 bool CompanyAttrsAllowed(DWORD attrs) {
     // Hard rule 1: never read data from a file that would be recalled from the cloud or from offline storage.
     const DWORD kRecall = FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_OFFLINE;
-    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & kRecall) && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+    // A reparse point is a leaf (rule 1): its own attributes say nothing about the target that version.dll would
+    // read, which may be a cloud placeholder or a network path.
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & kRecall) && !(attrs & FILE_ATTRIBUTE_DIRECTORY) &&
+           !(attrs & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
 namespace {
 // Metadata only (no data is read, nothing is recalled): a local drive that is not a network drive, and a file
 // without the recall or offline attributes.
+// Attributes as directory enumeration reports them (WIN32_FIND_DATA, the source rule 1 names): RECALL_ON_OPEN is
+// only guaranteed there, and FindFirstFileExW never opens the file, so nothing is recalled.
+DWORD FindAttrs(const std::wstring& p) {
+    if (p.find_first_of(L"*?") != std::wstring::npos) return INVALID_FILE_ATTRIBUTES;
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileExW(sys::ToExtended(p).c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
+    if (h == INVALID_HANDLE_VALUE) return INVALID_FILE_ATTRIBUTES;
+    FindClose(h);
+    return fd.dwFileAttributes;
+}
+
 bool CompanyReadable(const std::wstring& path) {
     if (!CompanyPathAllowed(path)) return false;
     std::wstring p = path.rfind(L"\\\\?\\", 0) == 0 ? path.substr(4) : path;
     std::wstring root = p.substr(0, 3);
     if (GetDriveTypeW(root.c_str()) == DRIVE_REMOTE) return false;   // a mapped network drive: same as UNC
-    return CompanyAttrsAllowed(GetFileAttributesW(sys::ToExtended(p).c_str()));
+    // No folder on the way may be a reparse point either: a junction or symlinked folder can lead to a share or a
+    // cloud folder that the drive-type check above can't see.
+    for (size_t i = p.find(L'\\', 3); i != std::wstring::npos; i = p.find(L'\\', i + 1)) {
+        DWORD a = FindAttrs(p.substr(0, i));
+        if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+    }
+    return CompanyAttrsAllowed(FindAttrs(p));
+}
+
+// GetFileVersionInfoExW reads the version strings from the file's MUI satellites when there are any, so every MUI
+// file must pass the same checks. GetFileMUIPath only tests that each exists; it reads no data.
+bool CompanyMuiReadable(const std::wstring& path) {
+    ULONGLONG en = 0;
+    for (int guard = 0; guard < 64; guard++) {
+        wchar_t lang[LOCALE_NAME_MAX_LENGTH] = {};
+        ULONG cl = LOCALE_NAME_MAX_LENGTH;
+        std::vector<wchar_t> mp(32768, 0);
+        ULONG cm = (ULONG)mp.size();
+        if (!GetFileMUIPath(MUI_LANGUAGE_NAME, path.c_str(), lang, &cl, mp.data(), &cm, &en)) {
+            DWORD e = GetLastError();
+            return e == ERROR_NO_MORE_FILES || e == ERROR_FILE_NOT_FOUND || e == ERROR_RESOURCE_TYPE_NOT_FOUND ||
+                   e == ERROR_MUI_FILE_NOT_FOUND;
+        }
+        if (!CompanyReadable(mp.data())) return false;
+    }
+    return false;   // more satellites than any real file has: don't read it
 }
 }  // namespace
 
@@ -440,7 +479,7 @@ std::wstring FileCompany(const SvcItem& item) {
         if (got == 0 || got > exp.size()) return {};
         path = exp.data();
     }
-    if (!CompanyReadable(path)) return {};
+    if (!CompanyReadable(path) || !CompanyMuiReadable(path)) return {};
     std::wstring ext = sys::ToExtended(path);
     DWORD dummy = 0;
     DWORD sz = GetFileVersionInfoSizeExW(FILE_VER_GET_NEUTRAL, ext.c_str(), &dummy);
