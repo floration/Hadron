@@ -7,9 +7,10 @@ parity checklist §4, theme §5, edge cases §6, rule violations §7). Read that
 ## Goal
 `bios` module ("BIOS Settings"): every setup setting of the owner's board (5,368 from the shipped
 `settings.db`) with its live value, default, menu path, help, explanation and per-goal advice; snapshots
-(save / load / compare to live); export of the changes a goal recommends. **Read-only firmware (rule 2):**
-the module never writes NVRAM, never flashes, never runs SCEWIN/AMISCE.
-**Since 2026-11-11:** guarded setting writes (rule 2 rewritten) are specified in `docs/design/bios-write.md`.
+(save / load / compare to live); export of the changes a goal recommends. **Guarded writes, off by default
+(see rule 2):** setup values in existing variables of the settings map change only behind the never-persisted
+"Allow BIOS writes" switch, through `modules/bios/fwwrite.cpp` alone (spec: `docs/design/bios-write.md`).
+The module never flashes, never runs SCEWIN/AMISCE, never creates or deletes a variable.
 
 ## Two work packages (run in parallel)
 **A — module** (`modules/bios/*`): UI, live firmware read, version guard, snapshots, export.
