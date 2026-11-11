@@ -27,16 +27,16 @@ struct Pal {
     COLORREF text3()  const { return Pick(t.text3,  COLOR_GRAYTEXT); }
     COLORREF accent() const { return Pick(t.accent, COLOR_HIGHLIGHT); }
     COLORREF selBg()  const { return Pick(t.accent, COLOR_HIGHLIGHT); }
-    // Readable text on the selection fill: system colour in high contrast, else black or white by
-    // the fill's luminance (Rec. 601), so a saturated accent of any theme stays legible.
+    // Readable text on the selection fill: system colour in high contrast, else black or white (below),
+    // so the accent of any theme, or any Windows accent, stays legible.
     COLORREF selText()const {
         if (t.highContrast) return GetSysColor(COLOR_HIGHLIGHTTEXT);
-        // Whichever of near-black and near-white has the higher WCAG contrast with the fill. The better of
-        // the two is never below about 4.5:1 for any fill; a Rec. 601 brightness threshold picked white on a
+        // Whichever of black and white has the higher WCAG contrast with the fill: the better of the two is
+        // never below 4.58:1 for any fill. A Rec. 601 brightness threshold picked white on a
         // bright green accent (about 2:1).
         auto lin = [](int v) { double c = v / 255.0; return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); };
         auto lum = [&](COLORREF c) { return 0.2126 * lin(GetRValue(c)) + 0.7152 * lin(GetGValue(c)) + 0.0722 * lin(GetBValue(c)); };
-        const COLORREF dark = RGB(16, 18, 22), light = RGB(245, 247, 250);
+        const COLORREF dark = RGB(0, 0, 0), light = RGB(255, 255, 255);
         double lf = lum(t.accent);
         double onDark = (lf + 0.05) / (lum(dark) + 0.05), onLight = (lum(light) + 0.05) / (lf + 0.05);
         return onDark > onLight ? dark : light;
