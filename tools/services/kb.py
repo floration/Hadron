@@ -911,7 +911,7 @@ info('IKEEXT', 'IKE and AuthIP IPsec Keying Modules', 'Key exchange (IKE and Aut
 info('iphlpsvc', 'IP Helper',
      'IPv6 transition tunnels (6to4, ISATAP, Teredo), IP-HTTPS and port proxy.',
      '@IOT says the PC loses the connectivity these technologies give. Xbox party chat and some multiplayer games are '
-     'reported to need Teredo (not stated on either page). Test it: compare Settings > Gaming > Xbox Networking before '
+     'reported to need Teredo (folklore: not stated on either page). Test it: compare Settings > Gaming > Xbox Networking before '
      'and after.', 'OK', 'NG')
 info('PolicyAgent', 'IPsec Policy Agent', 'Enforces IPsec policies.',
      '@IOT says connections that require IPsec fail and remote management of Windows Firewall stops.', 'DND', 'NG')
@@ -1108,7 +1108,8 @@ drv('storport', 'Storport storage port driver',
     'The system-supplied storage port driver that storage miniports plug into; Microsoft\'s AHCI driver (StorAHCI) is '
     'one, and Microsoft encourages vendors to use it.',
     _BOOT_PATH, 'published', '@STORPORT: "a system-supplied storage port driver" for high-performance buses and RAID '
-                             'adapters.')
+                             'adapters. @STORAHCI calls StorAHCI "a Storport miniport"; @STORPORT: "All vendors are '
+                             'encouraged to use Storport where possible".')
 drv('stornvme', 'Microsoft NVMe driver (StorNVMe)', 'The inbox driver for NVMe SSDs.',
     'NVMe drives that use it disappear. ' + _BOOT_PATH, 'published',
     '@STORNVME: "the system-supplied storage miniport driver that provides access to high-speed NVMe devices".')
@@ -1213,9 +1214,9 @@ drv('i8042prt', 'PS/2 keyboard and mouse driver', 'The function driver for PS/2-
 drv('HDAudBus', 'High Definition Audio bus driver',
     'The bus driver for High Definition Audio controllers, such as a GPU\'s HDMI/DisplayPort audio and onboard audio '
     'that uses Microsoft\'s HD Audio bus.',
-    'Audio devices on that bus stop (reasoning). Some Intel boards run onboard audio on Intel\'s own bus driver '
-    '(Smart Sound Technology) instead, and then it does not depend on this one; the device\'s Driver details in '
-    'Device Manager show which one loads.')
+    'Audio devices on that bus stop (reasoning). Some Intel boards run onboard audio on Intel\'s Smart Sound '
+    'Technology bus driver instead, and then it does not depend on this one (reasoning, not sourced). The audio '
+    'controller\'s Driver details in Device Manager show which driver loads.')
 drv('usbaudio', 'USB Audio driver (class 1)', 'The inbox driver for USB Audio class 1 devices.',
     'USB headsets and DACs that use it stop (reasoning).', 'published',
     '@USBCLASSES lists Usbaudio.sys for the USB Audio class; @USBAUDIO2 calls it the USB Audio 1.0 driver.')
@@ -1247,8 +1248,8 @@ drv('CNG', 'Kernel cryptography (CNG)', 'Kernel cryptography for Windows and dri
 drv('KSecDD', 'Kernel security support driver', 'Kernel-side security services for sign-in and secure channels.',
     'Windows can\'t start normally (reasoning).')
 drv('TPM', 'TPM driver', 'Talks to the Trusted Platform Module (firmware TPM or chip).',
-    'BitLocker with a TPM protector and Windows Hello keys fail (reasoning). Some anti-cheats are reported to check '
-    'the TPM (not sourced).')
+    'BitLocker with a TPM protector and TPM-backed Windows Hello keys fail (reasoning). Some anti-cheats are reported '
+    'to check the TPM (folklore).')
 drv('mssmbios', 'SMBIOS driver', 'Exposes the firmware\'s SMBIOS tables (board, BIOS and memory details) to Windows.',
     'Tools that read SMBIOS, Hadron\'s BIOS pages included, lose that data (reasoning).')
 drv('Beep', 'Beep driver', 'Plays the legacy system beep.', 'The legacy system beep stops (reasoning).')
