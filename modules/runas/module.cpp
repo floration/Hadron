@@ -163,6 +163,14 @@ private:
     void SaveRuns();
     void RememberRun(const LaunchResult& res);
     void RefillList();
+    void SortRuns();
+    bool Gate(Who w) {   // rule-4 gate; says why on refusal
+        if (LaunchAllowed(w, allowElevated_)) return true;
+        resultLine_ = L"Turn on \"Allow SYSTEM / TrustedInstaller\" first.";
+        resultBad_ = true;
+        Invalidate();
+        return false;
+    }
 
     void Button(HDC dc, const RECT& r, const std::wstring& label, int id, int data, bool primary,
                 bool enabled, bool selected);
@@ -314,8 +322,14 @@ HWND RunAsModule::Create(IHost& host, HWND parent, const RECT& rc) {
         }
         resultLine_ = L"Re-filled from history — review, then Run.";
         resultBad_ = false;
+        // A persisted SYSTEM/TI row must never bypass the off-by-default switch (rule 4).
+        if (!LaunchAllowed(who_, allowElevated_)) {
+            who_ = Who::ThisAdmin;
+            resultLine_ = L"Re-filled from history. SYSTEM/TrustedInstaller needs the switch; set to This admin.";
+        }
         Invalidate();
     };
+    list_.onSortChanged = [this](int, bool) { SortRuns(); RefillList(); Invalidate(); };
 
     CommandLine cl = CommandLine::Parse(GetCommandLineW());
     demo_ = !cl.screenshot.empty();
@@ -424,6 +438,9 @@ void RunAsModule::RememberRun(const LaunchResult& res) {
     r.mode = (int)req_.mode;
     r.integrity = res.integrityName;
     r.when = (long long)time(nullptr);
+    // Persistence and the 50-entry cap are newest-first, whatever column the view is sorted by.
+    std::stable_sort(runs_.begin(), runs_.end(),
+                     [](const LastRun& a, const LastRun& b) { return a.when > b.when; });
     // De-dup: drop any earlier identical target+identity, newest first.
     for (size_t i = 0; i < runs_.size(); ) {
         if (runs_[i].path == r.path && runs_[i].who == r.who && runs_[i].mode == r.mode &&
@@ -434,7 +451,33 @@ void RunAsModule::RememberRun(const LaunchResult& res) {
     runs_.insert(runs_.begin(), r);
     if (runs_.size() > kMaxRuns) runs_.resize(kMaxRuns);
     SaveRuns();
+    SortRuns();   // keep the user's chosen column order; persistence stays newest-first above
     RefillList();
+}
+
+int IntegrityRank(const std::wstring& s) {
+    static const wchar_t* const order[] = {L"Untrusted", L"Low", L"Medium", L"Medium Plus", L"High",
+                                           L"System", L"Protected"};
+    for (int i = 0; i < 7; i++) if (s == order[i]) return i;
+    return -1;
+}
+
+// Sort runs_ itself (stable) so a list row index still maps to runs_[i] in onActivate.
+void RunAsModule::SortRuns() {
+    int col = list_.SortColumn();
+    if (col < 0) return;
+    bool asc = list_.SortAscending();
+    std::stable_sort(runs_.begin(), runs_.end(), [&](const LastRun& a, const LastRun& b) {
+        int c = 0;
+        switch (col) {
+            case 0: c = _wcsicmp(a.path.c_str(), b.path.c_str()); break;
+            case 1: c = _wcsicmp(IdentityLabel(a.who, a.mode, a.account).c_str(),
+                                 IdentityLabel(b.who, b.mode, b.account).c_str()); break;
+            case 2: c = IntegrityRank(a.integrity) - IntegrityRank(b.integrity); break;
+            default: c = (a.when < b.when) ? -1 : (a.when > b.when ? 1 : 0); break;   // by timestamp
+        }
+        return asc ? c < 0 : c > 0;
+    });
 }
 
 void RunAsModule::RefillList() {
@@ -720,6 +763,7 @@ bool RunAsModule::PromptPassword(const std::wstring& account, std::wstring* user
 
 void RunAsModule::DoRun(const LaunchRequest& req) {
     if (worker_.Running()) return;
+    if (!Gate(req.who)) { ZeroPassword(); return; }   // defence in depth (rule 4)
     req_ = req;
     resultLine_.clear();
     host_->SetBusy(true);
@@ -749,6 +793,7 @@ void RunAsModule::RunTarget() {
         Invalidate();
         return;
     }
+    if (!Gate(who_)) return;
     LaunchRequest req;
     req.path = path_.text;
     req.args = args_.text;
@@ -777,6 +822,7 @@ void RunAsModule::RunTarget() {
 
 void RunAsModule::RunTool(int idx) {
     if (idx < 0 || idx >= (int)tools_.size() || worker_.Running()) return;
+    if (!Gate(who_)) return;
     LaunchRequest req;
     req.path = tools_[idx].target;
     req.who = who_;
@@ -1021,6 +1067,40 @@ int RunAsModule::RunCli(int argc, wchar_t** argv) {
         // Belt-and-braces: the serialised line never mentions a password key.
         check(line.find(L"password") == std::wstring::npos && line.find(L"pwd") == std::wstring::npos,
               L"serialised run has no password field");
+    }
+
+    // --- rule-4 gate: SYSTEM/TI only with the switch on --------------------------------------
+    check(!LaunchAllowed(Who::System, false) && !LaunchAllowed(Who::TrustedInstaller, false),
+          L"LaunchAllowed: SYSTEM/TI refused with the switch off");
+    check(LaunchAllowed(Who::System, true) && LaunchAllowed(Who::TrustedInstaller, true),
+          L"LaunchAllowed: SYSTEM/TI allowed with the switch on");
+    check(LaunchAllowed(Who::ThisAdmin, false) && LaunchAllowed(Who::AnotherUser, false) &&
+          LaunchAllowed(Who::ThisAdmin, true) && LaunchAllowed(Who::AnotherUser, true),
+          L"LaunchAllowed: This admin / Another user always allowed");
+
+    // --- association template expansion -----------------------------------------------------
+    {
+        std::wstring f = L"C:\\My Docs\\a b.txt";
+        std::wstring un = ExpandAssoc(L"C:\\Windows\\notepad.exe %1", f, L"");
+        std::wstring q = ExpandAssoc(L"\"C:\\Windows\\notepad.exe\" \"%1\"", f, L"");
+        int n1 = 0, n2 = 0;
+        LPWSTR* a1 = CommandLineToArgvW(un.c_str(), &n1);
+        LPWSTR* a2 = CommandLineToArgvW(q.c_str(), &n2);
+        bool ok1 = a1 && n1 == 2 && std::wstring(a1[1]) == f;
+        bool ok2 = a2 && n2 == 2 && std::wstring(a2[1]) == f;
+        if (a1) LocalFree(a1);
+        if (a2) LocalFree(a2);
+        check(ok1, L"ExpandAssoc quotes a spaced path for an unquoted %1 (" + un + L")");
+        check(ok2, L"ExpandAssoc does not double-quote an already quoted \"%1\" (" + q + L")");
+    }
+
+    // --- account split for CreateProcessWithLogonW ------------------------------------------
+    {
+        std::wstring u, d;
+        SplitAccount(L"alice", &u, &d);       bool s1 = u == L"alice" && d == L".";
+        SplitAccount(L"PC1\\bob", &u, &d);    bool s2 = u == L"bob" && d == L"PC1";
+        SplitAccount(L"carol@corp.example", &u, &d); bool s3 = u == L"carol" && d == L"corp.example";
+        check(s1 && s2 && s3, L"SplitAccount handles user, domain\\user and user@domain");
     }
 
     // --- identity label ---------------------------------------------------------------------

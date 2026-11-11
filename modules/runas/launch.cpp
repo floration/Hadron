@@ -178,24 +178,34 @@ struct Resolved {
     std::wstring error;
 };
 
-// Expand an association command template ("\"C:\\app.exe\" \"%1\"") with the target and args.
-std::wstring ExpandAssoc(const std::wstring& tmpl, const std::wstring& file, const std::wstring& args) {
-    std::wstring out;
-    for (size_t i = 0; i < tmpl.size(); i++) {
-        if (tmpl[i] == L'%' && i + 1 < tmpl.size()) {
-            wchar_t c = tmpl[i + 1];
-            if (c == L'1' || c == L'L' || c == L'l') { out += file; i++; continue; }
-            if (c == L'*') { if (!args.empty()) out += args; i++; continue; }
-            if (c == L'%') { out += L'%'; i++; continue; }
+// Saves the thread's current impersonation token, sets `tok` (an impersonation token), and restores
+// the previous one on scope exit, so a nested swap never discards an outer ThreadPrivilege
+// impersonation. If the restore fails the thread falls back to RevertToSelf rather than staying
+// on the swapped-in (e.g. SYSTEM) token.
+class ThreadTokenSwap {
+public:
+    explicit ThreadTokenSwap(HANDLE tok) {
+        if (!OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, TRUE, &prev_)) {
+            DWORD e = GetLastError();
+            prev_ = nullptr;
+            if (e != ERROR_NO_TOKEN) { err_ = e; return; }   // can't restore safely: don't swap
         }
-        out += tmpl[i];
+        if (SetThreadToken(nullptr, tok)) ok_ = true;
+        else err_ = GetLastError();
     }
-    if (tmpl.find(L'%') == std::wstring::npos) {   // template had no placeholder: append the file
-        out += L" " + QuoteArg(file);
-        if (!args.empty()) out += L" " + args;
+    ~ThreadTokenSwap() {
+        if (ok_ && !SetThreadToken(nullptr, prev_)) RevertToSelf();
+        if (prev_) CloseHandle(prev_);
     }
-    return out;
-}
+    ThreadTokenSwap(const ThreadTokenSwap&) = delete;
+    ThreadTokenSwap& operator=(const ThreadTokenSwap&) = delete;
+    bool ok() const { return ok_; }
+    DWORD err() const { return err_; }
+private:
+    HANDLE prev_ = nullptr;
+    bool ok_ = false;
+    DWORD err_ = 0;
+};
 
 Resolved ResolveTarget(const LaunchRequest& req) {
     Resolved r;
@@ -295,13 +305,19 @@ bool LaunchWithToken(HANDLE hToken, const Resolved& res, LaunchResult* out) {
                                       flags, env, wd, &si, &pi);
     DWORD err = ok ? 0 : GetLastError();
     if (!ok) {
-        // Fallback: impersonate and CreateProcessAsUserW (needs SeAssignPrimaryTokenPrivilege).
-        if (SetThreadToken(nullptr, hToken)) {
-            ok = CreateProcessAsUserW(hToken, app, cmd.empty() ? nullptr : &cmd[0], nullptr, nullptr,
-                                      FALSE, flags, env, wd, &si, &pi);
-            if (!ok) err = GetLastError();
-            SetThreadToken(nullptr, nullptr);
+        // Fallback: impersonate the token (SetThreadToken needs an impersonation copy) and use
+        // CreateProcessAsUserW. The swap restores any outer impersonation on scope exit.
+        HANDLE imp = nullptr;
+        if (DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation,
+                             TokenImpersonation, &imp)) {
+            ThreadTokenSwap swap(imp);
+            if (swap.ok()) {
+                ok = CreateProcessAsUserW(hToken, app, cmd.empty() ? nullptr : &cmd[0], nullptr,
+                                          nullptr, FALSE, flags, env, wd, &si, &pi);
+                if (!ok) err = GetLastError();
+            }
         }
+        if (imp) CloseHandle(imp);
     }
     if (env) DestroyEnvironmentBlock(env);
 
@@ -442,7 +458,9 @@ void LaunchAnotherUser(const LaunchRequest& req, const wchar_t* password, Launch
     const wchar_t* wd = res.workDir.empty() ? nullptr : res.workDir.c_str();
     const wchar_t* pw = password ? password : L"";   // empty password => empty string
 
-    BOOL ok = CreateProcessWithLogonW(req.account.c_str(), L".", pw, LOGON_WITH_PROFILE, app,
+    std::wstring user, domain;
+    SplitAccount(req.account, &user, &domain);
+    BOOL ok = CreateProcessWithLogonW(user.c_str(), domain.c_str(), pw, LOGON_WITH_PROFILE, app,
                                       cmd.empty() ? nullptr : &cmd[0], CREATE_UNICODE_ENVIRONMENT,
                                       nullptr, wd, &si, &pi);
     if (!ok) {
@@ -560,10 +578,26 @@ void LaunchTrustedInstaller(const LaunchRequest& req, LaunchResult* out) {
             CloseHandle(proc);
         }
     }
-    bool impersonated = winTok && SetThreadToken(nullptr, winTok);
-    SetTokenInformation(tok, TokenSessionId, &ourSession, sizeof(ourSession));
-    if (impersonated) SetThreadToken(nullptr, nullptr);
-    if (winTok) CloseHandle(winTok);
+    bool moved = false;
+    DWORD moveErr = 0;
+    if (winTok) {
+        ThreadTokenSwap swap(winTok);   // restores the outer SeDebug impersonation afterwards
+        if (!swap.ok()) {
+            moveErr = swap.err();
+        } else {
+            moved = SetTokenInformation(tok, TokenSessionId, &ourSession, sizeof(ourSession)) != FALSE;
+            if (!moved) moveErr = GetLastError();
+        }
+        CloseHandle(winTok);
+    } else {
+        moved = SetTokenInformation(tok, TokenSessionId, &ourSession, sizeof(ourSession)) != FALSE;
+        if (!moved) moveErr = GetLastError();
+    }
+    if (!moved) {   // never launch into session 0
+        out->error = L"Could not move the TrustedInstaller token to this session: " + sys::ErrorText(moveErr);
+        CloseHandle(tok);
+        return;
+    }
 
     if (req.mode == TokenMode::Limited) {
         HANDLE restricted = nullptr;
@@ -649,6 +683,52 @@ std::wstring MscCommand(const std::wstring& system32, const std::wstring& mscFil
 
 bool PrivilegeEnabled(BOOL adjustReturn, DWORD lastError) {
     return adjustReturn != FALSE && lastError != ERROR_NOT_ALL_ASSIGNED;
+}
+
+bool LaunchAllowed(Who who, bool allowElevated) {
+    if (who == Who::System || who == Who::TrustedInstaller) return allowElevated;
+    return true;
+}
+
+void SplitAccount(const std::wstring& account, std::wstring* user, std::wstring* domain) {
+    *user = account;
+    domain->clear();
+    size_t bs = account.find(L'\\');
+    if (bs != std::wstring::npos) {
+        *domain = account.substr(0, bs);
+        *user = account.substr(bs + 1);
+    } else {
+        size_t at = account.rfind(L'@');
+        if (at != std::wstring::npos) {
+            *user = account.substr(0, at);
+            *domain = account.substr(at + 1);
+        }
+    }
+    if (domain->empty()) *domain = L".";
+}
+
+std::wstring ExpandAssoc(const std::wstring& tmpl, const std::wstring& file, const std::wstring& args) {
+    std::wstring out;
+    bool inQuote = false;
+    for (size_t i = 0; i < tmpl.size(); i++) {
+        if (tmpl[i] == L'"') inQuote = !inQuote;
+        if (tmpl[i] == L'%' && i + 1 < tmpl.size()) {
+            wchar_t c = tmpl[i + 1];
+            if (c == L'1' || c == L'L' || c == L'l') {   // quote the file unless the template did
+                out += inQuote ? file : QuoteArg(file);
+                i++;
+                continue;
+            }
+            if (c == L'*') { if (!args.empty()) out += args; i++; continue; }
+            if (c == L'%') { out += L'%'; i++; continue; }
+        }
+        out += tmpl[i];
+    }
+    if (tmpl.find(L'%') == std::wstring::npos) {   // template had no placeholder: append the file
+        out += L" " + QuoteArg(file);
+        if (!args.empty()) out += L" " + args;
+    }
+    return out;
 }
 
 std::vector<Account> FilterAccounts(const std::vector<Account>& all) {

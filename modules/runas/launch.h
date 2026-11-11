@@ -71,6 +71,17 @@ std::wstring MscCommand(const std::wstring& system32, const std::wstring& mscFil
 // GetLastError() != ERROR_NOT_ALL_ASSIGNED.
 bool PrivilegeEnabled(BOOL adjustReturn, DWORD lastError);
 
+// The rule-4 gate: SYSTEM and TrustedInstaller launch only while the "Allow SYSTEM /
+// TrustedInstaller" switch is on; This admin and Another user are always allowed.
+bool LaunchAllowed(Who who, bool allowElevated);
+
+// Split "domain\user" or "user@domain" for CreateProcessWithLogonW; domain is "." when absent.
+void SplitAccount(const std::wstring& account, std::wstring* user, std::wstring* domain);
+
+// Expand a file-association command template (%1/%L = the file, %* = args, %% = %). The file is
+// wrapped with QuoteArg unless the template already puts that placeholder inside quotes.
+std::wstring ExpandAssoc(const std::wstring& tmpl, const std::wstring& file, const std::wstring& args);
+
 // ---- Local accounts --------------------------------------------------------------------------
 
 struct Account {
