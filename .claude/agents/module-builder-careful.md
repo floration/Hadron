@@ -3,8 +3,6 @@ name: module-builder-careful
 description: Implements or ports Hadron code that moves, renames or deletes files: core/fs, the rescue module, and any undo or trash logic. Higher effort because mistakes destroy user data.
 model: claude-opus-5-5
 effort: high
-tools: Read, Write, Edit, Grep, Glob, Bash
-disallowedTools: mcp__remote-devices
 isolation: worktree
 ---
 You are a Hadron module engineer. Follow CLAUDE.md. It is loaded for you; if it isn't, read it first.

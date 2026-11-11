@@ -41,7 +41,7 @@ struct IHost {                                   // implemented by both RunStand
     virtual void SetStatus(const wchar_t*) = 0;
     virtual void SetBusy(bool) = 0;              // the host blocks Close and shows activity
     virtual bool IsElevated() = 0;
-    virtual bool RequestElevation() = 0;         // launches --solo <id> --elevated; false if cancelled or failed
+    virtual bool RequestElevation() = 0;         // relaunch elevated with --elevated; false if cancelled or failed
     virtual Settings& Settings() = 0;            // per-module section
     virtual void Log(LogLevel, const wchar_t*) = 0;
 };
@@ -78,13 +78,13 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
   goes through `S(px)` with the current DPI. All legacy tools are system-DPI only, so this is real port work.
 - **Worker.** `core/sys` `Worker`: an atomic progress counter, read by the module on a timer, plus cancel and join.
   Its destructor calls `Cancel()` then `Join()` with no timeout. This is the legacy pattern made safe.
-- **Drag and drop.** UIPI blocks drag and drop into elevated windows, which is one more reason file modules never run elevated.
+- **Drag and drop.** UIPI blocks drag and drop from Explorer into elevated windows, so every drop target also has a Browse button.
 
 ## Command line (same for standalone and suite)
 | Argument | Meaning |
 |---|---|
 | `--module <id>` | Suite: open on that module |
-| `--solo <id>` | Suite: run only that module, as if standalone (used for elevated relaunch) |
+| `--solo <id>` | Suite: run only that module, as if standalone |
 | `--elevated` | Marks a relaunch; never relaunch again |
 | `--selftest` | Run the module's checks |
 | `--screenshot <png> --fixture <dir>` | Load the fixture, render the main view with `PrintWindow`, save, exit. This makes CI and tester screenshots deterministic on Windows and Wine |
@@ -112,7 +112,7 @@ The analysis code stays platform-independent, like legacy `rescue_core.h`. NTFS 
 ## Build outputs and resources
 | Target | File | Manifest execution level |
 |---|---|---|
-| Suite | `Hadron.exe` | asInvoker |
+| Suite | `Hadron.exe` | requireAdministrator |
 | Module with `Admin::None` or `Admin::Optional` | `Hadron<Name>.exe` | asInvoker |
 | Module with `Admin::Required` (rescue) | `Hadron<Name>.exe` | requireAdministrator |
 

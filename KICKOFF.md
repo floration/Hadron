@@ -17,14 +17,16 @@ Don't trade that away for convenience. First release: `diskmap` and `bios` (with
 legacy behaviour except for approved fixes.
 
 **How we work**
+- You and every subagent may work directly on my PC when this session is linked to it (CLAUDE.md rule 5). Agree a project folder with me at the Phase 0 check-in.
 - You plan, own `core/` and the architecture, write specs, review and merge.
 - Delegate scoped work to the subagents in `.claude/agents/`, using the spec template in CLAUDE.md. Run independent tasks in parallel.
 - Keep `docs/PROGRESS.md` and `docs/DECISIONS.md` current. End every session with a handoff note in PROGRESS.md.
 - Check that the config is honoured on the first delegation: the subagent model and effort (`/agents` or the run
   details), and your own model (`/status`). Note the result in DECISIONS.md.
 - Check what the sandbox has: mingw-w64, cmake, wine, xvfb, ImageMagick, python3. Install what's missing.
-- MSVC and real-Windows behaviour (UEFI variables, the USN journal, UAC, reparse points, DPI changes) can only be
-  verified in a `windows-latest` CI job. Don't block on them locally.
+- Real-Windows behaviour (UEFI variables, the USN journal, UAC, reparse points, DPI changes) can't be tested under
+  Wine. Test it on my PC (read-only for firmware; fixtures for anything that moves files) and in a `windows-latest`
+  CI job, which also covers MSVC.
 
 **Check-ins: stop and wait for me at each one.** Between them, decide yourself and log the decision. Send a short
 status at each merge: what merged, what's next, what's blocked.
@@ -56,6 +58,6 @@ status at each merge: what merged, what's next, what's blocked.
 `rescue` waits for my decision.
 
 **Phase 3: release.** `Hadron-<version>.zip` with the README (including the Unblock note). Copy it to my Downloads
-if this session is linked to my PC; that is the one pre-approved action there.
+when this session is linked to my PC.
 
 Start by reading the docs, then give me the Phase 0 plan.

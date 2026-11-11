@@ -3,8 +3,6 @@ name: module-builder
 description: Ports or implements one read-only Hadron module or feature from the lead's spec (e.g. diskmap, the bios app, a core/ui widget the lead specified). Not for code that moves or deletes files; use module-builder-careful for that.
 model: claude-opus-5-5
 effort: medium
-tools: Read, Write, Edit, Grep, Glob, Bash
-disallowedTools: mcp__remote-devices
 isolation: worktree
 ---
 You are a Hadron module engineer. Follow CLAUDE.md. It is loaded for you; if it isn't, read it first.

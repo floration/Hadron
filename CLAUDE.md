@@ -17,7 +17,7 @@ he's wrong. Change your mind when *he* brings evidence.
   - `reviewer`: high effort, read-only.
   - `tester`: medium effort; builds, tests, renders screenshots.
   - `kb-auditor`: high effort; checks the honesty of the BIOS knowledge base.
-- The lead never hands off architecture, `core/` API changes, or anything that touches the owner's machine.
+- The lead never hands off architecture or `core/` API changes.
 
 ## Precedence
 **Hard rules > the owner's explicit instructions in the project thread > legacy behaviour.**
@@ -45,20 +45,23 @@ and gets the owner's OK once, as a batch, before building. Known cases are in `d
    flashes, never runs SCEWIN/AMISCE. CI fails if the source contains `SetFirmwareEnvironmentVariable` or `NtSetSystemEnvironmentValue`.
 3. **Nothing third-party is linked into, embedded in or shipped with Hadron.** Win32, GDI, the C++ standard library
    and the Windows SDK only; write your own parsers. Build and test tools (CMake, MinGW, Wine, ImageMagick, Python) are fine.
-4. **Elevation only when needed, in its own window.** `Hadron.exe` runs `asInvoker`. A module that needs admin is
-   relaunched alone: `Hadron.exe --solo <id> --elevated`. The non-elevated suite keeps running and shows
-   "opened in admin window", so file-moving modules never run elevated. Rules for the relaunch:
+4. **Elevation.** The suite may run as admin: `Hadron.exe` requests elevation (`requireAdministrator`), so every
+   module inside it, including live BIOS reads, works without relaunching. Standalone exes request admin only if
+   their module is `Admin::Required`. A module launched without admin offers a relaunch with `--elevated`. Rules:
    - Detect elevation with `GetTokenInformation(TokenElevation)`.
    - A privilege counts as enabled only if `AdjustTokenPrivileges` succeeded and `GetLastError() != ERROR_NOT_ALL_ASSIGNED`.
-   - `ERROR_CANCELLED` (1223) from `ShellExecuteExW` is final, so fall back to degraded mode.
+   - `ERROR_CANCELLED` (1223) from `ShellExecuteExW` is final.
    - Make all arguments absolute paths before relaunching.
    - `--elevated` means never relaunch again.
    - Scripts check admin with `fltmc`, not `net session` (LanmanServer is disabled on the owner's PC).
-5. **The owner's PC.** Only the lead may use tools that reach the owner's computer (remote device tools, computer use).
-   The single pre-approved action is copying a finished release zip into his Downloads folder. Resolve that
-   folder with the device info or `FOLDERID_Downloads`; never hard-code a path. Everything else needs the owner's
-   explicit OK in the thread for that specific action: running any Hadron exe there, reading his files, requesting
-   folder access. Never run a file-moving or deleting feature on his machine; he runs those themselves.
+   - Elevated windows can't receive drag-and-drop from Explorer (UIPI), so every drop target also offers a Browse button.
+5. **The owner's PC.** The lead and every subagent may use the tools that reach the owner's computer: read and write
+   files, build, run Hadron and tests there.
+   - Work inside a project folder on his machine (agree its path once and record it in DECISIONS.md).
+   - Resolve his Downloads with the device info or `FOLDERID_Downloads`; never hard-code a path.
+   - Outside the project folder, never move, overwrite or delete his existing files without his OK in the thread
+     for that specific action. Rule 1 still applies to everything Hadron does at runtime.
+   - Never run a file-moving or deleting feature against his real folders; test on fixtures.
    His setup: Windows 10 22H2, MSI PRO Z790-P WIFI (MS-7E06), BIOS 7E06vAF, i7-14700KF (no iGPU), and no backups.
 6. **Scripts ship inside .zip files.** The owner can't download `.bat` files directly.
 7. **Claims must be honest, and checkably so.**

@@ -3,8 +3,6 @@ name: tester
 description: Builds every Hadron target, runs all tests and golden comparisons, and renders module screenshots under Wine for review. Use after review passes and before every merge and release.
 model: claude-opus-5-5
 effort: medium
-tools: Read, Grep, Glob, Bash
-disallowedTools: mcp__remote-devices
 ---
 You verify Hadron builds.
 

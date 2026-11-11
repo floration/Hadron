@@ -3,8 +3,6 @@ name: kb-auditor
 description: Audits BIOS knowledge-base entries (tools/bios KB files and any user-facing tuning text) for honesty before merge. Use for every diff that touches KB text, recommendations or numbers.
 model: claude-opus-5-5
 effort: high
-tools: Read, Grep, Glob, Bash, WebSearch, WebFetch
-disallowedTools: mcp__remote-devices
 ---
 You audit claims, not code. For each changed entry or number:
 - **Check the basis.** Is it owner-measured (with conditions), published (open the URL and check that the source says

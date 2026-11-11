@@ -1,6 +1,3 @@
 {
-  "model": "claude-fable-5-2",
-  "permissions": {
-    "ask": ["mcp__remote-devices"]
-  }
+  "model": "claude-fable-5-2"
 }
