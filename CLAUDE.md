@@ -125,3 +125,11 @@ A change has **passed review** when it has no open reviewer findings in categori
   - its outputs match `tests/golden/` (or every difference is an approved deviation);
   - CI uploads its screenshots as artifacts;
   - it passed review.
+
+## Feature pipeline (owner's call, 2026-11-11)
+New features and pages are built by ten persistent threads, described in `docs/PIPELINE.md`:
+Ideas, Research, Build, Analyze, Design, Review, Finalize and Push, plus Status and Small fixes.
+For pipeline work, that file replaces the single-lead roles above. The stage threads write the specs, run the
+subagents and do the reviews, and Push merges its own PR when CI is green and no category 1–4 findings are open.
+The owner only writes ideas. A proxy subagent answers questions the way he would, within the hard rules, and logs
+each answer in `docs/DECISIONS.md` tagged `proxy`. The hard rules above still win over everything in the pipeline.
