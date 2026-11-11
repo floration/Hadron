@@ -86,8 +86,8 @@ Staged change = (setting index, new value). `BuildPlan`:
    bios	<BIOS line from the same read, as system.txt's "BIOS:">
    <name>	<guid>	<size>	<attributes, 8 hex digits>	<SHA-256 of the bytes, BCrypt, lowercase hex>
    ```
-   **The backup root (moved from `%LOCALAPPDATA%` in the round-3 review, 2026-11-11; approved by the reviewing
-   coordinator as a spec change).** The root is
+   **The backup root (moved from `%LOCALAPPDATA%` in the round-3 review, 2026-11-11; the lead's call within the
+   owner-approved write feature).** The root is
    `%ProgramData%\Hadron\bios-backups` (`FOLDERID_ProgramData`). Under `%LOCALAPPDATA%` the user owns every
    folder, so a non-admin could redirect Hadron's path-based operations (a junction or an object-manager
    symlink) or swap files between a check and a read. `ProgramData\Hadron`, then `bios-backups`, are each created
