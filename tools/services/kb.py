@@ -75,8 +75,9 @@ SOURCES = {
     'RDBSS': 'https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/the-rdbss-driver-and-library',
     'LLTDCSP': 'https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-linklayertopologydiscovery',
     'HVNET': 'https://learn.microsoft.com/en-us/windows-hardware/drivers/network/overview-of-hyper-v',
-    # OEM (fix/svcdrv-kb, read 2026-11-11). Vendor pages where one exists; the file.net pages are a third-party,
-    # user-contributed process database, cited only for a service's name and folder, never for what it does.
+    # OEM (fix/svcdrv-kb, read 2026-11-11). Vendor pages where one exists; the file.net pages are a third-party process
+    # database (not the vendor; its pages mix its own write-ups with user ratings), cited only for a service's name
+    # and folder, never for what it does.
     'MSIBOARD': 'https://www.msi.com/Motherboard/PRO-Z790-P-WIFI/Specification',
     'INTELLMS': 'https://software.intel.com/sites/manageability/AMT_Implementation_and_Reference_Guide/WordDocuments/'
                 'gloss_lms.htm',
@@ -1353,27 +1354,30 @@ drv('usbser', 'USB serial (CDC) driver', 'The inbox driver for USB communication
 # File system filters and the SMB client.
 drv('wcifs', 'Windows Container Isolation filter',
     'A Microsoft file system minifilter that layers file system views for Windows container features (reasoning).',
-    'Features built on container file isolation (Windows Sandbox, for example) may fail (reasoning, not tested). '
+    'Features built on container file isolation may fail (reasoning, not tested); Windows Sandbox is a likely '
+    'example (not sourced). '
     'Hadron does not know everything that uses it: leave it at its default.')
 drv('FileCrypt', 'FileCrypt minifilter',
     'A Microsoft file system minifilter. Hadron has no Microsoft page that says what it does; the name suggests file '
     'encryption (reasoning).',
     'Not known: Hadron does not know what depends on it, so it can\'t say what stops. Leave it at its default.')
 drv('rdbss', 'Redirected Drive Buffering Subsystem',
-    'The file system library network redirectors are built on; the SMB client is one.',
+    'The file system driver the SMB client\'s redirector runs on. Other network redirectors link a static copy of '
+    'the library and don\'t need it.',
     'Network file systems built on it stop: shared folders, mapped drives and SMB printers fail (reasoning).',
     'published', '@RDBSS: "A file system driver (rdbss.sys) supplied with the operating system", "automatically '
                  'loaded if any non-monolithic network mini-redirectors are registered on the system".')
 drv('mrxsmb', 'SMB redirector (SMB client)', 'The SMB client\'s network mini-redirector, built on RDBSS.',
     'The SMB client stops: shared folders, mapped drives and SMB printers on other computers fail (reasoning).',
-    'published', '@RDBSS names the Microsoft Server Message Block (SMB) redirector as a non-monolithic network '
-                 'mini-redirector built on RDBSS.')
+    'published', '@RDBSS: "The Microsoft Server Message Block (SMB) redirector ... is currently the only driver that '
+                 'can be built as a non-monolithic network mini-redirector driver"; rdbss.sys "is automatically loaded '
+                 'if any non-monolithic network mini-redirectors are registered".')
 drv('mrxsmb20', 'SMB2/SMB3 redirector', 'The SMB2/SMB3 protocol part of the SMB client (reasoning).',
     'Connections to SMB2/SMB3 shares, which is what current Windows and NAS devices offer, fail (reasoning).')
 drv('bowser', 'Browser support driver', 'The SMB client\'s support driver for the old Computer Browser network list '
                                         '(reasoning).',
-    'On Windows 10 the Workstation service (LanmanWorkstation) lists it as a dependency, so the SMB client may fail '
-    'to start (reasoning).')
+    'If the Workstation service (LanmanWorkstation) lists it as a dependency, Windows won\'t start that service, and '
+    'the SMB client stops (reasoning). Check it: run sc qc LanmanWorkstation and look under DEPENDENCIES.')
 
 # Network.
 drv('NdisVirtualBus', 'NDIS virtual network adapter enumerator',
@@ -1384,15 +1388,15 @@ drv('WFPLWFS', 'Windows Filtering Platform NDIS filter',
     'Lets the Windows Filtering Platform inspect and filter traffic at the network adapter (reasoning).',
     'Firewall, VPN and filtering features that use the platform at that layer may break (reasoning, not tested).')
 drv('lltdio', 'Link-Layer Topology Discovery Mapper I/O driver',
-    'Discovers the layout of the local network for the Network Map, and runs quality-of-service checks such as '
-    'bandwidth estimation.',
-    'This PC can no longer map the local network (reasoning). Internet access and file sharing don\'t depend on it '
-    '(reasoning).', 'published',
+    'Lets this PC discover the layout of the local network and start quality-of-service checks such as bandwidth '
+    'estimation. Windows 10 has no built-in network map that shows the result (reasoning).',
+    'Tools on this PC that map the network with LLTD stop finding devices (reasoning, not tested). Internet access '
+    'and file sharing don\'t depend on it (reasoning).', 'published',
     '@LLTDCSP: "LLTDIO allows a computer to discover the topology of a network it\'s connected to. It also allows a '
     'computer to initiate Quality-of-Service requests such as bandwidth estimation and network health analysis."')
 drv('rspndr', 'Link-Layer Topology Discovery Responder',
-    'Answers other computers\' topology discovery so this PC shows up on their network maps.',
-    'This PC no longer appears on other computers\' network maps (reasoning).', 'published',
+    'Answers other computers\' Link Layer Topology Discovery requests, so this PC can be found on the network.',
+    'LLTD mapping tools on other computers no longer find this PC (reasoning, not tested).', 'published',
     '@LLTDCSP: "The Responder allows a computer to participate in Link Layer Topology Discovery requests so that it '
     'can be discovered and located on the network."')
 
@@ -1410,20 +1414,23 @@ drv('netvsc', 'Hyper-V synthetic network adapter', 'The network adapter driver i
     'A Hyper-V virtual machine loses its synthetic network adapter (reasoning).',
     note=_HV_NOTE + ' @HVNET: "a Network VSC (NetVSC) runs in a guest operating system".')
 drv('storvsc', 'Hyper-V synthetic storage', 'The disk controller driver inside a Hyper-V virtual machine (reasoning).',
-    'A Hyper-V virtual machine whose disks are synthetic can\'t start (reasoning). ' + _BOOT_PATH, note=_HV_NOTE)
+    'A Hyper-V virtual machine whose disks are synthetic can\'t start (reasoning). ' + _BOOT_PATH,
+    note='Reasoning: @HVNET describes VMBus and a network client (NetVSC); it does not mention storage or name this '
+         'driver.')
 # HyperVideo and hyperkbd already have entries (Stripped, hw vmguest) above.
 
 # OEM services (7-finalize.md follow-up 2). Third-party items are never in a preset (DECISIONS 2026-11-11), so these
 # only explain. Components named for the MSI PRO Z790-P WIFI by @MSIBOARD: Intel Z790 chipset, Intel LAN and Wi-Fi,
 # Realtek ALC897 audio. A name a PC doesn't have is never shown (the KB is looked up by service name).
-_OEM = ' The vendor does not document this service; "not tested" means Hadron has no measurement either way.'
+_OEM = ' Hadron found no vendor documentation for this service; "not tested" means Hadron has no measurement either way.'
 E('MSI_Center_Service', 'svc', 'MSI Center service (MSI)',
   'The background service of MSI Center, MSI\'s utility for its boards and PCs. Windows does not use it (reasoning).',
   if_off='MSI Center and the features installed in it may stop working until it is set back (reasoning, not '
          'tested).',
   test='Set it to Manual, restart, open MSI Center and use each feature you rely on; undo if one fails.',
   basis='reasoning', basis_note='Hadron found no MSI page for it. @FNMSICENTER lists the service MSI_Center_Service '
-                                'for MSI_Central_Service.exe in MSI Center\'s folder, from Micro-Star; it is cited for '
+                                'for MSI_Central_Service.exe in MSI Center\'s folder (or One Dragon Center\'s, its '
+                                'older name), from Micro-Star; it is cited for '
                                 'the name only.' + _OEM, never=True)
 E('Mystic_Light_Service', 'svc', 'Mystic Light service (MSI)',
   'MSI\'s RGB lighting service, part of MSI Center\'s Mystic Light feature (reasoning, from its name and folder).',
@@ -1435,8 +1442,9 @@ E('Mystic_Light_Service', 'svc', 'Mystic Light service (MSI)',
                                 + _OEM, never=True)
 E('RtkAudioUniversalService', 'svc', 'Realtek Audio Universal Service (Realtek)',
   'A Realtek service installed with Realtek\'s audio driver package, for onboard audio such as the board\'s Realtek '
-  'ALC897 codec (@MSIBOARD). Realtek does not say what it does (reasoning).',
-  if_off='Sound itself comes from the audio driver, not from this service (reasoning). Realtek\'s audio app and '
+  'ALC897 codec (@MSIBOARD). Hadron found no Realtek page that says what it does.',
+  if_off='Playback should not need it, because sound goes through the audio driver (reasoning, not tested). '
+         'Realtek\'s audio app and '
          'jack-detection pop-ups may stop working (reasoning, not tested).',
   test='Set it to Manual, restart, play sound on the rear jacks and plug a headset into the front panel; undo if '
        'sound or jack switching fails.',
@@ -1446,7 +1454,7 @@ E('RtkAudioUniversalService', 'svc', 'Realtek Audio Universal Service (Realtek)'
 E('LMS', 'svc', 'Intel Local Manageability Service (Intel ME software)',
   '@INTELLMS: "A service that runs locally in an Intel AMT device and enables local management applications to send '
   'requests"; it passes them to the Management Engine through the MEI driver.',
-  if_off='Local tools that talk to Intel AMT stop (reasoning). AMT is a business (vPro) feature; on a PC without '
+  if_off='Local tools that talk to Intel AMT stop (reasoning). AMT is a business (vPro) feature (reasoning); on a PC without '
          'it, Hadron knows of nothing that uses this service (reasoning).',
   basis='published', basis_note='@INTELLMS (Intel AMT). That the Windows service named LMS is this component, '
                                 'installed with Intel\'s Management Engine software, is reasoning.', never=True)
@@ -1485,8 +1493,9 @@ STOCK = [
      'Status Running and "Startup Type: Automatic (Delayed Start)". That is the setting the page expects, not a '
      'statement about a build; Hadron uses it as the Windows 10 stock value.'),
     ('BrokerInfrastructure', '2/0',
-     '@STARTMENU (a Start menu symptom on Windows 10): "BrokerInfrastructure is an automatic service." The page does '
-     'not mention delayed start; Hadron reads it as plain Automatic (reasoning).'),
+     '@STARTMENU (a Start menu symptom on Windows 10 and two Windows Server releases): '
+     '"BrokerInfrastructure is an automatic service." The page does not mention delayed start; Hadron reads it as '
+     'plain Automatic (reasoning). The page names no build; Hadron uses it as the Windows 10 stock value.'),
 ]
 
 for _name, _cfg, _note in STOCK:

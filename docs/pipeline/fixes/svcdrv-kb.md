@@ -3,6 +3,8 @@
 Scope: `docs/pipeline/svcdrv/7-finalize.md` "Follow-up ideas" 1-3 and `finalize/kb.md` §3b. KB content, the stock
 table, the selftests that assumed "no stock data", the goldens this changes and the docs. No preset, level, tick,
 plan/apply or recovery change; no `core/` change; `genkb.py` unchanged (the stock fields already existed).
+**§5 "Audit" records the kb-auditor round and supersedes §1-§4 where they differ** (genkb, plan.cpp's reason text,
+the stock labels, the fixture and the goldens changed in that round).
 
 Result: 289 entries (265 before, +24); bloat 17, stripped 48, minimum 11 (unchanged); 213 explanation-only;
 5 Windows-stock values. `genkb.py --selftest` PASS; regenerated `services.db` byte-identical.
@@ -114,3 +116,35 @@ Still unconfirmed by name and not added: HdAudAddService, HidClass, usbport, usb
   without test hooks.
 
 Every KB diff here goes to `kb-auditor` before merge (rule 7).
+
+## 5. Audit
+kb-auditor's report is `docs/pipeline/fixes/svcdrv-kb-audit.md` (34 rows: supported 24, overstated 7, unsourced 2,
+wrong 2). Everything applied, with the auditor's wording except where noted:
+- **M1** (TimeBrokerSvc's stock note shipped a literal `[[3|...]]`): `genkb.py` `expand()` now renders markers to
+  their shown text; `check_entry` fails if `[[` or `]]` would reach a K line; three selftest cases (marker in expl,
+  basis note, stock note). The fixture gains TimeBrokerSvc at Disabled, so `plan-services-stock.txt` shows the
+  rendered note ("is set to 3 by default").
+- **M2**: `plan.cpp` stock row reason is "Windows stock start type from a Microsoft page (it names no build)" for a
+  published value ("measured on build N" for an owner-measured one).
+- **M3**: lltdio and rspndr no longer mention a network map (Windows 10 has none built in); wording as proposed.
+- **s1-s6, s9**: as proposed (wcifs, rdbss/mrxsmb quote, bowser with the `sc qc` check, storvsc's own note, OEM
+  "Hadron found no vendor documentation", Realtek playback "reasoning, not tested", One Dragon Center, LMS vPro
+  "(reasoning)", the file.net label in kb.py and the README).
+- **s7**: applied, except the auditor's "Windows Server 2012 R2 ... Windows Server 2016" fails the genkb digit gate;
+  the note says "a Start menu symptom on Windows 10 and two Windows Server releases".
+- **s8**: chip "Default: Windows stock (N items)", Console F8 "Stock (N)", F1 help "Plan: Default, Windows stock (only
+  the N items with a sourced value)", detail "Manual (published; the page names no build)"; UI selftests updated.
+
+Goldens changed in this round, and why:
+- `plan-services-stock.txt`: new reason text (M2); the TimeBrokerSvc row with its rendered note (M1); the note
+  becomes "3 of 110 items".
+- `plan-services-default.txt`, `plan-services-default-delayedlinger.txt` ("already set" +1), `first-restore.cmd`,
+  `first-README.txt` (one more value line): only because the fixture has one more service (TimeBrokerSvc).
+- `services.db`: the wording above and the rendered TimeBrokerSvc note.
+
+Found while doing M1, not fixed (plan logic, outside this fix's scope): the stock plan blocks every item whose KB
+entry is `never` ("Protected: not in presets. Hadron's KB keeps it out of every preset"), and every explanation-only
+entry is `never`. So of the five stock values only WSearch (a Stripped entry) can be applied; msiserver, W32Time,
+TimeBrokerSvc and BrokerInfrastructure show as blocked rows. The golden now shows this for TimeBrokerSvc. Fix: in
+`BuildDefault(stock)`, block on `g.neverTouch` and the named never-preset list only, not on a KB `never`, which means
+"not in a preset level", not "never restore to stock". That needs the lead's call.

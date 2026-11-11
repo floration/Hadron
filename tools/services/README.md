@@ -7,7 +7,7 @@ The KB has three files:
 
 Commands:
 ```
-python3 tools/services/genkb.py --selftest          # 62 must-fail cases, 17 ok texts, a warning case, the committed KB
+python3 tools/services/genkb.py --selftest          # 62 must-fail cases, 17 ok texts, 3 marker cases, a warning case, the committed KB
 python3 tools/services/genkb.py                     # regenerates modules/services/data/services.db
 python3 tools/services/genkb.py /tmp/services.db    # writes elsewhere (CI then runs cmp against the committed file)
 ```
@@ -66,7 +66,7 @@ Sources:
   `HVNET` and the OEM pages (`MSIBOARD`, `INTELLMS`, `INTELDAL`, `FN*`) were added in fix/svcdrv-kb;
   `docs/pipeline/fixes/svcdrv-kb.md` lists what each says.
 - OEM entries are explanation-only (third-party items are never in a preset). The `FN*` sources are file.net, a
-  third-party, user-contributed process database: cite them for a service's name and folder only, never for what
+  third-party process database (not the vendor; its pages mix its own write-ups with user ratings): cite them for a service's name and folder only, never for what
   it does, and keep the basis `reasoning`.
 - In text, `@KEY` becomes the source's label. In basis and contested notes it becomes "label (url)".
 - Every note says which OS the source was written for (IoT Enterprise, Server 2016, VDI), because none of them
@@ -86,7 +86,8 @@ Numbers:
   can't be listed that way, so the gate also rejects counts and units in words (`forty processes`, `two seconds`,
   `one second`, `ten percent`), any size word (`a gigabyte`) and fractions (`half`, `a third`, `a quarter`).
   "one" on its own is not a count ("one instance per user"); write instructions in words ("restart three times").
-- A number with a basis is marked `[[shown|published|@KEY]]`, as in the bios KB.
+- A number with a basis is marked `[[shown|published|@KEY]]`, as in the bios KB. The db gets the shown text (the
+  module never renders markers); genkb fails if `[[` or `]]` would reach a K line.
 - The KB needs at least 60 entries; there is no upper bound.
 
 ## services.db format
