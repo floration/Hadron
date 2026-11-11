@@ -20,9 +20,10 @@ A. If Windows doesn't start (WinRE)
 5. Close the window and choose Continue.
 
 Which folder to use
-Each apply has its own folder in the recovery folder, named by the UTC time it started
-(yyyyMMdd-HHmmss), so the names sort oldest first. "first" holds the start types from when
-Hadron first ran on this PC. List them with:
+Each apply (a single change too) has its own folder in the recovery folder, named by the UTC
+time it started (yyyyMMdd-HHmmss), so the names sort oldest first. "first" holds the start types
+from when Hadron first ran on this PC; if Hadron found that folder incomplete it wrote it again as
+"first-2" (up to "first-9"): use the highest-numbered one. List them with:
      dir D:\ProgramData\Hadron\services\recovery
 Run the newest folder first. If Windows still doesn't start, run the next older one, and so on:
 each puts back the start types from before its own apply. "first" goes back to how Hadron
@@ -150,12 +151,14 @@ with the TrustedInstaller toggle on, once Windows starts.
 Rows here that needed TrustedInstaller: 2 (marked in D).
 
 F. Not in these scripts (55 items)
-Hadron never changes these, so the scripts never write them either: items at Boot or System
-start, storage and boot-path drivers, items Hadron never touches (core services Windows needs
-to start, sign in or reach the network, filter drivers, and services whose failure restarts
-Windows), items it never puts in a preset (Defender, TrustedInstaller, Volume Shadow Copy and
-others) and launch-protected services. Windows sets the storage and boot-path drivers per PC:
-writing an old value back after a disk or controller change can stop Windows from starting.
+Presets and Default never change these, so these scripts never write them: items at Boot or
+System start, storage and boot-path drivers, items Hadron never touches (core services Windows
+needs to start, sign in or reach the network, filter drivers, and services whose failure
+restarts Windows), items it never puts in a preset (Defender, TrustedInstaller, Volume Shadow
+Copy and others) and launch-protected services. Some of them can still be changed one at a
+time from Hadron's detail pane: Undo, or that change's own recovery folder, puts it back.
+Windows sets the storage and boot-path drivers per PC: writing an old value back after a disk
+or controller change can stop Windows from starting.
   TrustedInstaller
   VSS
   swprv

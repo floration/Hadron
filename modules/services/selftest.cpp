@@ -893,6 +893,14 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             std::string frd = ReadmeTxt(L"first", L"\\ProgramData\\Hadron\\services\\recovery\\first", ftitle, fr, skipped);
             check(frd.find("F. Not in these scripts") != std::string::npos && frd.find("  stornvme\r\n") != std::string::npos,
                   L"A2: README.txt lists the names left out (section F)");
+            // mini-finalize 15/16: a single change can reach a never-preset item, so F doesn't claim Hadron never
+            // changes them, and says what puts such a change back; "Which folder to use" names first-2..first-9.
+            check(frd.find("Hadron never changes these") == std::string::npos &&
+                      frd.find("Presets and Default never change these") != std::string::npos &&
+                      frd.find("changed one at a\r\ntime from Hadron's detail pane: Undo, or that change's own recovery folder") != std::string::npos &&
+                      frd.find("\"first-2\" (up to \"first-9\")") != std::string::npos,
+                  L"README F says presets and Default never change those items (a single change can) and how such a change is "
+                  L"put back; Which folder to use names first-2..first-9");
             for (auto& g2 : {std::make_pair(std::wstring(L"first-restore.cmd"), fcmd), std::make_pair(std::wstring(L"first-README.txt"), frd)}) {
                 std::wstring gp = golden + L"\\" + g2.first;
                 if (update) { check(WriteAll(gp, g2.second), L"wrote golden " + gp); continue; }
