@@ -148,8 +148,13 @@ bool TiService::StopIfStarted(std::wstring* note) {
     if (!started_) return false;
     started_ = false;
     std::wstring e;
-    if (!b_->Control(L"TrustedInstaller", Op::Stop, cancel, &e)) {
-        *note = L"Hadron started TrustedInstaller and could not stop it again: " + e;
+    // Cleanup (mini-analyze A5): sent and waited for even after Cancel, for a short bounded time, so a Cancel never
+    // turns a stop that went through into a reported failure.
+    if (!b_->Control(L"TrustedInstaller", Op::Stop, nullptr, &e, nullptr, cleanupWaitMs)) {
+        *note = RequestSentNotConfirmed(e)
+                    ? L"Hadron started TrustedInstaller and asked it to stop again: the stop was requested, not confirmed (" + e +
+                          L"). Windows also stops it when idle (reasoning)."
+                    : L"Hadron started TrustedInstaller and could not stop it again: " + e;
         return false;
     }
     *note = L"Hadron started TrustedInstaller for this apply and stopped it again.";

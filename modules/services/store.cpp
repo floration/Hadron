@@ -370,6 +370,42 @@ bool IsAdminSystemOrTi(PSID sid) {
     return IsWellKnownSid(sid, WinBuiltinAdministratorsSid) || IsWellKnownSid(sid, WinLocalSystemSid) || IsTiSid(sid) || HookOwner(sid);
 }
 
+// mini-analyze A1: the folder at path, above the data folder, opened as itself (never through a link) and read by
+// handle: its owner must be Administrators, SYSTEM or TrustedInstaller (an owner can always re-permission it) and its
+// DACL must let nobody else rename or delete it. holder: path holds the data folder itself (its message says so).
+std::wstring AncestorProblem(const std::wstring& path, bool holder) {
+    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), READ_CONTROL | FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return L"Could not open " + path + L" to check its owner and permissions: " + sys::ErrorText(GetLastError());
+    std::wstring who, why = OwnerProblem(h, path, true, &who);
+    if (why == L"owned")
+        why = holder ? path + L", the folder that holds Hadron's data folder, is owned by " + who +
+                           L", not by Administrators, SYSTEM or TrustedInstaller. Its owner could swap the data folder for "
+                           L"their own, so changes are off. Rename it aside as an administrator and restart Hadron, or give it another --data-dir."
+                     : path + L", a folder above Hadron's data folder, is owned by " + who +
+                           L", not by Administrators, SYSTEM or TrustedInstaller. Its owner could swap it for a folder of their own, so "
+                           L"changes are off. Give Hadron a --data-dir below folders only administrators can change (the default, "
+                           L"%ProgramData%\\Hadron\\services, is).";
+    if (why.empty()) {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        PACL dacl = nullptr;
+        DWORD e = GetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr, &sd);
+        if (e != ERROR_SUCCESS) why = L"Could not read the permissions of " + path + L": " + sys::ErrorText(e);
+        else {
+            std::wstring r = Store::RenameAccessProblem(sd);
+            if (!r.empty())
+                why = path + (holder ? L", the folder that holds Hadron's data folder, " : L", a folder above Hadron's data folder, ") + r +
+                      L". They could rename it aside and put a folder of their own in its place (with recovery scripts the README says "
+                      L"to run as SYSTEM), so changes are off. Give Hadron a --data-dir below folders only administrators can "
+                      L"change (the default, %ProgramData%\\Hadron\\services, is). Hadron never changes these permissions itself.";
+        }
+        if (sd) LocalFree(sd);
+    }
+    CloseHandle(h);
+    return why;
+}
+
 // The DACL of the folder open in h, read by handle and checked by Store::WriteAccessProblem. Nothing is changed.
 std::wstring DaclProblem(HANDLE h) {
     PACL dacl = nullptr;
@@ -415,6 +451,36 @@ std::wstring Store::WriteAccessProblem(PSECURITY_DESCRIPTOR sd) {
     return L"";
 }
 
+std::wstring Store::RenameAccessProblem(PSECURITY_DESCRIPTOR sd) {
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = nullptr;
+    if (!sd || !GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted))
+        return L"has a DACL that could not be read (" + sys::ErrorText(GetLastError()) + L")";
+    if (!present || !dacl) return L"has no DACL, so everyone can rename or delete it";
+    const ACCESS_MASK kMove = DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_ALL | MAXIMUM_ALLOWED;
+    ACL_SIZE_INFORMATION info{};
+    if (!GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation))
+        return L"has a DACL that could not be read (" + sys::ErrorText(GetLastError()) + L")";
+    for (DWORD i = 0; i < info.AceCount; i++) {
+        void* p = nullptr;
+        if (!GetAce(dacl, i, &p) || !p) return L"has a DACL entry that could not be read";
+        const ACE_HEADER* hd = static_cast<const ACE_HEADER*>(p);
+        const BYTE t = hd->AceType;
+        const bool allowed = t == ACCESS_ALLOWED_ACE_TYPE || t == ACCESS_ALLOWED_CALLBACK_ACE_TYPE ||
+                             t == ACCESS_ALLOWED_OBJECT_ACE_TYPE || t == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE ||
+                             t == ACCESS_ALLOWED_COMPOUND_ACE_TYPE;
+        if (!allowed || (hd->AceFlags & INHERIT_ONLY_ACE)) continue;   // grants nothing on this folder
+        ACCESS_MASK mask = *reinterpret_cast<const ACCESS_MASK*>(static_cast<const BYTE*>(p) + sizeof(ACE_HEADER));
+        if (!(mask & kMove)) continue;
+        if (t != ACCESS_ALLOWED_ACE_TYPE && t != ACCESS_ALLOWED_CALLBACK_ACE_TYPE)
+            return L"has an object or compound DACL entry that grants delete or re-permission rights (access mask 0x" + Hex8(mask) + L")";
+        PSID sid = (PSID)&static_cast<ACCESS_ALLOWED_ACE*>(p)->SidStart;
+        if (IsAdminSystemOrTi(sid)) continue;
+        return L"lets " + SidText(sid) + L" rename, delete or re-permission it (access mask 0x" + Hex8(mask) + L")";
+    }
+    return L"";
+}
+
 bool Store::EnsureRoot(bool secure, std::wstring* err) {
     if (root_.empty()) { *err = L"no data folder"; return false; }
     if (ImpersonationFlag::Active()) { *err = L"refused: a Hadron file write while impersonating"; return false; }
@@ -434,23 +500,13 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
     bool createdRoot = false;   // this call created the root, with kRootSddl
     for (size_t i = 0; i < chain.size(); i++) {
         const bool last = i + 1 == chain.size();
-        // The folder that holds the root (%ProgramData%\Hadron by default; never a volume or share root): its owner
-        // could rename the root aside and put their own in its place, so it must be Administrators, SYSTEM or
-        // TrustedInstaller too. Checked before the root is created or opened (Analyze r2).
-        if (last && secure && i > 0) {
-            HANDLE ph = CreateFileW(sys::ToExtended(chain[i - 1]).c_str(), READ_CONTROL | FILE_READ_ATTRIBUTES,
-                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-            if (ph == INVALID_HANDLE_VALUE) {
-                *err = L"Could not open " + chain[i - 1] + L" to check its owner: " + sys::ErrorText(GetLastError());
-                return false;
-            }
-            std::wstring who, why = OwnerProblem(ph, chain[i - 1], true, &who);
-            CloseHandle(ph);
-            if (why == L"owned")
-                why = chain[i - 1] + L", the folder that holds Hadron's data folder, is owned by " + who +
-                      L", not by Administrators, SYSTEM or TrustedInstaller. Its owner could swap the data folder for "
-                      L"their own, so changes are off. Rename it aside as an administrator and restart Hadron, or give it another --data-dir.";
+        // The folder above chain[i] (the volume or share root for i == 0; %ProgramData%\Hadron, the holding folder, for
+        // the root by default): whoever may rename it, delete it or re-permission it could put a folder of their own in
+        // its place, so it must be Administrators', SYSTEM's or TrustedInstaller's alone. Checked before anything is
+        // created or opened inside it (Analyze r2 for the holding folder; mini-analyze A1 for every ancestor).
+        if (secure) {
+            const std::wstring parent = i == 0 ? plain.substr(0, rl) : chain[i - 1];
+            std::wstring why = AncestorProblem(parent, last && i > 0);
             if (!why.empty()) { *err = why; return false; }
         }
         const std::wstring ext = sys::ToExtended(chain[i]);
@@ -463,9 +519,9 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
             }
             PSECURITY_DESCRIPTOR sd = nullptr;
             SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
-            // The root gets kRootSddl; the folder that holds it gets owner Administrators (with the inherited DACL), as
-            // the holding-folder check requires: an elevated token's default owner may be the user ("object creator").
-            const wchar_t* sddl = !secure ? nullptr : last ? kRootSddl : i + 2 == chain.size() ? L"O:BA" : nullptr;
+            // The root gets kRootSddl; every missing parent gets owner Administrators (with the inherited DACL), as the
+            // ancestor check requires: an elevated token's default owner may be the user ("object creator").
+            const wchar_t* sddl = !secure ? nullptr : last ? kRootSddl : L"O:BA";
             if (sddl) {
                 if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr)) {
                     *err = L"Could not build the data folder's DACL: " + sys::ErrorText(GetLastError());

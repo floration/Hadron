@@ -353,7 +353,9 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             auto cr = c.first->meta.find(L"created");
             r.reason = L"as recorded by the first-run snapshot" + (cr != c.first->meta.end() ? L" (" + cr->second + L")" : L"");
             r.basis = L"recorded";
-            r.basisNote = L"first.txt, read from this PC's service manager when Hadron first ran";
+            // mini-design 11: no internal file name in the plan's text.
+            r.basisNote = L"Hadron's first-run snapshot of this PC" + (cr != c.first->meta.end() ? L" (" + cr->second + L")" : std::wstring()) +
+                          L", read from its service manager";
             Guard g = CheckGuard(s, c);
             const wchar_t* named = Lookup(NeverPreset(), Lower(s.name));
             if (g.neverTouch) r.blocked = L"Protected: never touched by Hadron. " + g.reason;
@@ -519,7 +521,7 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items
     Plan p;
     p.kind = PlanKind::Undo;
     p.source = L"undo:" + log.stamp;
-    p.title = L"Undo the apply of " + log.stamp;
+    p.title = L"Undo the apply of " + StampText(log.stamp);
     // R7: the undo of a resume also puts back what the interrupted apply it resumed had written. Every log of the chain,
     // oldest first; per item the value from before the oldest write, and the newest write for the drift check.
     std::vector<const UndoLog*> all;
@@ -530,8 +532,8 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items
         if (std::wstring bad = BadRecordsNote(*l); !bad.empty()) p.notes.push_back(bad);
     }
     if (!log.chain.empty())
-        p.notes.push_back(L"This apply resumed " + log.chain.front().stamp +
-                          L" UTC, so the undo also puts back what that interrupted apply had already changed.");
+        p.notes.push_back(L"This apply resumed " + StampText(log.chain.front().stamp) +
+                          L", so the undo also puts back what that interrupted apply had already changed.");
     struct Touched { UndoRow oldest, newest; std::wstring file; };
     std::vector<Touched> rows;
     std::map<std::wstring, size_t> at;
@@ -584,7 +586,7 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
     Plan p;
     p.kind = PlanKind::Resume;
     p.source = L"resume:" + log.stamp;
-    p.title = L"Resume the apply of " + log.stamp;
+    p.title = L"Resume the apply of " + StampText(log.stamp);
     if (std::wstring why = LogRefusal(log, c); !why.empty()) { p.notes.push_back(why); return p; }
     if (std::wstring bad = BadRecordsNote(log); !bad.empty()) p.notes.push_back(bad);
     for (auto& u : log.rows) {
@@ -638,12 +640,12 @@ void MarkTi(Plan* p, Backend& b, bool tiOn, const std::vector<SvcItem>& items) {
             r.canToggle = false;
             r.warning = L"needs TrustedInstaller: Windows refuses this write to administrators, and the toggle is off";
         } else {
-            r.warning = L"needs TrustedInstaller: written while impersonating it (toggle on)";
+            r.warning = L"needs TrustedInstaller: Hadron writes it as TrustedInstaller (toggle on)";
         }
     }
     if (needTi) {
         std::wstring c = std::to_wstring(needTi) + L" row(s) need TrustedInstaller (Windows refuses the write to administrators): ";
-        p->notes.insert(p->notes.begin(), c + (tiOn ? L"written while impersonating it; Hadron starts it if needed and stops it after."
+        p->notes.insert(p->notes.begin(), c + (tiOn ? L"Hadron writes them as TrustedInstaller, starting it if needed and stopping it after."
                                                     : L"left out while the TrustedInstaller toggle is off."));
     }
     // A row left out here (or the TrustedInstaller row blocked) keeps its item at its current start, which can
@@ -898,15 +900,35 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     ApplyLock lock;
     if (!lock.Acquire(env.lockName, &err)) { r->aborted = true; r->error = err; return false; }
     if (!st.EnsureRoot(true, &err)) { r->aborted = true; r->error = err; return false; }
-    if (env.requireFirst && p.kind != PlanKind::Undo && !st.Exists(L"first.txt")) {
-        r->aborted = true;
-        r->error = L"Hadron has no first-run snapshot (first.txt) in its data folder, so nothing was changed. It is written when "
-                   L"Hadron reads the live services: press Refresh, and read the notice if it fails again.";
-        return false;
+    if (env.requireFirst && p.kind != PlanKind::Undo) {
+        if (!st.Exists(L"first.txt")) {
+            r->aborted = true;
+            r->error = L"Hadron has no first-run snapshot (first.txt) in its data folder, so nothing was changed. It is written when "
+                       L"Hadron reads the live services: press Refresh, and read the notice if it fails again.";
+            return false;
+        }
+        // mini-analyze A6: it must be this PC's snapshot. The load only counts a machine-matched first.txt; this checks
+        // the file itself again, under the lock.
+        std::string ft;
+        Snapshot fs;
+        std::wstring fe;
+        if (!st.Read(L"first.txt", &ft, &fe) || !ParseSnapshot(ft, &fs, &fe)) {
+            r->aborted = true;
+            r->error = L"Hadron's first-run snapshot (first.txt) could not be read, so nothing was changed: " + fe +
+                       L". Press Refresh: a corrupt first.txt is renamed aside and recorded again.";
+            return false;
+        }
+        auto fm = fs.meta.find(L"machine");
+        if ((fm == fs.meta.end() ? std::wstring() : fm->second) != env.machine) {
+            r->aborted = true;
+            r->error = L"Hadron's first-run snapshot (first.txt) is not from this PC (its machine GUID differs), so nothing was "
+                       L"changed: Hadron would have no record of how this PC started. Rename first.txt aside as an administrator "
+                       L"and press Refresh, so Hadron records this PC first.";
+            return false;
+        }
     }
     r->stamp = st.NewStamp();
-    int order1 = 1;   // the B record's sequence number: the log order that does not depend on the clock
-    for (auto& l : LoadLogs(st, nullptr)) order1 = std::max(order1, std::min(l.order, 1000000) + 1);   // a forged order can't overflow
+    const int order1 = NextOrder(LoadLogs(st, nullptr));   // the B record's sequence number: the order not taken from the clock
 
     // 2. A full snapshot before anything changes.
     Snapshot snap;
@@ -1123,9 +1145,12 @@ bool RunControl(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
         // Never go on to start the target after a failed stop; put back what this run stopped, newest first.
         for (auto it = stopped.rbegin(); it != stopped.rend(); ++it) {
             std::wstring e2;
-            bool back = env.backend->Control(*it, Op::Start, env.cancel, &e2);   // the request is sent even when cancelled
+            // Cleanup (mini-analyze A5): sent and waited for even after Cancel, for a short bounded time.
+            bool back = env.backend->Control(*it, Op::Start, nullptr, &e2, nullptr, kCleanupWaitMs);
+            bool sent = !back && RequestSentNotConfirmed(e2);
             r->lines.push_back(back ? L"ok start " + *it + L" (started again after the failed stop)"
-                                    : L"fail start " + *it + L": " + e2 + L" (left stopped)");
+                               : sent ? L"fail start " + *it + L": requested, not confirmed (" + e2 + L")"
+                                      : L"fail start " + *it + L": " + e2 + L" (left stopped)");
             if (!back) r->failed++;
         }
         break;
@@ -1175,7 +1200,22 @@ bool IsUndoLog(const std::vector<UndoLog>& logs, int k) {
 bool IsResolutionLog(const UndoLog& l) {
     return l.source.rfind(L"dismiss:", 0) == 0 || l.source.rfind(L"ti-resolved:", 0) == 0;
 }
+
+// A finished "dismiss:<stamp of logs[i]>" log exists.
+bool Dismissed(const std::vector<UndoLog>& logs, size_t i) {
+    for (auto& o : logs)
+        if (o.hasE && o.source == L"dismiss:" + logs[i].stamp) return true;
+    return false;
+}
 }  // namespace
+
+int OrderKey(int order) { return std::min(std::max(order, 0), kOrderCap + 1); }
+
+int NextOrder(const std::vector<UndoLog>& logs) {
+    int n = 1;
+    for (auto& l : logs) n = std::max(n, std::min(l.order, kOrderCap) + 1);
+    return n;
+}
 
 std::vector<UndoLog> LoadLogs(const Store& s, std::vector<std::wstring>* problems) {
     std::vector<UndoLog> v;
@@ -1199,7 +1239,9 @@ std::vector<UndoLog> LoadLogs(const Store& s, std::vector<std::wstring>* problem
         int n = dash == std::wstring::npos ? 0 : _wtoi(s.c_str() + dash + 1);
         wchar_t suf[16];
         swprintf(suf, 16, L"%08d", n);
-        return std::make_pair(l.order, base + L"#" + suf);
+        // Clamped like NextOrder (mini-analyze fixture run 4): a log with a forged order above the cap ties with the
+        // logs written after it and falls back to the stamp, instead of staying "the last apply" for good.
+        return std::make_pair(OrderKey(l.order), base + L"#" + suf);
     };
     std::stable_sort(v.begin(), v.end(), [&](const UndoLog& a, const UndoLog& b) { return key(a) < key(b); });
     // R7: a resume carries the logs it resumed, oldest first, so its Undo also puts back what they had written.
@@ -1227,7 +1269,13 @@ bool ResolvedBy(const std::vector<UndoLog>& logs, size_t i, bool undoOnly, int d
         if (j == i || !logs[j].hasE) continue;
         const std::wstring& src = logs[j].source;
         if (src == L"undo:" + st) return true;
-        if (!undoOnly && (src == L"resume:" + st || src == L"dismiss:" + st)) return true;
+        // A finished resume or dismissal of i, or of a resume of i at any depth (mini-analyze A2: dismissing an
+        // interrupted resume:i must not bring i's banner back; a finished resume of a resume of i finishes i's work).
+        if (!undoOnly)
+            for (const wchar_t* pre : {L"resume:", L"dismiss:"}) {
+                int t = Target(logs, (int)j, pre);
+                if (t >= 0 && ResumeChainReaches(logs, t, (int)i)) return true;
+            }
         int k = Target(logs, (int)j, L"resume:");
         if (k >= 0 && logs[k].source == L"undo:" + st) return true;
         int u = Target(logs, (int)j, L"undo:");
@@ -1262,8 +1310,9 @@ int FindInterrupted(const std::vector<UndoLog>& logs) {
 int FindUndoable(const std::vector<UndoLog>& logs) {
     for (int i = (int)logs.size() - 1; i >= 0; i--) {
         // An undo's own log is not offered for undo (no "undo the undo"), nor a resume of one (R8); it resolves the
-        // apply it reverted.
-        if (!logs[i].hasE || ResolvedBy(logs, i, true) || IsUndoLog(logs, i)) continue;
+        // apply it reverted. An interrupted log the user dismissed stays undoable (mini-analyze A2): Dismiss hid its
+        // banner, which was the only other way to put back the rows it wrote.
+        if (!(logs[i].hasE || Dismissed(logs, (size_t)i)) || ResolvedBy(logs, i, true) || IsUndoLog(logs, i)) continue;
         for (auto& r : logs[i].rows) if (r.hasD && r.result == L"ok") return i;
         for (auto& c : logs[i].chain)   // R7: a resume whose own rows were all set already still undoes its apply's
             for (auto& r : c.rows) if (r.hasD && r.result == L"ok") return i;
@@ -1311,8 +1360,7 @@ bool SameProcess(const TiClaim& c, const SvcItem& ti) {
 bool WriteResolution(Store& st, const std::wstring& source, const std::wstring& text, const std::wstring& machine,
                      const std::wstring& build, std::wstring* err) {
     if (!st.EnsureRoot(true, err)) return false;
-    int order = 1;
-    for (auto& l : LoadLogs(st, nullptr)) order = std::max(order, std::min(l.order, 1000000) + 1);
+    const int order = NextOrder(LoadLogs(st, nullptr));
     std::wstring stamp = st.NewStamp();
     LogWriter log;
     if (!log.Open(st.Path(L"undo-" + stamp + L".log"), err)) return false;
@@ -1321,6 +1369,13 @@ bool WriteResolution(Store& st, const std::wstring& source, const std::wstring& 
            log.Append(Record({L"N", Esc(text)}), err) && log.Append(Record({L"E", stamp, L"0", L"0", L"0", L"done"}), err);
 }
 }  // namespace
+
+std::wstring StampText(const std::wstring& st) {
+    if (st.size() < 15 || st[8] != L'-') return st;
+    for (size_t i = 0; i < 15; i++) if (i != 8 && !iswdigit(st[i])) return st;
+    if (st.size() > 15 && st[15] != L'-') return st;   // "-N": a second log in the same second; the minute is enough
+    return st.substr(0, 4) + L"-" + st.substr(4, 2) + L"-" + st.substr(6, 2) + L" " + st.substr(9, 2) + L":" + st.substr(11, 2) + L" UTC";
+}
 
 std::wstring SourceLabel(const std::wstring& source) {
     auto after = [&](const wchar_t* pre) { size_t n = wcslen(pre); return source.compare(0, n, pre) == 0 ? source.substr(n) : std::wstring(); };
@@ -1336,8 +1391,8 @@ std::wstring SourceLabel(const std::wstring& source) {
     if (!after(L"default-stock:").empty())
         return std::wstring(L"Default: Windows stock (") + (after(L"default-stock:") == L"drivers" ? L"Drivers" : L"Services") + L")";
     if (source == L"single") return L"a single start-type change";
-    if (!after(L"undo:").empty()) return L"the undo of " + after(L"undo:") + L" UTC";
-    if (!after(L"resume:").empty()) return L"the resume of " + after(L"resume:") + L" UTC";
+    if (!after(L"undo:").empty()) return L"the undo of the apply of " + StampText(after(L"undo:"));
+    if (!after(L"resume:").empty()) return L"the resume of the apply of " + StampText(after(L"resume:"));
     return source;
 }
 
@@ -1347,8 +1402,14 @@ std::wstring InterruptedText(const std::vector<UndoLog>& logs, int k) {
     int done = 0, begun = 0;
     for (auto& r : lg.rows) { if (r.hasD) done++; if (r.hasI) begun++; }
     bool undoOf = IsUndoLog(logs, k);
-    std::wstring t = std::wstring(undoOf ? L"An undo did not finish (" : L"An apply did not finish (") + lg.stamp + L" UTC, " +
-                     SourceLabel(lg.source) + L"): " + std::to_wstring(done) + L" of " + std::to_wstring(lg.count) +
+    // mini-build P3 / mini-design 1: the stamp as the header shows dates, and no parentheses inside parentheses
+    // (preset labels carry their tab in brackets, so the label goes outside them).
+    const std::wstring when = StampText(lg.stamp);
+    std::wstring head;
+    if (undoOf) head = L"An undo did not finish (" + when + L"; " + SourceLabel(lg.source) + L")";
+    else if (lg.source.rfind(L"resume:", 0) == 0) head = L"A resume of the apply of " + StampText(lg.source.substr(7)) + L" did not finish (" + when + L")";
+    else head = L"An apply of " + SourceLabel(lg.source) + L" did not finish (" + when + L")";
+    std::wstring t = head + L": " + std::to_wstring(done) + L" of " + std::to_wstring(lg.count) +
                      L" changes were recorded as done" + (begun > done ? L" and 1 was in progress" : L"") +
                      (undoOf ? L". Undo and Resume both finish undoing the apply it was undoing: Undo from that apply's log, "
                                L"Resume from this one."
@@ -1380,7 +1441,7 @@ std::wstring TiLeftText(const std::vector<UndoLog>& logs, const std::vector<SvcI
     if (c.log < 0 || !ti) return L"";
     // Two banner lines: the start type and the stop error are in the Stop it plan and the log.
     return L"Hadron started TrustedInstaller (process " + std::to_wstring(c.pid) + L") for " + SourceLabel(c.source) + L", " +
-           c.stamp + L" UTC" + (c.finished ? L"" : L", which did not finish") + L", and " +
+           StampText(c.stamp) + (c.finished ? L"" : L", which did not finish") + L", and " +
            (c.stopNote.empty() ? L"has no record of stopping it" : L"its stop failed") +
            L". That process is still running. Windows stops it when idle (reasoning); you can also stop it now.";
 }
@@ -1400,29 +1461,41 @@ void MarkTiStop(Plan* p, const std::vector<UndoLog>& logs, const std::vector<Svc
     p->tiPstart = c.pstart;
     for (auto& r : p->rows)
         if (r.ctl == Op::Stop && IEq(r.name, L"TrustedInstaller") && r.blocked.empty())
-            r.reason = L"Hadron started this process (" + std::to_wstring(c.pid) + L") for the apply of " + c.stamp +
-                       L" UTC and has no record of stopping it. Its start type is " + StartLabel(ti->cfg, ti->trigger) +
+            r.reason = L"Hadron started this process (" + std::to_wstring(c.pid) + L") for the apply of " + StampText(c.stamp) +
+                       L" and has no record of stopping it. Its start type is " + StartLabel(ti->cfg, ti->trigger) +
                        L": Windows starts it again when it next installs updates or features (reasoning).";
 }
 
 int ResolveStaleTiClaims(Store& st, const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items, const std::wstring& machine,
-                         const std::wstring& build, const std::wstring& lockName) {
+                         const std::wstring& build, const std::wstring& lockName, Backend* backend) {
     const SvcItem* ti = TiItem(items);
     if (!ti) return 0;
-    std::vector<std::pair<std::wstring, std::wstring>> todo;   // stamp, why
-    for (size_t i = 0; i < logs.size(); i++) {
-        if (!OpenTiClaim(logs, i)) continue;
-        TiClaim c = ClaimOf(logs, i);
-        if (ti->state == SERVICE_STOPPED)
-            todo.push_back({c.stamp, L"TrustedInstaller was seen stopped, so the process Hadron started is gone"});
-        else if (c.verified && ti->pid && ti->pstart && (ti->pid != c.pid || ti->pstart != c.pstart))
-            todo.push_back({c.stamp, L"a different TrustedInstaller process (" + std::to_wstring(ti->pid) +
-                                         L") is running, so the one Hadron started (" + std::to_wstring(c.pid) + L") is gone"});
-    }
+    auto stale = [](const std::vector<UndoLog>& lg, const SvcItem& t) {
+        std::vector<std::pair<std::wstring, std::wstring>> v;   // stamp, why
+        for (size_t i = 0; i < lg.size(); i++) {
+            if (!OpenTiClaim(lg, i)) continue;
+            TiClaim c = ClaimOf(lg, i);
+            if (t.state == SERVICE_STOPPED)
+                v.push_back({c.stamp, L"TrustedInstaller was seen stopped, so the process Hadron started is gone"});
+            else if (c.verified && t.pid && t.pstart && (t.pid != c.pid || t.pstart != c.pstart))
+                v.push_back({c.stamp, L"a different TrustedInstaller process (" + std::to_wstring(t.pid) +
+                                          L") is running, so the one Hadron started (" + std::to_wstring(c.pid) + L") is gone"});
+        }
+        return v;
+    };
+    auto todo = stale(logs, *ti);
     if (todo.empty()) return 0;
     ApplyLock lock;
     std::wstring err;
     if (!lock.Acquire(lockName, &err)) return 0;   // an apply is running: the next load tries again
+    // mini-analyze A4: items and logs were read before the lock, seconds ago. Another instance may have started
+    // TrustedInstaller since and still holds a live claim, so decide again from its state and the logs now.
+    if (backend) {
+        SvcItem now;
+        std::wstring qe;
+        if (!backend->Query(L"TrustedInstaller", &now, &qe)) return 0;
+        todo = stale(LoadLogs(st, nullptr), now);
+    }
     int n = 0;
     for (auto& t : todo)
         if (WriteResolution(st, L"ti-resolved:" + t.first, t.second, machine, build, &err)) n++;
@@ -1468,13 +1541,45 @@ std::vector<RestoreRow> FirstRestoreRows(const Snapshot& first, const Ctx& c, st
 }
 
 namespace {
+// recovery\<st> and recovery-<st>.zip are complete: the zip reads back with every CRC right and restore.cmd and
+// README.txt in it, and the folder holds each of its files byte for byte (mini-analyze A3: a truncated zip, or a
+// folder a crash left short, is not a copy anyone can use).
+bool RecoveryComplete(const Store& s, const std::wstring& st) {
+    std::string z;
+    std::wstring e;
+    std::vector<ZipEntry> files;
+    if (!s.Exists(L"recovery\\" + st) || !s.Read(L"recovery-" + st + L".zip", &z, &e) || !ParseZip(z, &files, &e)) return false;
+    bool cmd = false, readme = false;
+    for (auto& f : files) {
+        std::string d;
+        if (!s.Read(L"recovery\\" + st + L"\\" + FromUtf8(f.name), &d, &e) || d != f.data) return false;
+        cmd = cmd || f.name == "restore.cmd";
+        readme = readme || f.name == "README.txt";
+    }
+    return cmd && readme;
+}
+
 // R12: recovery\first and its zip, written again under first-2, first-3, ... when an earlier try left either one
-// missing. A partial folder is kept as it is (never overwritten or deleted).
+// missing or incomplete. A partial folder is kept as it is (never overwritten or deleted). Written only for a first.txt
+// from this PC and this Windows build (mini-analyze A3, as R11 for Default): after an upgrade the old build's values
+// are not what WinRE should write back.
 void EnsureFirstRecovery(Store& s, const Snapshot& first, const Ctx& c, FirstRunResult* r) {
     std::vector<std::wstring> stamps = {L"first"};
     for (int k = 2; k <= 9; k++) stamps.push_back(L"first-" + std::to_wstring(k));
     for (auto& st : stamps)
-        if (s.Exists(L"recovery\\" + st) && s.Exists(L"recovery-" + st + L".zip")) return;   // one complete copy is enough
+        if (RecoveryComplete(s, st)) return;   // one complete copy is enough
+    auto meta = [&](const wchar_t* k) { auto it = first.meta.find(k); return it == first.meta.end() ? std::wstring() : it->second; };
+    const std::wstring fm = meta(L"machine"), fb = meta(L"build");
+    if (fm.empty() || c.machine.empty() || fm != c.machine || BuildNumber(fb).empty() || BuildNumber(fb) != BuildNumber(c.build)) {
+        if (!r->note.empty()) r->note += L" ";
+        r->note += L"recovery\\first is missing or incomplete, and first.txt is from " +
+                   (fm != c.machine || fm.empty() ? std::wstring(L"another PC or one with no machine GUID")
+                                                  : L"Windows build " + (fb.empty() ? std::wstring(L"(missing)") : fb) +
+                                                        L" (this PC runs " + (c.build.empty() ? std::wstring(L"(unknown)") : c.build) + L")") +
+                   L", so it is not written again: those values are not what WinRE should put back now. Each apply still writes "
+                   L"its own recovery folder.";
+        return;
+    }
     auto kind = first.meta.find(L"kind");
     const bool isFirst = kind == first.meta.end() || kind->second == L"first";
     for (auto& st : stamps) {

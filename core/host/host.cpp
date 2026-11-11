@@ -1,6 +1,7 @@
 // core/host/host.cpp — the shared host. Implements IHost, owns the frame, the message loop, DPI,
 // COM, logging and the deterministic --screenshot path. Standalone and suite differ only in whether
 // the sidebar is drawn and how many modules are present.
+#include <algorithm>
 #include <cstdio>
 #include "core/host/run.h"
 #include "core/host/cmdline.h"
@@ -274,8 +275,16 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         RECT r{0, 0, sidebarW() + S(kMinContentW, dpi_), S(kMinContentH, dpi_) + statusH()};
         AdjustWindowRectEx(&r, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrW(h, GWL_EXSTYLE));
         auto* mm = reinterpret_cast<MINMAXINFO*>(l);
-        mm->ptMinTrackSize.x = r.right - r.left;
-        mm->ptMinTrackSize.y = r.bottom - r.top;
+        LONG minW = r.right - r.left, minH = r.bottom - r.top;
+        // Never larger than the monitor's work area (mini-review N3: 1366x768 at 125% would put the minimum off-screen).
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi)) {
+            minW = std::min<LONG>(minW, mi.rcWork.right - mi.rcWork.left);
+            minH = std::min<LONG>(minH, mi.rcWork.bottom - mi.rcWork.top);
+        }
+        mm->ptMinTrackSize.x = minW;
+        mm->ptMinTrackSize.y = minH;
         return 0;
     }
     case WM_ERASEBKGND: return 1;

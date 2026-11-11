@@ -163,6 +163,12 @@ bool RunControl(const Plan& p, const ApplyEnv& env, ApplyResult* r);
 
 // ---- logs, interrupted applies, drift ------------------------------------------------------------------
 std::vector<UndoLog> LoadLogs(const Store& s, std::vector<std::wstring>* problems);
+// B record sequence numbers. A new log gets 1 + the highest order before it, counting no log above kOrderCap; logs
+// sort by OrderKey (the order clamped to kOrderCap + 1), then by stamp, so a forged huge order ties with the logs
+// written after it instead of staying last for good (mini-analyze fixture run 4).
+constexpr int kOrderCap = 1000000;
+int OrderKey(int order);
+int NextOrder(const std::vector<UndoLog>& logs);
 int FindInterrupted(const std::vector<UndoLog>& logs);   // newest B-without-E log not resolved by a finished undo/resume
 // The log an Undo of logs[k] should start from: for an interrupted "undo:X" log, or a resume of one, that is X itself
 // (undoing the undo would re-apply X), otherwise k.
@@ -170,7 +176,10 @@ int UndoBase(const std::vector<UndoLog>& logs, int k);
 // Newest finished log with changes, not undone yet. Never an undo's log or a resume of one (R8). A "resume:X" log is
 // offered with X's rows (UndoLog::chain, R7).
 int FindUndoable(const std::vector<UndoLog>& logs);
-// "Stripped (Services)", "the undo of 20261110-213012 UTC": a log source in words, never a raw preset id.
+// A log stamp ("20261110-213012" or "20261110-213012-2", UTC) as the user reads it: "2026-11-10 21:30 UTC", like the
+// header's dates (mini-build P3). Anything else is returned as it is.
+std::wstring StampText(const std::wstring& stamp);
+// "Stripped (Services)", "the undo of the apply of 2026-11-10 21:30 UTC": a log source in words, never a raw id.
 std::wstring SourceLabel(const std::wstring& source);
 // The interrupted-apply banner's text for logs[k] (stamp in UTC, source in words, a crash while starting TI noted).
 std::wstring InterruptedText(const std::vector<UndoLog>& logs, int k);
@@ -200,8 +209,11 @@ std::wstring TiLeftText(const std::vector<UndoLog>& logs, const std::vector<SvcI
 void MarkTiStop(Plan* p, const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);
 // Load time: closes every open claim whose process is gone (TrustedInstaller stopped, or another process running) with
 // a "ti-resolved:<stamp>" log. Returns how many it wrote; 0 when the apply lock is busy (the next load tries again).
+// backend (the load passes it): TrustedInstaller is queried again under the lock and the logs re-read, and only what
+// is still stale then is closed (mini-analyze A4). Without it, items and logs are trusted as given (tests).
 int ResolveStaleTiClaims(Store& st, const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items, const std::wstring& machine,
-                         const std::wstring& build, const std::wstring& lockName = L"Global\\Hadron.services.apply");
+                         const std::wstring& build, const std::wstring& lockName = L"Global\\Hadron.services.apply",
+                         Backend* backend = nullptr);
 // name (lower case) -> the value Hadron last wrote and verified, from finished logs in order.
 std::map<std::wstring, StartCfg> LastApplied(const std::vector<UndoLog>& logs);
 

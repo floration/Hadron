@@ -230,9 +230,10 @@ std::string ReadmeTxt(const std::wstring& stamp, const std::wstring& folder, con
     L(o, "5. Close the window and choose Continue.");
     L(o, "");
     L(o, "Which folder to use");
-    L(o, "Each apply has its own folder in the recovery folder, named by the UTC time it started");
-    L(o, "(yyyyMMdd-HHmmss), so the names sort oldest first. \"first\" holds the start types from when");
-    L(o, "Hadron first ran on this PC. List them with:");
+    L(o, "Each apply (a single change too) has its own folder in the recovery folder, named by the UTC");
+    L(o, "time it started (yyyyMMdd-HHmmss), so the names sort oldest first. \"first\" holds the start types");
+    L(o, "from when Hadron first ran on this PC; if Hadron found that folder incomplete it wrote it again as");
+    L(o, "\"first-2\" (up to \"first-9\"): use the highest-numbered one. List them with:");
     L(o, std::string("     dir ") + (unc ? "" : "D:") + data + "\\recovery");
     L(o, "Run the newest folder first. If Windows still doesn't start, run the next older one, and so on:");
     L(o, "each puts back the start types from before its own apply. \"first\" goes back to how Hadron");
@@ -297,12 +298,14 @@ std::string ReadmeTxt(const std::wstring& stamp, const std::wstring& folder, con
     if (!notRestored.empty()) {
         L(o, "");
         L(o, "F. Not in these scripts (" + std::to_string(notRestored.size()) + " items)");
-        L(o, "Hadron never changes these, so the scripts never write them either: items at Boot or System");
-        L(o, "start, storage and boot-path drivers, items Hadron never touches (core services Windows needs");
-        L(o, "to start, sign in or reach the network, filter drivers, and services whose failure restarts");
-        L(o, "Windows), items it never puts in a preset (Defender, TrustedInstaller, Volume Shadow Copy and");
-        L(o, "others) and launch-protected services. Windows sets the storage and boot-path drivers per PC:");
-        L(o, "writing an old value back after a disk or controller change can stop Windows from starting.");
+        L(o, "Presets and Default never change these, so these scripts never write them: items at Boot or");
+        L(o, "System start, storage and boot-path drivers, items Hadron never touches (core services Windows");
+        L(o, "needs to start, sign in or reach the network, filter drivers, and services whose failure");
+        L(o, "restarts Windows), items it never puts in a preset (Defender, TrustedInstaller, Volume Shadow");
+        L(o, "Copy and others) and launch-protected services. Some of them can still be changed one at a");
+        L(o, "time from Hadron's detail pane: Undo, or that change's own recovery folder, puts it back.");
+        L(o, "Windows sets the storage and boot-path drivers per PC: writing an old value back after a disk");
+        L(o, "or controller change can stop Windows from starting.");
         for (auto& n : notRestored) L(o, "  " + (CmdSafeName(n) ? A(n) : ToUtf8(NoCtl(n))));
     }
     return o;

@@ -46,9 +46,12 @@ using namespace hx::services;
 
 namespace {
 
+namespace { std::wstring StartCellText(const SvcItem& s, bool drift, bool console, bool shortTrig = false); }   // the list's Start type cell (below)
+
 constexpr UINT WM_SVC_LOADED = WM_MODULE_BASE + 1;    // load worker -> view
 constexpr UINT WM_SVC_APPLIED = WM_MODULE_BASE + 2;   // apply worker -> view
 constexpr UINT WM_SVC_PLANNED = WM_MODULE_BASE + 3;   // plan worker -> view
+constexpr UINT WM_SVC_COMPANY = WM_MODULE_BASE + 4;   // company worker -> view
 constexpr UINT_PTR kProgressTimer = 1;
 const wchar_t* const kViewClass = L"Hadron.services.View";
 const wchar_t* const kAppTitle = L"Services and drivers";
@@ -186,6 +189,15 @@ struct LoadOut {
     std::vector<std::wstring> logProblems;
 };
 
+// The second load pass (2-research: Company in a second Worker pass): each image's VERSIONINFO CompanyName, read after
+// the list is shown, from copies of the items, so the worker never reads what the UI thread may replace. `done` is set
+// last: a done message from a pass that a newer one replaced finds it false and is ignored.
+struct CompanyJob {
+    std::vector<SvcItem> in;                                   // name, type and image only
+    std::vector<std::pair<std::wstring, std::wstring>> out;    // lower-case name, company
+    std::atomic<bool> done{false};
+};
+
 // Everything a plan is built from, copied, so the plan worker never reads what the UI thread may replace.
 struct PlanJob {
     PlanReq req;
@@ -221,29 +233,6 @@ const std::wstring& WindowsDir() {
     return w;
 }
 
-// A log stamp ("20261110-213012", UTC) as the user reads it: "2026-11-10 21:30 UTC". Anything else is shown as is.
-std::wstring StampText(const std::wstring& st) {
-    if (st.size() < 13 || st[8] != L'-') return st;
-    for (size_t i = 0; i < st.size(); i++) if (i != 8 && !iswdigit(st[i])) return st;
-    return st.substr(0, 4) + L"-" + st.substr(4, 2) + L"-" + st.substr(6, 2) + L" " + st.substr(9, 2) + L":" + st.substr(11, 2) + L" UTC";
-}
-
-// A log's source id ("preset:bloat:services", "undo:<stamp>") as the plan title the user saw, without internal ids.
-std::wstring SourceText(const std::wstring& src) {
-    auto tab = [](const std::wstring& t) { return t == L"drivers" ? std::wstring(L"Drivers") : std::wstring(L"Services"); };
-    std::vector<std::wstring> f = Split(src, L':');
-    if (f.size() == 3 && f[0] == L"preset") {
-        int lv = f[1] == L"bloat" ? LV_BLOAT : f[1] == L"stripped" ? LV_STRIPPED : f[1] == L"minimum" ? LV_MINIMUM : -1;
-        if (lv >= 0) return LevelName(lv) + L" (" + tab(f[2]) + L")";
-    }
-    if (f.size() == 2 && f[0] == L"default-first") return L"Default: as first seen (" + tab(f[1]) + L")";
-    if (f.size() == 2 && f[0] == L"default-stock") return L"Default: Windows stock (" + tab(f[1]) + L")";
-    if (src == L"single") return L"a single change";
-    if (f.size() >= 2 && f[0] == L"undo") return L"the undo of the apply of " + StampText(src.substr(5));
-    if (f.size() >= 2 && f[0] == L"resume") return L"the resume of the apply of " + StampText(src.substr(7));
-    return Unesc(src);
-}
-
 // ============================================================================================
 class ServicesModule : public Module {
 public:
@@ -262,8 +251,8 @@ public:
     }
     void Shutdown() override {
         cancelApply_.store(true);
-        loadW_.Cancel(); applyW_.Cancel(); planW_.Cancel();
-        loadW_.Join(); applyW_.Join(); planW_.Join();
+        loadW_.Cancel(); applyW_.Cancel(); planW_.Cancel(); companyW_.Cancel();
+        loadW_.Join(); applyW_.Join(); planW_.Join(); companyW_.Join();
         if (hwnd_) KillTimer(hwnd_, kProgressTimer);
     }
     int RunCli(int argc, wchar_t** argv) override;
@@ -292,6 +281,8 @@ private:
     // data
     void StartLoad();
     void OnLoaded();
+    void StartCompany();
+    void OnCompany();
     void TakeData(std::vector<SvcItem> items, const HwInfo& hw, std::wstring build, std::wstring machine);
     void PrepareCtx();
     void Refilter();
@@ -305,6 +296,13 @@ private:
     std::wstring ChangedText(const SvcItem& s) const;   // vs the first-run snapshot
     std::wstring BasisShort(const SvcItem& s) const;
     bool CanApply(std::wstring* why) const;
+    // The filter's placeholder in full when it fits rcSearch_, else "Filter" (mini-design 5: never "Filter by name, compa…").
+    void FitPlaceholder(HDC dc);
+    // A7: the result banner's Undo is this apply's own log (an aborted apply has no E, so FindUndoable would give the
+    // apply before it).
+    bool ResultUndoable() const {
+        return undoable_ >= 0 && undoable_ < (int)logs_.size() && !result_.stamp.empty() && logs_[undoable_].stamp == result_.stamp;
+    }
     int WriteAccess(const std::wstring& name) const;   // 0 admin can write, 1 refused (needs TI), -1 unknown
 
     // plans
@@ -464,11 +462,14 @@ private:
     std::wstring keepPlanSel_;                // a rebuild opens on this row
     std::vector<std::wstring> plistKeysShown_;   // the plan columns plist_'s rows were built for
     int nameW_ = 140;                          // Baseline Name column width (96-dpi units), from the widest name
+    int startW_ = 0;                           // Baseline Start type column width (96-dpi units), for its "+t" cells
     std::pair<int, int> nameKey_{-1, -1};      // (tab, dpi) nameW_ was measured for
     size_t nameItems_ = 0;
 
     // workers
-    sys::Worker loadW_, applyW_, planW_;
+    sys::Worker loadW_, applyW_, planW_, companyW_;
+    std::shared_ptr<CompanyJob> companyJob_;   // the current Company pass (null: none since the last load)
+    bool companyPending_ = false;              // the Company pass is still reading: the detail says so
     PlanJob planJob_;
     LoadOut loadOut_;
     Job job_;
@@ -547,6 +548,7 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SVC_LOADED: OnLoaded(); return 0;
     case WM_SVC_APPLIED: OnApplied(); return 0;
     case WM_SVC_PLANNED: OnPlanned(); return 0;
+    case WM_SVC_COMPANY: OnCompany(); return 0;
     case WM_RBUTTONDOWN: SetFocus(h); return 0;
     case WM_SYSKEYDOWN:   // F10 arrives as a system key; in Console it is an F-key, not the menu key
         if (w == VK_F10 && Console()) { if (OnInput(WM_KEYDOWN, w, l)) Invalidate(); return 0; }
@@ -700,10 +702,7 @@ void ServicesModule::StartLoad() {
         std::wstring err;
         auto cancelled = [&]() { if (w->Cancelled()) { out->err = L"Loading was cancelled."; return true; } return false; };
         if (!b->Enumerate(&out->items, &err)) { out->err = L"Could not read the services: " + err; return; }
-        for (auto& i : out->items) {
-            if (cancelled()) return;
-            i.company = FileCompany(i);
-        }
+        // Company is read in a second pass once the list is shown (StartCompany), not here.
         b->ReadHw(&out->hw);
         out->build = b->Build();
         out->machine = b->MachineGuid();
@@ -750,7 +749,8 @@ void ServicesModule::StartLoad() {
                         break;
                     }
                 // R4: claims whose TrustedInstaller process is gone are closed with a "ti-resolved:<stamp>" log.
-                if (ResolveStaleTiClaims(st, out->logs, out->items, out->machine, out->build) > 0) reload = true;
+                if (ResolveStaleTiClaims(st, out->logs, out->items, out->machine, out->build, L"Global\\Hadron.services.apply", b) > 0)
+                    reload = true;
                 if (reload) { out->logProblems.clear(); out->logs = LoadLogs(st, &out->logProblems); }
             }
         }
@@ -795,7 +795,55 @@ void ServicesModule::OnLoaded() {
     auto keep = std::move(writeAccess_);
     TakeData(std::move(o.items), o.hw, o.build, o.machine);
     writeAccess_ = std::move(keep);
+    StartCompany();
     if (planReq_.type != PlanReq::None && !applyW_.Running()) OpenPlan(planReq_, true);
+    if (!dismissStamp_.empty() && !applyW_.Running()) StartLoad();   // a Dismiss pressed during this load (A2)
+}
+
+// The second load pass: each live item's file company, read on companyW_ after the list is shown, so a slow disk or
+// many files never hold the list back. A fake backend's companies are its own (fixture data); nothing is read.
+void ServicesModule::StartCompany() {
+    companyW_.Cancel();
+    companyW_.Join();
+    companyPending_ = false;
+    if (!backend_ || !backend_->IsLive() || items_.empty()) return;
+    auto job = std::make_shared<CompanyJob>();
+    job->in.reserve(items_.size());
+    for (auto& s : items_) {
+        SvcItem c;
+        c.name = s.name;
+        c.type = s.type;
+        c.image = s.image;
+        job->in.push_back(std::move(c));
+    }
+    companyJob_ = job;
+    sys::Worker* w = &companyW_;
+    companyPending_ = companyW_.Start(hwnd_, WM_SVC_COMPANY, [job, w]() {
+        for (auto& i : job->in) {
+            if (w->Cancelled()) break;
+            job->out.push_back({Lower(i.name), FileCompany(i)});
+        }
+        job->done.store(true);
+    });
+    if (!companyPending_) {
+        companyJob_.reset();
+        Status(L"Services: could not start the worker that reads each file's company: " + sys::ErrorText(GetLastError()));
+    }
+}
+
+void ServicesModule::OnCompany() {
+    std::shared_ptr<CompanyJob> job = companyJob_;
+    if (!job || !job->done.load()) return;   // a replaced pass: the current one posts its own
+    companyW_.Join();
+    companyJob_.reset();
+    companyPending_ = false;
+    std::map<std::wstring, std::wstring> by(job->out.begin(), job->out.end());
+    for (auto& s : items_) {
+        auto it = by.find(Lower(s.name));
+        if (it != by.end()) s.company = it->second;
+    }
+    Refilter();
+    Invalidate();
 }
 
 void ServicesModule::TakeData(std::vector<SvcItem> items, const HwInfo& hw, std::wstring build, std::wstring machine) {
@@ -983,6 +1031,16 @@ void ServicesModule::Refilter() {
     });
     std::vector<std::vector<std::wstring>> rows;
     rows.reserve(V_.size());
+    // mini-design 14: a Start cell that doesn't fit its column says "+t" (as Console) instead of being cut at "+trig…";
+    // measured in the cell font, per cell, so only the long ones change.
+    HDC mdc = (startW_ > 0 && host_) ? CreateCompatibleDC(nullptr) : nullptr;
+    const int startRoom = mdc ? Sc(startW_) - Sc(20) : 0;
+    auto startCell = [&](const SvcItem& s) {
+        bool drift = drift_.count(Lower(s.name)) != 0;
+        std::wstring full = StartCellText(s, drift, false, false);
+        if (!mdc || !s.trigger || TextW(mdc, full, host_->Fonts().caption) <= startRoom) return full;
+        return StartCellText(s, drift, false, true);
+    };
     for (int i : V_) {
         const SvcItem& s = items_[i];
         std::vector<std::wstring> r;
@@ -990,9 +1048,7 @@ void ServicesModule::Refilter() {
             if (k == L"name") r.push_back(s.name);
             else if (k == L"display") r.push_back(s.display);
             else if (k == L"state") r.push_back(StateName(s.state));
-            else if (k == L"start")
-                r.push_back(StartLabel(s.cfg, s.trigger) + (s.regStart >= 0 && s.regStart != s.cfg.start ? L" (pending)" : L"") +
-                            (drift_.count(Lower(s.name)) ? L"  *" : L""));
+            else if (k == L"start") r.push_back(startCell(s));
             else if (k == L"kb") r.push_back(KbVerdict(s).label);
             else if (k == L"company") r.push_back(CompanyShort(s.company));
             else if (k == L"account") r.push_back(s.account);
@@ -1007,6 +1063,7 @@ void ServicesModule::Refilter() {
         }
         rows.push_back(std::move(r));
     }
+    if (mdc) DeleteDC(mdc);
     list_.SetRows(std::move(rows));
     if (!keep.empty()) SelectName(keep);
     else if (!V_.empty()) {
@@ -1092,12 +1149,19 @@ int ServicesModule::WriteAccess(const std::wstring& name) const {
     return it != writeAccess_.end() ? it->second : -1;
 }
 
+void ServicesModule::FitPlaceholder(HDC dc) {
+    static const wchar_t kFull[] = L"Filter by name, company or group";   // also matches display name and account
+    int room = (int)(rcSearch_.right - rcSearch_.left) - Sc(24);   // the field's 10 px padding each side, and a little air
+    search_.placeholder = TextW(dc, kFull, host_->Fonts().ui) <= room ? kFull : L"Filter";
+}
+
 bool ServicesModule::CanApply(std::wstring* why) const {
-    if (fixture_) { *why = L"Fixture data: applying is off."; return false; }
-    if (!elevated_) { *why = L"Not running as administrator: read-only."; return false; }
+    // One clause each, shown after "Apply is off. " (mini-design 2: never "Apply is off: ...: applying is off.").
+    if (fixture_) { *why = L"This is fixture data."; return false; }
+    if (!elevated_) { *why = L"Hadron is not running as administrator, so it is read-only."; return false; }
     if (readOnly_) { *why = L"Read-only mode (--readonly)."; return false; }
-    if (!store_.Valid()) { *why = L"No data folder for the undo log: changes are off."; return false; }
-    if (storeRefused_) { *why = L"The data folder can't be used: changes are off (see the banner)."; return false; }
+    if (!store_.Valid()) { *why = L"There is no data folder for the undo log."; return false; }
+    if (storeRefused_) { *why = L"The data folder can't be used (see the banner)."; return false; }
     if (planBusy_) { *why = L"Reading the live state for this plan."; return false; }
     if (applyW_.Running() || loadW_.Running()) { *why = L"Busy."; return false; }
     return true;
@@ -1393,7 +1457,7 @@ void ServicesModule::OnClickId(int id) {
     if (id == ID_UNDO_LAST || id == ID_RESULT_UNDO) {
         if (undoable_ < 0) return;
         // R21: until the reload after an apply has finished, undoable_ is the previous apply's log.
-        if (id == ID_RESULT_UNDO && (!resultFresh_ || loadW_.Running())) return;
+        if (id == ID_RESULT_UNDO && (!resultFresh_ || loadW_.Running() || !ResultUndoable())) return;
         PlanReq r;
         r.type = PlanReq::Undo;
         r.logIndex = undoable_;
@@ -1404,7 +1468,9 @@ void ServicesModule::OnClickId(int id) {
     if (id == ID_INT_DISMISS) {   // R9: recorded in a log by the next load, never only hidden
         if (fixture_ || interrupted_ < 0 || interrupted_ >= (int)logs_.size()) { Status(L"Services: Dismiss is off in fixture mode."); return; }
         dismissStamp_ = logs_[interrupted_].stamp;
-        StartLoad();
+        // mini-analyze A2: a load already running can't take it; OnLoaded starts the next one, which records it.
+        if (loadW_.Running() || applyW_.Running()) Status(L"Services: Dismiss is recorded when the current load finishes.");
+        else StartLoad();
         return;
     }
     if (id == ID_TI_STOP) {
@@ -1697,7 +1763,7 @@ std::vector<Banner> ServicesModule::Banners() const {
         }
         std::vector<std::pair<int, std::wstring>> acts;
         // R21: Undo only once the reload after this apply has finished, so it undoes this apply's log.
-        if (!resultControl_ && r.ok > 0 && undoable_ >= 0 && resultFresh_ && !loadW_.Running())
+        if (!resultControl_ && r.ok > 0 && resultFresh_ && !loadW_.Running() && ResultUndoable())
             acts.push_back({ID_RESULT_UNDO, L"Undo"});
         acts.push_back({ID_DISMISS, L"Dismiss"});
         v.push_back({t, tone, acts});
@@ -1910,7 +1976,9 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
     Guard g = CheckGuard(s, ctx_);
     // Protected means "left alone", not a failure: body text, not the error red.
     if (g.neverTouch) d.push_back({P_TEXT, L"", L"Protected: Hadron never changes this (" + g.reason + L").", p.text});
-    else if (g.neverPreset) d.push_back({P_TEXT, L"", L"Not in any preset: " + g.reason + L". A single change is still possible where Windows allows it.", p.warnT});
+    else if (g.neverPreset)   // without a KB entry, "Not in Hadron's KB" below says why (mini-design 10): only the rest here
+        d.push_back({P_TEXT, L"", (kbOk_ && kb_.Find(s.name) ? L"Not in any preset: " + g.reason + L". " : std::wstring()) +
+                                      L"A single change is still possible where Windows allows it.", p.warnT});
     if (s.kind == Kind::UserTemplate)
         d.push_back({P_TEXT, L"", L"Per-user service template: Windows creates one instance per signed-in user from it. "
                                   L"Hadron changes only the template; instances follow at the next sign-in.", p.mute});
@@ -1971,7 +2039,8 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
                          p.mute});
     }
     d.push_back({P_HEAD, L"", L"Configuration", kNoColor, SIDE_LEFT});
-    kv(L"Start type", StartLabel(s.cfg, s.trigger) + (s.cfg.delayed >= 0 && s.cfg.start != 2 ? L" (DelayedAutostart " + std::to_wstring(s.cfg.delayed) + L")" : L""));
+    if (s.cfgUnknown) kv(L"Start type", L"unknown (could not be read)", p.warnT);   // A8
+    else kv(L"Start type", StartLabel(s.cfg, s.trigger) + (s.cfg.delayed >= 0 && s.cfg.start != 2 ? L" (DelayedAutostart " + std::to_wstring(s.cfg.delayed) + L")" : L""));
     if (hasFirst_) {
         const SvcItem* f = first_.Find(s.name);
         auto cr = first_.meta.find(L"created");
@@ -1980,10 +2049,10 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
     }
     if (e && e->stock >= 0)
         kv(L"Windows stock", StartLabel(StartCfg{e->stock, e->stockDelayed}, false) + L" (" + BasisLabel(e->stockBasis) + L")");
-    else if (!IsStorageDriver(s.name))
-        kv(L"Windows stock", L"no value with a measured or published basis in Hadron's KB yet", p.mute);
+    else if (!IsStorageDriver(s.name))   // the chip's and F8's words (mini-design 12)
+        kv(L"Windows stock", StockKnown() ? L"no data for this item yet" : L"no data for this build yet", p.mute);
     if (s.trigger) kv(L"Triggers", s.triggers.empty() ? L"yes" : s.triggers);
-    kv(L"Company (file claim)", s.company);
+    kv(L"Company (file claim)", s.company.empty() && companyPending_ ? L"still being read" : s.company);
     ImageInfo im = NormalizeImage(s.image, WindowsDir(), s.name, IsDriverType(s.type));
     kv(L"Image", im.path + (im.args.empty() ? L"" : L"  " + im.args));
     if (!im.svchostGroup.empty()) kv(L"svchost group", im.svchostGroup);
@@ -2063,15 +2132,16 @@ bool ServicesModule::SetListColumns(HDC dc, int widthPx) {
     // (1 first) until the rest fit, so a narrow list (the suite, a small window) never overflows. Column plan
     // (docs/pipeline/svcdrv/design/baseline.md, Finalize Q7): the name, what to change and whether a preset would
     // are always shown and the Name column is as wide as the names on this tab need (up to 180), so names are not
-    // cut in the suite; Display name goes last of the optional columns (the detail pane's title shows it in full);
-    // Company before vs first and Basis; Account, Type and Image path first, since the detail pane shows each.
-    static const C kSvc[] = {{L"name", L"Name", 140, 0}, {L"display", L"Display name", 0, 7}, {L"state", L"State", 72, 0},
+    // cut in the suite; Company goes last of the optional columns (baseline.md §3: third-party is how bloat stands
+    // out; Finalize round 2, mini-design 4), Display name just before it (the detail pane's title shows it in full);
+    // vs first and Basis before those; Account, Type and Image path first, since the detail pane shows each.
+    static const C kSvc[] = {{L"name", L"Name", 140, 0}, {L"display", L"Display name", 0, 6}, {L"state", L"State", 72, 0},
                              {L"start", L"Start type", 136, 0}, {L"kb", L"Preset", 84, 0}, {L"basis", L"Basis", 76, 4},
-                             {L"changed", L"vs first", 70, 5}, {L"company", L"Company", 100, 6},
+                             {L"changed", L"vs first", 70, 5}, {L"company", L"Company", 100, 7},
                              {L"account", L"Account", 110, 3}, {L"type", L"Type", 96, 1}, {L"image", L"Image path", 160, 2}};
-    static const C kDrv[] = {{L"name", L"Name", 124, 0}, {L"display", L"Display name", 0, 7}, {L"state", L"State", 72, 0},
+    static const C kDrv[] = {{L"name", L"Name", 124, 0}, {L"display", L"Display name", 0, 6}, {L"state", L"State", 72, 0},
                              {L"start", L"Start type", 96, 0}, {L"kb", L"Preset", 84, 0}, {L"basis", L"Basis", 76, 3},
-                             {L"changed", L"vs first", 70, 4}, {L"company", L"Company", 100, 6},
+                             {L"changed", L"vs first", 70, 4}, {L"company", L"Company", 100, 7},
                              {L"group", L"Load group", 116, 5}, {L"type", L"Type", 96, 1}, {L"image", L"Image path", 160, 2}};
     const int kFlexMin = 100;
     const bool svc = tab_ == TAB_SERVICES;
@@ -2123,21 +2193,36 @@ bool ServicesModule::SetListColumns(HDC dc, int widthPx) {
             extra -= give;
         }
     }
+    // Display name dropped (the suite): no flexible column, so what is left goes to Company, else to the Name.
+    if (!flexOn() && W > fixedSum()) {
+        size_t to = 0;
+        for (size_t i = 0; i < n; i++) if (on[i] && wcscmp(all[i].key, L"company") == 0) to = i;
+        w[to] += W - fixedSum();
+    }
+    const Fonts& fh = host_->Fonts();
+    // A header title is never cut (mini-design 5): "Display" when "Display name" doesn't fit its column (header font,
+    // the 10 px padding each side and room for the sort arrow).
+    auto fits = [&](const wchar_t* t, int cw96) { return MulDiv(TextW(dc, t, fh.semi), 96, (int)dpi) + 20 + 14 <= cw96; };
     std::vector<ListView::Column> cols;
     std::vector<std::wstring> keys;
     colW_.clear();
     int fixed = fixedSum();
+    int startW = 0;
     for (size_t i = 0; i < n; i++) {
         if (!on[i]) continue;
         const C& c = all[i];
         int cw = c.w ? w[i] : std::max(kFlexMin, W - fixed);
-        cols.push_back({c.title, cw});
+        std::wstring title = c.title;
+        if (wcscmp(c.key, L"display") == 0 && !fits(c.title, cw)) title = L"Display";
+        if (wcscmp(c.key, L"start") == 0) startW = cw;   // Refilter fits each Start cell to it (mini-design 14)
+        cols.push_back({title, cw});
         keys.push_back(c.key);
         colW_.push_back(cw);
     }
     list_.SetColumns(std::move(cols));
-    if (keys == colKeys_) return false;
+    if (keys == colKeys_ && startW == startW_) return false;
     colKeys_ = std::move(keys);
+    startW_ = startW;
     return true;
 }
 
@@ -2151,12 +2236,14 @@ void ServicesModule::SetPlanColumns(int widthPx) {
     static const C kSet[] = {{L"box", L"", 48}, {L"name", L"Name", 150}, {L"now", L"Now", 110}, {L"after", L"Planned", 124},
                              {L"basis", L"Basis", 76}};
     std::vector<C> c(ctl ? std::begin(kCtl) : std::begin(kSet), ctl ? std::end(kCtl) : std::end(kSet));
-    const int kWhyMin = 140;
+    const int kWhyMin = 140, kWhyWant = 280;
     auto sum = [&]() { int t = 0; for (auto& x : c) t += x.w; return t; };
     auto drop = [&](const wchar_t* k) {
         for (size_t i = 0; i < c.size(); i++) if (wcscmp(c[i].key, k) == 0) { c.erase(c.begin() + i); return; }
     };
-    if (sum() + kWhyMin > W) drop(L"basis");
+    // The Why text is what the plan is about (mini-design 14): Basis (also in the row's detail) gives way first,
+    // already when Why would be under 280 px.
+    if (sum() + kWhyWant > W) drop(L"basis");
     if (sum() + kWhyMin > W) drop(L"now");
     if (sum() + kWhyMin > W) c[1].w = std::max(100, W - kWhyMin - (sum() - c[1].w));
     std::vector<ListView::Column> cols;
@@ -2422,6 +2509,7 @@ void ServicesModule::PaintListMode(HDC dc, const RECT& rc, int y) {
     int chipsW = PresetChips(dc, pad + Sc(60), y, INT_MAX / 2, INT_MAX / 2, rowH, false) - (pad + Sc(60));   // one-line width
     int sw = std::clamp((int)rc.right - pad - (pad + Sc(60) + chipsW) - Sc(16), Sc(180), Sc(320));
     rcSearch_ = RECT{rc.right - pad - sw, y, rc.right - pad, y + rowH};
+    FitPlaceholder(dc);
     search_.Paint(dc, rcSearch_, c, focus_ == Focus::Search && HasFocus());
     AddClick(rcSearch_, ID_SEARCH);
     y = PresetChips(dc, pad + Sc(60), y, rcSearch_.left - Sc(12), rc.right - pad, rowH, true);
@@ -2495,11 +2583,12 @@ void ServicesModule::PaintListMode(HDC dc, const RECT& rc, int y) {
     {
         struct B { const wchar_t* label; int id; bool on; };
         std::vector<B> bs;
-        if (drv && s->cfg.start <= 1) bs.push_back({s->cfg.start == 0 ? L"Boot" : L"System", 0, true});
-        bs.push_back({L"Auto", ID_SET + 2, s->cfg.start == 2 && !s->cfg.Delayed()});
-        if (!drv) bs.push_back({L"Auto (delayed)", ID_SET + 5, s->cfg.Delayed()});
-        bs.push_back({L"Manual", ID_SET + 3, s->cfg.start == 3});
-        bs.push_back({L"Disabled", ID_SET + 4, s->cfg.start == 4});
+        const bool known = !s->cfgUnknown;   // A8: an unreadable start type has no current value to mark
+        if (known && drv && s->cfg.start <= 1) bs.push_back({s->cfg.start == 0 ? L"Boot" : L"System", 0, true});
+        bs.push_back({L"Auto", ID_SET + 2, known && s->cfg.start == 2 && !s->cfg.Delayed()});
+        if (!drv) bs.push_back({L"Auto (delayed)", ID_SET + 5, known && s->cfg.Delayed()});
+        bs.push_back({L"Manual", ID_SET + 3, known && s->cfg.start == 3});
+        bs.push_back({L"Disabled", ID_SET + 4, known && s->cfg.start == 4});
         const int x0 = ax, limit = det.right - Sc(14);
         for (auto& b : bs) {
             int bw = TextW(dc, b.label, f.caption) + Sc(20);
@@ -2547,8 +2636,10 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     int n = ctl ? (int)std::count_if(plan_.rows.begin(), plan_.rows.end(), [](const PlanRow& r) { return r.blocked.empty(); })
                 : plan_.Included();
     int right = rc.right - pad;
+    // mini-design 9: a plan with no rows has nothing to apply: no Apply button, no tick sentence, the reason once.
+    const bool empty = !ctl && plan_.rows.empty() && !planBusy_;
     std::wstring applyLbl = ctl ? L"Run" : (n == 1 ? L"Apply 1 change" : L"Apply " + std::to_wstring(n) + L" changes");
-    right -= Button(dc, right, y, applyLbl, ID_APPLY, true, can && n > 0) + Sc(10);
+    if (!empty) right -= Button(dc, right, y, applyLbl, ID_APPLY, true, can && n > 0) + Sc(10);
     right -= Button(dc, right, y, L"Cancel", ID_CANCEL_PLAN, false, !applyW_.Running()) + Sc(10);
     // The TrustedInstaller switch here too (Console has F6): flipping it rebuilds this plan and keeps the ticks.
     if (!ctl) right -= TiToggle(dc, right, y + Sc(2), Sc(26)) + Sc(12);
@@ -2557,8 +2648,8 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     y += Sc(34);
     // Why Apply is off goes first, on its own line: at the end of the summary it was the first thing ellipsised.
     int lh = 0;
-    if (!can) {
-        for (auto& ln : WrapLines(dc, f.caption, L"Apply is off: " + why, rc.right - 2 * pad, &lh)) {
+    if (!can && !empty) {
+        for (auto& ln : WrapLines(dc, f.caption, L"Apply is off. " + why, rc.right - 2 * pad, &lh)) {
             RECT wr{pad, y, rc.right - pad, y + lh};
             ui::DrawText(dc, ln, wr, f.caption, p.warnT, DT_SINGLELINE | DT_NOCLIP);
             y += lh;
@@ -2570,6 +2661,7 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
         sum = std::to_wstring(plan_.Included()) + L" ticked, " + std::to_wstring(plan_.Optional()) + L" unticked, " +
               std::to_wstring(plan_.Blocked()) + L" kept or protected; " + std::to_wstring(plan_.alreadySet) +
               L" already set. Nothing changes until you press Apply. Click [x] or press Space to tick or untick.";
+    if (empty) sum = plan_.alreadySet ? std::to_wstring(plan_.alreadySet) + L" already set." : L"";
     for (auto& ln : WrapLines(dc, f.caption, sum, rc.right - 2 * pad, &lh)) {
         RECT sr{pad, y, rc.right - pad, y + lh};
         ui::DrawText(dc, ln, sr, f.caption, p.mute, DT_SINGLELINE | DT_NOCLIP);
@@ -2577,6 +2669,7 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     }
     y += Sc(4);
     for (auto& note : plan_.notes) {
+        if (empty && note == plan_.emptyText) continue;   // said once, in the list (mini-design 9)
         // Up to three lines each; a cut note ends in an ellipsis (the full text is in the plan's detail and log).
         std::vector<std::wstring> lines = WrapLines(dc, f.caption, note, rc.right - 2 * pad - Sc(12), &lh);
         if (lines.size() > 3) { lines.resize(3); lines[2] += L"…"; }
@@ -2596,11 +2689,20 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     y = std::min(y, bottom - Sc(120));   // a short window keeps a list, however many notes
     rcPlanList_ = RECT{pad, y, pad + listW, bottom};
     SetPlanColumns(listW);
-    if (revealPending_ && plist_.Selected() >= 0) {   // after a DPI change: the selected row back in view
+    if (revealPending_ && plist_.Selected() >= 0) {   // a new plan, or a DPI change: the selected row in view
         revealPending_ = false;
-        int k = plist_.Selected();
-        if (k == 0) plist_.OnKey(VK_HOME, rcPlanList_, c);
-        else { plist_.Select(k - 1); plist_.OnKey(VK_DOWN, rcPlanList_, c); }
+        // Centred, as the list does (mini-design 6): rows below, then above, then the row itself, so it lands mid-list
+        // and the top row is a whole row (scrolling up puts a row at the top edge), never half under the header.
+        int k = plist_.Selected(), n = (int)plan_.rows.size();
+        auto show = [&](int i) {
+            i = std::clamp(i, 0, n - 1);
+            if (i == 0) plist_.OnKey(VK_HOME, rcPlanList_, c);
+            else { plist_.Select(i - 1); plist_.OnKey(VK_DOWN, rcPlanList_, c); }
+        };
+        int half = std::max(0, (int)(rcPlanList_.bottom - rcPlanList_.top - Sc(32)) / std::max(1, Sc(30)) / 2);
+        show(k + half);
+        show(k - half);
+        show(k);
     }
     plist_.Paint(dc, rcPlanList_, c, focus_ == Focus::List && HasFocus());
     if (plan_.rows.empty()) {
@@ -2612,7 +2714,13 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     RoundFill(dc, det, Sc(con ? 3 : 8), p.panel, p.border);
     int sel = plist_.Selected();
     if (sel >= 0 && sel < (int)plan_.rows.size()) PaintDetailPanel(dc, det, PlanRowDoc(plan_.rows[sel]));
-    else rcDetail_ = det;
+    else {
+        rcDetail_ = det;
+        if (empty) {   // mini-design 9: one line, not a blank pane
+            RECT hr{det.left + Sc(16), det.top + Sc(14), det.right - Sc(16), det.top + Sc(40)};
+            ui::DrawText(dc, L"Nothing to show: this plan has no rows.", hr, f.caption, p.mute, DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    }
 }
 
 // ============================================================================================
@@ -2685,6 +2793,16 @@ std::wstring ShortStart(const StartCfg& c) {
         case 4: return L"disabled";
     }
     return L"start " + std::to_wstring(c.start);
+}
+
+// The Start type cell of the list, both layouts. A8: an item whose configuration could not be read has a placeholder
+// start type, so the cell says "unknown" instead of showing it as fact.
+std::wstring StartCellText(const SvcItem& s, bool drift, bool console, bool shortTrig) {
+    if (s.cfgUnknown) return L"unknown";
+    bool pending = s.regStart >= 0 && s.regStart != s.cfg.start;   // a change waits for a restart
+    if (console) return ShortStart(s.cfg) + (s.trigger ? L"+t" : L"") + (pending ? L"!" : L"") + (drift ? L" *" : L"");
+    return StartLabel(s.cfg, s.trigger && !shortTrig) + (s.trigger && shortTrig ? L" +t" : L"") + (pending ? L" (pending)" : L"") +
+           (drift ? L"  *" : L"");
 }
 std::wstring ShortState(DWORD st) {
     switch (st) {
@@ -2763,7 +2881,7 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
         k.push_back({L"F1", conHelp_ ? L"Close" : L"Keys", L"Keys", CA_HELP, true, conHelp_});
         bool ctl = plan_.kind == PlanKind::Control;
         k.push_back({L"Spc", L"Tick", L"Tick", CA_TICK, !ctl && !plan_.rows.empty(), false});
-        k.push_back({L"F6", tiOn_ ? L"TI toggle: ON" : L"TI toggle: off", tiOn_ ? L"TI:ON" : L"TI:off", CA_TI, !applyW_.Running(), tiOn_});
+        k.push_back({L"F6", tiOn_ ? L"TI toggle: ON" : L"TI toggle: off", tiOn_ ? L"TI ON" : L"TI off", CA_TI, !applyW_.Running(), tiOn_});
         if (applyW_.Running()) k.push_back({L"Esc", L"Stop after this item", L"Stop", CA_CANCEL, !cancelApply_.load(), false});
         else k.push_back({L"Esc", L"Cancel", L"Cancel", CA_CANCEL, true, false});
         return k;
@@ -2782,7 +2900,7 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
             stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
         }
         auto on = [&](int i) {
-            if (!s) return false;
+            if (!s || s->cfgUnknown) return false;   // A8: no current value to mark
             return i == 0 ? (s->cfg.start == 2 && !s->cfg.Delayed()) : i == 1 ? s->cfg.Delayed() : s->cfg.start == i + 1;
         };
         static const wchar_t* const kSet[] = {L"Auto", L"Delayed", L"Manual", L"Disabled"};
@@ -2802,13 +2920,13 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
     std::wstring dummy;
     bool canApply = CanApply(&dummy);
     k.push_back({L"F1", conHelp_ ? L"Close" : L"Keys", L"Keys", CA_HELP, true, conHelp_});
-    k.push_back({L"F2", tab_ == TAB_SERVICES ? L"Drivers" : L"Services", L"Tab", CA_TAB, true, false});
+    k.push_back({L"F2", tab_ == TAB_SERVICES ? L"Drivers" : L"Services", tab_ == TAB_SERVICES ? L"Drivers" : L"Services", CA_TAB, true, false});
     k.push_back({L"F3", L"Filter", L"Find", CA_FILTER, true, focus_ == Focus::Search});
     k.push_back({L"F4", L"Item", L"Item", CA_ITEM, Selected() != nullptr, false});
     k.push_back({L"F5", L"Refresh", L"Rfsh", CA_REFRESH, !fixture_ && !busy, false});
-    k.push_back({L"F6", tiOn_ ? L"TI toggle: ON" : L"TI toggle: off", tiOn_ ? L"TI:ON" : L"TI:off", CA_TI, !applyW_.Running(), tiOn_});
+    k.push_back({L"F6", tiOn_ ? L"TI toggle: ON" : L"TI toggle: off", tiOn_ ? L"TI ON" : L"TI off", CA_TI, !applyW_.Running(), tiOn_});
     k.push_back({L"F7", L"1st seen", L"1st", CA_PRESET + 0, canPlan, false});
-    k.push_back({L"F8", StockKnown() ? L"Stock" : L"Stock (no data)", StockKnown() ? L"Stock" : L"Stock-", CA_PRESET + 1, canPlan, false});
+    k.push_back({L"F8", StockKnown() ? L"Stock" : L"Stock (no data)", StockKnown() ? L"Stock" : L"Stock: none", CA_PRESET + 1, canPlan, false});
     k.push_back({L"F9", L"Bloat", L"Bloat", CA_PRESET + 2, canPlan && kbOk_, false});
     k.push_back({L"F10", L"Stripped", L"Strip", CA_PRESET + 3, canPlan && kbOk_, false});
     k.push_back({L"F11", L"Minimum", L"Min", CA_PRESET + 4, canPlan && kbOk_, false});
@@ -2825,7 +2943,7 @@ void ServicesModule::PaintFKeyBar(HDC dc, const RECT& r) {
     const int gap = Sc(4), pad = Sc(8);
     std::wstring tag = mode_ == Mode::Plan ? L"PLAN" : conItemBar_ ? L"ITEM" : L"LIST";
     std::wstring hint;
-    if (mode_ == Mode::Plan) hint = L"No key applies: click Apply";
+    if (mode_ == Mode::Plan) hint = plan_.rows.empty() && !planBusy_ ? L"Nothing to apply" : L"No key applies: click Apply";
     else if (conItemBar_) {
         std::wstring why;
         if (!CanApply(&why)) hint = why;
@@ -3012,8 +3130,7 @@ void ServicesModule::ConsoleListCells(int row, std::vector<ConCell>& out) {
         else if (k == L"start") {
             bool drift = drift_.count(Lower(s.name)) != 0;
             bool pending = s.regStart >= 0 && s.regStart != s.cfg.start;   // a change waits for a restart
-            out.push_back({ShortStart(s.cfg) + (s.trigger ? L"+t" : L"") + (pending ? L"!" : L"") + (drift ? L" *" : L""),
-                           drift || pending ? p.warnInk : p.text});
+            out.push_back({StartCellText(s, drift, true), drift || pending || s.cfgUnknown ? p.warnInk : p.text});
         } else if (k == L"changed") {
             std::wstring c = ChangedText(s);
             out.push_back({c, c == L"new" ? p.accInk : p.warnInk});
@@ -3185,6 +3302,7 @@ void ServicesModule::PaintConsoleList(HDC dc, const RECT& rc, int y, int bottom)
             }
         }
     }
+    FitPlaceholder(dc);
     search_.Paint(dc, rcSearch_, c, focus_ == Focus::Search && HasFocus());
     if (focus_ == Focus::Search) FrameRectC(dc, rcSearch_, p.accInk);
     AddClick(rcSearch_, ID_SEARCH);
@@ -3264,10 +3382,13 @@ void ServicesModule::PaintConsoleDetail(HDC dc, const RECT& det, const std::wstr
         RECT lr{ax, ay, ax + Sc(200), ay + Sc(18)};
         TextLeft(dc, L"start", lr, f.mono, p.mute);
         ax += TextW(dc, L"start ", f.mono);
-        ax += ConButton(dc, ax, ay, L"Auto", ID_SET + 2, s->cfg.start == 2 && !s->cfg.Delayed(), en) + Sc(3);
-        if (!drv) ax += ConButton(dc, ax, ay, L"Auto (delayed)", ID_SET + 5, s->cfg.Delayed(), en) + Sc(3);
-        ax += ConButton(dc, ax, ay, L"Manual", ID_SET + 3, s->cfg.start == 3, en) + Sc(3);
-        ax += ConButton(dc, ax, ay, L"Disabled", ID_SET + 4, s->cfg.start == 4, en) + Sc(14);
+        const bool known = !s->cfgUnknown;   // A8
+        // mini-design 7: a driver at Boot or System shows that value as the current, read-only cell, as Baseline does.
+        if (known && drv && s->cfg.start <= 1) ax += ConButton(dc, ax, ay, s->cfg.start == 0 ? L"Boot" : L"System", 0, true, false) + Sc(3);
+        ax += ConButton(dc, ax, ay, L"Auto", ID_SET + 2, known && s->cfg.start == 2 && !s->cfg.Delayed(), en) + Sc(3);
+        if (!drv) ax += ConButton(dc, ax, ay, L"Auto (delayed)", ID_SET + 5, known && s->cfg.Delayed(), en) + Sc(3);
+        ax += ConButton(dc, ax, ay, L"Manual", ID_SET + 3, known && s->cfg.start == 3, en) + Sc(3);
+        ax += ConButton(dc, ax, ay, L"Disabled", ID_SET + 4, known && s->cfg.start == 4, en) + Sc(14);
         if (!drv) {
             bool running = s->state == SERVICE_RUNNING;
             bool stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
@@ -3356,6 +3477,7 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
         {L"Preset", L"the first preset that lists it (it may already be set, or be offered unticked)"},
         {L"", L"kept (hw): its hardware was seen; no preset; protected: never changed; not in KB"},
         {L"Basis", L"published, measured, reasoning or folklore (folklore: no evidence)"},
+        {L"", L"recorded: from Hadron's own first-run snapshot of this PC"},
         {L"LIST", L"bottom right: the list (LIST), the item keys (ITEM) or a plan (PLAN)"}};
     std::wstring stock = StockKnown() ? L"Plan: Default, Windows stock" : L"Plan: Default, Windows stock (no data for this build yet)";
     std::vector<KV> a, b;
@@ -3484,11 +3606,12 @@ void ServicesModule::PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom)
     RECT tag{pad, y, pad + TextW(dc, L"PLAN", f.semi) + Sc(12), y + Sc(20)};
     FillSolid(dc, tag, p.selFill);
     ui::DrawText(dc, L"PLAN", tag, f.semi, p.selInk, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+    const bool empty = !ctl && plan_.rows.empty() && !planBusy_;   // mini-design 9: nothing to apply, said once
     std::wstring applyLbl = ctl ? L"Run" : (n == 1 ? L"Apply 1 change" : L"Apply " + std::to_wstring(n) + L" changes");
-    int aw = TextW(dc, applyLbl, f.caption) + Sc(14);
+    int aw = empty ? -Sc(6) : TextW(dc, applyLbl, f.caption) + Sc(14);
     int cw2 = TextW(dc, L"Cancel (Esc)", f.caption) + Sc(14);
     int bx = rc.right - pad - aw;
-    ConButton(dc, bx, y + 1, applyLbl, ID_APPLY, false, can && n > 0, true);
+    if (!empty) ConButton(dc, bx, y + 1, applyLbl, ID_APPLY, false, can && n > 0, true);
     ConButton(dc, bx - Sc(6) - cw2, y + 1, L"Cancel (Esc)", ID_CANCEL_PLAN, false, !applyW_.Running());
     RECT tr{tag.right + Sc(10), y, bx - Sc(12) - cw2, y + Sc(20)};
     TextLeft(dc, plan_.title, tr, f.semi, p.text);
@@ -3503,11 +3626,13 @@ void ServicesModule::PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom)
         sum = std::to_wstring(plan_.Included()) + L" ticked, " + std::to_wstring(plan_.Optional()) + L" unticked, " +
               std::to_wstring(plan_.Blocked()) + L" kept or protected; " + std::to_wstring(plan_.alreadySet) +
               L" already set. Nothing changes until you click Apply. Space or a click on [x] ticks.";
-    if (!can) sum += L"  (" + why + L")";
+    if (!can) sum += L"  (Apply is off. " + why + L")";
+    if (empty) sum = plan_.alreadySet ? std::to_wstring(plan_.alreadySet) + L" already set." : L"";
     RECT sr{pad, y, rc.right - pad, y + Sc(16)};
     TextLeft(dc, sum, sr, f.caption, can ? p.mute : p.warnInk);
     y += Sc(18);
     for (auto& note : plan_.notes) {
+        if (empty && note == plan_.emptyText) continue;   // shown once, in the grid
         int lh = 0;
         std::vector<std::wstring> lines = WrapLines(dc, f.caption, note, rc.right - 2 * pad - Sc(14), &lh);
         if (lines.size() > 2) { lines.resize(2); lines[1] += L"\u2026"; }
@@ -3547,6 +3672,10 @@ void ServicesModule::PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom)
         FrameRectC(dc, det, p.rule);
         rcDetail_ = det;
         conLeftRc_ = RECT{};
+        if (empty) {
+            RECT hr{det.left + Sc(8), det.top + Sc(6), det.right - Sc(8), det.top + Sc(24)};
+            TextLeft(dc, L"Nothing to show: this plan has no rows.", hr, f.caption, p.mute);
+        }
     }
 }
 
@@ -3949,6 +4078,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         m->resultControl_ = false;
         m->result_ = ApplyResult{};
         m->result_.ok = 1;
+        m->result_.stamp = m->logs_.empty() ? L"" : m->logs_[0].stamp;   // this apply's own log
         m->resultFresh_ = false;   // as OnApplied leaves it
         auto hasUndo = [&]() {
             for (auto& b : m->Banners())
@@ -3961,6 +4091,96 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         m->resultFresh_ = true;    // as OnLoaded sets it
         check(staleHidden && staleNoPlan && hasUndo(),
               L"ui R21: Undo is off in the result banner (and its click does nothing) until the reload's logs are in");
+        // A7: an aborted apply (2 rows written, then the log failed: no E) has no undoable log of its own, so the
+        // banner's Undo would have opened the previous apply. It is not offered, and its click opens nothing.
+        m->result_.stamp = L"20261111-235959";
+        m->result_.aborted = true;
+        m->result_.ok = 2;
+        bool abortedHidden = !hasUndo();
+        m->OnClickId(ID_RESULT_UNDO);
+        check(abortedHidden && m->mode_ == Mode::List,
+              L"ui mini-analyze A7: after an aborted apply the result banner offers no Undo (the undoable log is an earlier apply's)");
+    }
+
+    {   // A2: Dismiss pressed while a load runs is kept and recorded by the load that follows it
+        auto m = fresh(h, fixture + L"\\interrupted");
+        bool had = m->interrupted_ >= 0;
+        // Dismiss is off in fixture mode. Here: a fake backend for the reload, and no data folder (fixture mode cleared
+        // it), so the reload reads the fake and writes nothing.
+        m->fixture_ = false;
+        auto fb = std::make_unique<FakeBackend>();
+        fb->SetItems(m->items_);
+        m->backend_ = std::move(fb);
+        std::atomic<bool> go{false};
+        bool started = m->loadW_.Start(nullptr, 0, [&go]() { while (!go.load()) Sleep(5); });
+        m->OnClickId(ID_INT_DISMISS);
+        bool kept = !m->dismissStamp_.empty();
+        go.store(true);
+        m->loadW_.Join();
+        m->loadOut_ = LoadOut{};
+        m->loadOut_.ok = true;
+        m->loadOut_.items = m->items_;
+        m->loadOut_.logs = m->logs_;
+        m->loadOut_.build = m->build_;
+        m->loadOut_.machine = m->machine_;
+        m->OnLoaded();
+        bool handed = m->dismissStamp_.empty() && m->loadW_.Running();
+        m->loadW_.Cancel();
+        m->loadW_.Join();
+        check(had && started && kept && handed,
+              L"ui mini-analyze A2: a Dismiss pressed during a load is kept, and the next load (started when this one ends) takes it");
+    }
+
+    {   // mini-finalize 17: Company is read in a second Worker pass, after the list is shown
+        auto m = fresh(h, fixture);
+        m->fixture_ = false;
+        m->store_ = Store{};   // no data folder: the load reads the fake and writes nothing
+        std::vector<SvcItem> its = m->items_;
+        for (auto& s : its) s.company = L"Fake Co";
+        auto fb = std::make_unique<FakeBackend>();
+        fb->SetItems(its);
+        m->backend_ = std::move(fb);
+        m->StartLoad();
+        m->loadW_.Join();
+        m->OnLoaded();
+        bool kept = !m->items_.empty();
+        for (auto& s : m->items_) if (s.company != L"Fake Co") kept = false;
+        check(kept && !m->companyPending_ && !m->companyW_.Running(),
+              L"ui mini-finalize 17: the load pass no longer reads file companies (a fake backend's own stay; no second pass for it)");
+        // The second pass's result: a done message from a replaced pass is ignored; the current one fills the list.
+        const std::wstring nm = m->items_.front().name;
+        auto job = std::make_shared<CompanyJob>();
+        job->out.push_back({Lower(nm), L"Read Co"});
+        m->companyJob_ = job;
+        m->companyPending_ = true;
+        bool pendingShown = false;
+        for (auto& para : m->ItemDoc(SvcItem{m->items_.front()}))
+            if (para.label == L"Company (file claim)") pendingShown = para.text == L"Fake Co";
+        SvcItem blank = m->items_.front();
+        blank.company.clear();
+        bool readingShown = false;
+        for (auto& para : m->ItemDoc(blank))
+            if (para.label == L"Company (file claim)") readingShown = para.text == L"still being read";
+        m->OnCompany();   // not done: a replaced pass's message
+        bool ignored = m->items_.front().company == L"Fake Co" && m->companyPending_;
+        job->done.store(true);
+        m->OnCompany();
+        check(pendingShown && readingShown && ignored && m->items_.front().company == L"Read Co" && !m->companyPending_ && !m->companyJob_,
+              L"ui mini-finalize 17: the second pass fills Company when it is done (the detail says \"still being read\" until then); "
+              L"a replaced pass's message changes nothing");
+    }
+
+    {   // A8: an unreadable start type is never shown as fact
+        SvcItem u;
+        u.name = L"HxUnreadable";
+        u.cfg = StartCfg{3, -1};
+        u.regStart = 3;
+        u.cfgUnknown = true;
+        SvcItem k = u;
+        k.cfgUnknown = false;
+        check(StartCellText(u, false, false) == L"unknown" && StartCellText(u, true, true) == L"unknown" &&
+                  StartCellText(k, false, false) == L"Manual" && StartCellText(k, false, true) != L"unknown",
+              L"ui mini-analyze A8: an item whose configuration could not be read shows Start type \"unknown\" in both layouts");
     }
 
     {   // Console detail columns come from each heading's side, never its text (Review cat 5)
@@ -3987,20 +4207,89 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
               L"ui: a KB title starting \"Configuration\" stays in the right column (side, not text)");
     }
 
+    // ---- Finalize round 2: mini-design items (fixture only) ----------------------------------------------------
+    for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::Console}) {   // 9: an empty stock plan offers no Apply
+        h.Use(ly, 96);
+        auto m = fresh(h, fixture);
+        m->OnClickId(ID_PRESET + 1);   // Windows stock: no data for build 19045
+        Canvas cs(1280, 800);
+        if (!cs.ok()) continue;
+        m->Paint(cs.dc, full);
+        bool apply = false;
+        for (auto& ck : m->clicks_) if (ck.id == ID_APPLY) apply = true;
+        check(m->mode_ == Mode::Plan && m->plan_.rows.empty() && !m->plan_.emptyText.empty() && !apply,
+              std::wstring(L"ui mini-design 9: ") + (ly == ui::Layout::Console ? L"Console" : L"Baseline") +
+                  L": an empty Windows-stock plan has no Apply button (its reason is shown once)");
+    }
+    h.Use(ui::Layout::Baseline, 96);
+    {
+        auto m = fresh(h, fixture);
+        std::wstring why;
+        bool can = m->CanApply(&why);
+        check(!can && why == L"This is fixture data.", L"ui mini-design 2: why Apply is off is one clause (\"Apply is off. This is fixture data.\")");
+        // 8: the short F-key tier names what the key does.
+        h.Use(ui::Layout::Console, 96);
+        bool shortOk = true;
+        for (auto& k : m->ConsoleKeys()) {
+            std::wstring s = k.shortLabel;
+            if (s == L"Tab" || s == L"Stock-" || s.find(L"TI:") != std::wstring::npos) shortOk = false;
+        }
+        check(shortOk, L"ui mini-design 8: the short F-key labels say Drivers/Services, TI on/off and Stock: none");
+        h.Use(ui::Layout::Baseline, 96);
+        // 10: a third-party driver with no KB entry says "never in a preset" once.
+        const SvcItem* nv = nullptr;
+        for (auto& s : m->items_) if (IEq(s.name, L"nvlddmkm")) nv = &s;
+        int nev = 0;
+        bool stockWords = false;
+        if (nv)
+            for (auto& para : m->ItemDoc(*nv)) {
+                if (para.text.find(L"preset") != std::wstring::npos) nev++;
+                if (para.label == L"Windows stock" && para.text == L"no data for this build yet") stockWords = true;
+            }
+        check(nv && nev == 1, L"ui mini-design 10: nvlddmkm's detail says it is never in a preset once, not twice");
+        check(stockWords, L"ui mini-design 12: the detail's Windows stock line uses the chip's words (no data for this build yet)");
+        // 14: "+t" when the Start type column can't hold "+trigger".
+        SvcItem t;
+        t.name = L"HxTrig";
+        t.cfg = StartCfg{2, 1};
+        t.regStart = 2;
+        t.trigger = true;
+        check(StartCellText(t, false, false, true) == L"Auto (delayed) +t" && StartCellText(t, false, false, false) == L"Auto (delayed) +trigger",
+              L"ui mini-design 14: a narrow Start type column shows +t instead of cutting +trigger");
+        // 4, 5: at a narrow (suite) width Company stays, Display name goes first, and no header title is cut.
+        Canvas cn(1280, 800);
+        bool companyKept = false, displayGone = false;
+        if (cn.ok()) {
+            m->SetListColumns(cn.dc, 640);
+            for (auto& k : m->colKeys_) { if (k == L"company") companyKept = true; }
+            displayGone = std::find(m->colKeys_.begin(), m->colKeys_.end(), L"display") == m->colKeys_.end();
+        }
+        check(companyKept && displayGone,
+              L"ui mini-design 4: in a narrow list (the suite) Company is kept and Display name is dropped before it");
+        // 5: the filter's placeholder never ellipsises.
+        m->rcSearch_ = RECT{0, 0, m->Sc(120), m->Sc(30)};
+        if (cn.ok()) m->FitPlaceholder(cn.dc);
+        bool shortPh = m->search_.placeholder == L"Filter";
+        m->rcSearch_ = RECT{0, 0, m->Sc(400), m->Sc(30)};
+        if (cn.ok()) m->FitPlaceholder(cn.dc);
+        check(cn.ok() && shortPh && m->search_.placeholder == L"Filter by name, company or group",
+              L"ui mini-design 5: a narrow filter box says \"Filter\" instead of a cut placeholder");
+    }
+
     // R24: at the minimum content size (800x560) nothing clickable overlaps and every target is inside the page.
     for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::Console}) {
         for (bool plan : {false, true}) {
             h.Use(ly, 96);
             auto m = fresh(h, fixture + L"\\interrupted");
             if (plan) m->OnClickId(ID_PRESET + 3);
-            const RECT small{0, 0, 800, 560};
+            const RECT minRc{0, 0, 800, 560};
             Canvas c2(800, 560);
             if (!c2.ok()) continue;
-            m->Paint(c2.dc, small);
+            m->Paint(c2.dc, minRc);
             std::wstring bad;
             for (size_t i = 0; i < m->clicks_.size(); i++) {
                 const RECT& a = m->clicks_[i].rc;
-                if (a.left < 0 || a.top < 0 || a.right > small.right || a.bottom > small.bottom)
+                if (a.left < 0 || a.top < 0 || a.right > minRc.right || a.bottom > minRc.bottom)
                     bad += L" " + std::to_wstring(m->clicks_[i].id) + L" outside;";
                 for (size_t j = i + 1; j < m->clicks_.size(); j++)
                     if (Overlap(a, m->clicks_[j].rc))
