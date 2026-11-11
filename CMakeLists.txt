@@ -66,8 +66,8 @@ set_property(SOURCE "${HADRON_ROOT}/modules/bios/resources/bios.rc" APPEND PROPE
              "${HADRON_ROOT}/modules/bios/data/settings.db")
 # Windows SDK libraries only (hard rule 3): advapi32 for tokens and the registry, ole32/uuid for the
 # folder picker, comdlg32 for the open/save dialogs, shell32 for ShellExecute and the known-folder path,
-# msimg32 for AlphaBlend (the dimmed backdrop behind the write plan).
-target_link_libraries(mod_bios PUBLIC advapi32 ole32 uuid comdlg32 shell32 msimg32)
+# msimg32 for AlphaBlend (the dimmed backdrop behind the write plan); bcrypt for the backup manifest's SHA-256.
+target_link_libraries(mod_bios PUBLIC advapi32 ole32 uuid comdlg32 shell32 msimg32 bcrypt)
 
 # --- suite --------------------------------------------------------------------------------------
 # registry.cpp is compiled into the suite exe (not core) so the module factories resolve without a

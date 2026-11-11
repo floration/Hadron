@@ -160,7 +160,26 @@ using ProgressFn = std::function<void(int done, int total, const std::wstring& w
 // root first if needed. *dir gets the full path.
 bool CreateBackupSession(const std::wstring& root, const std::wstring& stamp, std::wstring* dir, std::wstring* err);
 
-// Runs on the Worker. Holds SeSystemEnvironmentPrivilege on this thread only (ThreadPrivilege) and
+// SHA-256 (BCrypt) as 64 lowercase hex digits. false + *err when BCrypt fails.
+bool Sha256Hex(const std::vector<uint8_t>& data, std::wstring* hex, std::wstring* err);
+// manifest.txt of a backup session: a "Hadron BIOS backup manifest 1" line, then one line per variable,
+// tab-separated: name, guid, size, attributes (hex), SHA-256 of the bytes. Written CREATE_NEW + flushed
+// by Execute before the journal opens, so only Hadron's own sessions have one.
+bool ManifestText(const std::vector<FwVar>& vars, std::string* text, std::wstring* err);
+
+// Loads a backup session for a restore, refusing (false + out->error) unless it is one of Hadron's own:
+// dir is a folder (not a link) directly under backupRoot (both resolved with GetFinalPathNameByHandleW),
+// it has manifest.txt and journal.txt, it loads as a snapshot, and its variables are exactly the
+// manifest's, each with the manifest's size, NV|BS|RT attributes and SHA-256. The board/BIOS check on
+// system.txt stays with BuildRestorePlan. Worker thread: reads files only.
+bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, SnapLoad* out);
+
+// The named mutex Execute holds for its whole run, so two Hadron windows (suite and standalone, or two
+// copies) never write firmware at the same time.
+constexpr const wchar_t* kWriteMutexName = L"Local\\Hadron.bios.fwwrite";
+
+// Runs on the Worker. Holds kWriteMutexName for the whole run and refuses when another process or thread
+// holds it. Holds SeSystemEnvironmentPrivilege on this thread only (ThreadPrivilege) and
 // refuses without it. Steps 1-3 (SMBIOS guard, drift check, backup of every planned variable) run for
 // all variables before the first write; then per variable: journal BEGIN, re-check drift, write,
 // read back, journal OK, or restore and stop. cancelled() is polled before each variable only.
@@ -172,8 +191,9 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
 // (a write that may not have finished, or a restore that failed). *vars gets those variable names.
 bool JournalIncomplete(const std::string& journal, std::vector<std::wstring>* vars);
 struct IncompleteSession { std::wstring dir, stamp; std::vector<std::wstring> vars; };
-// Looks at the newest session under root (by folder name, among the newest `newest`) that has a
-// journal and reports it when that journal is incomplete. UI thread: reads one small file.
+// Looks at the newest session under root (by the folder's creation time, name breaking ties, among the
+// newest `newest`) that has a journal and reports it when that journal is incomplete. UI thread: reads
+// one small file.
 bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int newest = 8);
 
 // %LOCALAPPDATA%\Hadron\bios-backups (not created here). Empty when the folder can't be resolved.

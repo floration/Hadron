@@ -4,8 +4,10 @@
 #include "core/sys/log.h"
 #include "core/sys/sys.h"
 #include <shlobj.h>
+#include <bcrypt.h>
 #include <algorithm>
 #include <cstdio>
+#include <cwchar>
 
 namespace hx::bios {
 
@@ -162,6 +164,79 @@ bool EnsureDir(const std::wstring& path, int depth = 0) {
     if (CreateDirectoryW(sys::ToExtended(path).c_str(), nullptr)) return true;
     return GetLastError() == ERROR_ALREADY_EXISTS;
 }
+
+// Holds kWriteMutexName from Take() until destruction. A mutex left by a crashed holder
+// (WAIT_ABANDONED) is taken: the crashed run's journal is what the "didn't finish" banner reads.
+class WriteLock {
+public:
+    ~WriteLock() {
+        if (owned_) ReleaseMutex(h_);
+        if (h_) CloseHandle(h_);
+    }
+    bool Take(std::wstring* err) {
+        h_ = CreateMutexW(nullptr, FALSE, kWriteMutexName);
+        if (!h_) { *err = L"Couldn't create the write lock: " + sys::ErrorText(GetLastError()) + L" Nothing was written."; return false; }
+        DWORD w = WaitForSingleObject(h_, 0);
+        if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) {
+            owned_ = true;
+            if (w == WAIT_ABANDONED) LogLine(LogLevel::Warn, L"the write lock was abandoned by a run that ended without releasing it");
+            return true;
+        }
+        if (w == WAIT_TIMEOUT) { *err = L"Another Hadron window is writing BIOS settings. Nothing was written."; return false; }
+        *err = L"Couldn't take the write lock: " + sys::ErrorText(GetLastError()) + L" Nothing was written.";
+        return false;
+    }
+private:
+    HANDLE h_ = nullptr;
+    bool owned_ = false;
+};
+
+// Reads a whole small file (refusing anything over cap).
+bool ReadCapped(const std::wstring& path, size_t cap, std::string* out, std::wstring* err) {
+    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { *err = sys::ErrorText(GetLastError()); return false; }
+    LARGE_INTEGER sz{};
+    bool ok = GetFileSizeEx(h, &sz) != 0;
+    if (!ok) *err = sys::ErrorText(GetLastError());
+    else if (sz.QuadPart < 0 || (unsigned long long)sz.QuadPart > cap) { ok = false; *err = L"the file is too large"; }
+    if (ok) {
+        out->assign((size_t)sz.QuadPart, '\0');
+        DWORD got = 0;
+        if (!out->empty()) {
+            if (!ReadFile(h, &(*out)[0], (DWORD)out->size(), &got, nullptr)) { *err = sys::ErrorText(GetLastError()); ok = false; }
+            else if (got != out->size()) { *err = L"the file ended early"; ok = false; }
+        }
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+// The final (link-resolved) path of an existing folder, without a trailing backslash.
+bool FinalFolderPath(const std::wstring& path, std::wstring* out, std::wstring* err) {
+    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { *err = sys::ToShell(path) + L": " + sys::ErrorText(GetLastError()); return false; }
+    std::vector<wchar_t> buf(512);
+    DWORD n = 0;
+    for (;;) {
+        n = GetFinalPathNameByHandleW(h, buf.data(), (DWORD)buf.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (n == 0 || n < buf.size()) break;
+        buf.resize((size_t)n + 1);
+    }
+    DWORD e = GetLastError();
+    CloseHandle(h);
+    if (n == 0) { *err = sys::ToShell(path) + L": " + sys::ErrorText(e); return false; }
+    *out = std::wstring(buf.data(), n);
+    while (out->size() > 1 && (out->back() == L'\\' || out->back() == L'/')) out->pop_back();
+    return true;
+}
+
+bool SamePath(const std::wstring& a, const std::wstring& b) {
+    return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
+}
+
+constexpr const char* kManifestHeader = "Hadron BIOS backup manifest 1";
 
 }  // namespace
 
@@ -564,6 +639,118 @@ bool CreateBackupSession(const std::wstring& root, const std::wstring& stamp, st
     return false;
 }
 
+bool Sha256Hex(const std::vector<uint8_t>& data, std::wstring* hex, std::wstring* err) {
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE h = nullptr;
+    UCHAR dig[32] = {};
+    const wchar_t* step = L"BCryptOpenAlgorithmProvider";
+    NTSTATUS st = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+    if (BCRYPT_SUCCESS(st)) { step = L"BCryptCreateHash"; st = BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0); }
+    if (BCRYPT_SUCCESS(st) && !data.empty()) {
+        step = L"BCryptHashData";
+        st = BCryptHashData(h, const_cast<PUCHAR>(data.data()), (ULONG)data.size(), 0);
+    }
+    if (BCRYPT_SUCCESS(st)) { step = L"BCryptFinishHash"; st = BCryptFinishHash(h, dig, sizeof(dig), 0); }
+    if (h) BCryptDestroyHash(h);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    if (!BCRYPT_SUCCESS(st)) {
+        *err = std::wstring(L"SHA-256 failed in ") + step + L" (NTSTATUS " + Hex((unsigned long)st, 8) + L").";
+        return false;
+    }
+    static const wchar_t* kDig = L"0123456789abcdef";
+    hex->clear();
+    for (UCHAR c : dig) { *hex += kDig[c >> 4]; *hex += kDig[c & 15]; }
+    return true;
+}
+
+bool ManifestText(const std::vector<FwVar>& vars, std::string* text, std::wstring* err) {
+    std::wstring t = FromUtf8(kManifestHeader) + L"\r\n";
+    for (auto& v : vars) {
+        std::wstring sha;
+        if (!Sha256Hex(v.data, &sha, err)) return false;
+        wchar_t attr[16];
+        swprintf(attr, 16, L"%08lX", (unsigned long)v.attr);
+        t += v.name + L"\t" + v.guid + L"\t" + std::to_wstring(v.data.size()) + L"\t" + attr + L"\t" + sha + L"\r\n";
+    }
+    *text = ToUtf8(t);
+    return true;
+}
+
+bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, SnapLoad* out) {
+    *out = SnapLoad{};
+    out->label = sys::ToShell(sys::ToExtended(dir));
+    auto refuse = [&](const std::wstring& why) {
+        VarMap none;
+        out->vars.swap(none);
+        out->ok = false;
+        out->error = why;
+        LogLine(LogLevel::Warn, L"restore refused for " + out->label + L": " + why);
+        return false;
+    };
+    if (backupRoot.empty()) return refuse(L"There is no backup folder to restore from (the local app data folder couldn't be resolved).");
+    DWORD a = GetFileAttributesW(sys::ToExtended(dir).c_str());
+    if (a == INVALID_FILE_ATTRIBUTES) return refuse(L"Can't open " + out->label + L": " + sys::ErrorText(GetLastError()));
+    if (!(a & FILE_ATTRIBUTE_DIRECTORY)) return refuse(L"Choose a backup session folder, not a file.");
+    if (a & FILE_ATTRIBUTE_REPARSE_POINT) return refuse(L"The chosen folder is a link (junction or symbolic link); choose the session folder itself.");
+    std::wstring rootFinal, dirFinal, e;
+    if (!FinalFolderPath(backupRoot, &rootFinal, &e)) return refuse(L"Can't resolve the backup folder: " + e);
+    if (!FinalFolderPath(dir, &dirFinal, &e)) return refuse(L"Can't resolve the chosen folder: " + e);
+    size_t cut = dirFinal.find_last_of(L'\\');
+    if (cut == std::wstring::npos || !SamePath(dirFinal.substr(0, cut), rootFinal))
+        return refuse(L"Only Hadron's own backup sessions can be restored: choose a folder directly inside " +
+                      sys::ToShell(rootFinal) + L".");
+    if (GetFileAttributesW(sys::ToExtended(dir + L"\\journal.txt").c_str()) == INVALID_FILE_ATTRIBUTES)
+        return refuse(L"This folder has no journal.txt, so it isn't a Hadron write backup.");
+    std::string man;
+    if (!ReadCapped(dir + L"\\manifest.txt", 1u << 20, &man, &e))
+        return refuse(L"This folder has no readable manifest.txt (" + e + L"), so it isn't a Hadron write backup.");
+    if (!LoadSnapshot(sys::ToExtended(dir), out)) return refuse(out->error.empty() ? L"The backup doesn't load." : out->error);
+    out->label = sys::ToShell(sys::ToExtended(dir));
+    if (out->skipped) return refuse(L"The backup lists variables it can't load (" + out->SkipSummary() + L").");
+    // Parse and compare the manifest.
+    std::wstring t = FromUtf8(man);
+    std::vector<std::wstring> lines;
+    for (size_t p = 0; p < t.size();) {
+        size_t q = t.find(L'\n', p);
+        if (q == std::wstring::npos) q = t.size();
+        std::wstring l = t.substr(p, q - p);
+        p = q + 1;
+        while (!l.empty() && l.back() == L'\r') l.pop_back();
+        if (!l.empty()) lines.push_back(l);
+    }
+    if (lines.empty() || lines[0] != FromUtf8(kManifestHeader)) return refuse(L"manifest.txt isn't a Hadron backup manifest.");
+    std::set<VarKey> seen;
+    for (size_t i = 1; i < lines.size(); i++) {
+        std::vector<std::wstring> f;
+        for (size_t p = 0;;) {
+            size_t q = lines[i].find(L'\t', p);
+            f.push_back(lines[i].substr(p, q == std::wstring::npos ? std::wstring::npos : q - p));
+            if (q == std::wstring::npos) break;
+            p = q + 1;
+        }
+        if (f.size() != 5) return refuse(L"manifest.txt line " + std::to_wstring(i + 1) + L" is malformed.");
+        VarKey k = MakeVarKey(f[0], f[1]);
+        if (!seen.insert(k).second) return refuse(L"manifest.txt lists " + f[0] + L" twice.");
+        wchar_t* end = nullptr;
+        unsigned long long size = wcstoull(f[2].c_str(), &end, 10);
+        if (f[2].empty() || *end) return refuse(L"manifest.txt has a bad size for " + f[0] + L".");
+        unsigned long attr = wcstoul(f[3].c_str(), &end, 16);
+        if (f[3].empty() || *end) return refuse(L"manifest.txt has bad attributes for " + f[0] + L".");
+        if (attr != kAttrRequired) return refuse(L"manifest.txt gives " + f[0] + L" attributes " + Hex(attr) + L", not NV|BS|RT.");
+        auto it = out->vars.find(k);
+        if (it == out->vars.end()) return refuse(L"The backup is missing " + f[0] + L", which manifest.txt lists.");
+        if (it->second.size() != size)
+            return refuse(f[0] + L" in the backup is " + std::to_wstring(it->second.size()) + L" bytes; manifest.txt says " + f[2] + L".");
+        std::wstring sha;
+        if (!Sha256Hex(it->second, &sha, &e)) return refuse(e);
+        if (!SamePath(sha, f[4]))   // case-insensitive hex compare
+            return refuse(f[0] + L" in the backup doesn't match manifest.txt (SHA-256 differs): the file was changed.");
+    }
+    if (seen.size() != out->vars.size()) return refuse(L"The backup holds variables manifest.txt doesn't list.");
+    if (seen.empty()) return refuse(L"manifest.txt lists no variables.");
+    return true;
+}
+
 namespace {
 // Writes oldData back after a failed check and verifies it. True when the variable holds oldData again.
 bool PutBack(FwBackend& be, const PlanVar& pv, DWORD* err) {
@@ -587,6 +774,10 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
         return false;
     };
     auto prog = [&](int done, const std::wstring& what) { if (progress) progress(done, total, what); };
+    // One writer at a time across every Hadron process in this session, for the whole run.
+    WriteLock lock;
+    std::wstring lockErr;
+    if (!lock.Take(&lockErr)) return stop(lockErr);
     if (plan.vars.empty()) return stop(L"The plan is empty.");
     // Static checks again (defence in depth): same size, never 0, attributes exactly NV|BS|RT, only
     // the planned bytes change.
@@ -655,6 +846,12 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
             if (it == chk.vars.end() || it->second != v.data)
                 return stop(L"The backup of " + v.name + L" doesn't read back equal. Nothing was written.");
         }
+    }
+    // manifest.txt marks the folder as Hadron's own session; a restore checks every byte against it.
+    {
+        std::string man;
+        if (!ManifestText(current, &man, &e) || !WriteNewFile(dir + L"\\manifest.txt", man, &e))
+            return stop(L"Backup failed: " + e + L" Nothing was written.");
     }
     Journal j;
     if (!j.Open(dir + L"\\journal.txt", &e)) return stop(e + L" Nothing was written.");
@@ -768,15 +965,22 @@ bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(sys::ToExtended(root + L"\\*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return false;
-    std::vector<std::wstring> names;
+    // Newest first by the folder's creation time (a stamp in the name follows the local clock, which can
+    // jump), the name breaking ties.
+    std::vector<std::pair<FILETIME, std::wstring>> sessions;
     do {
         std::wstring n = fd.cFileName;
         if (n == L"." || n == L"..") continue;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
-        names.push_back(n);
+        sessions.push_back({fd.ftCreationTime, n});
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    std::sort(names.rbegin(), names.rend());
+    std::sort(sessions.begin(), sessions.end(), [](const auto& a, const auto& b) {
+        LONG c = CompareFileTime(&a.first, &b.first);
+        return c != 0 ? c > 0 : a.second > b.second;
+    });
+    std::vector<std::wstring> names;
+    for (auto& s : sessions) names.push_back(s.second);
     for (int i = 0; i < (int)names.size() && i < newest; i++) {
         std::wstring dir = root + L"\\" + names[(size_t)i];
         HANDLE f = CreateFileW(sys::ToExtended(dir + L"\\journal.txt").c_str(), GENERIC_READ,

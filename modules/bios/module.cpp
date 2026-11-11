@@ -607,7 +607,7 @@ void BiosModule::OnJobDone() {
         if (r.started) RefreshAfterWrite();   // a fresh read so Current shows what the firmware holds now
     } else if (j == Job::RestoreLoad) {
         if (!jobBackup_.ok) {
-            SetNotice(L"Could not read the backup. " + jobBackup_.error, 2);
+            SetNotice(L"Restore refused: " + jobBackup_.error + L" Nothing was written.", 2);
         } else {
             std::wstring err;
             if (BuildRestorePlan(db_, jobBackup_.vars, jobBackup_.label, jobBackup_.sysBoard, jobBackup_.sysBios,
@@ -1225,9 +1225,11 @@ void BiosModule::StartRestoreLoad(const std::wstring& dir) {
     if (!WritesPossible()) { SetNotice(L"Writes are blocked: " + WriteBlock(), 1); return; }
     SnapLoad* out = &jobBackup_;
     std::wstring path = sys::ToExtended(dir);
+    std::wstring root = backupRoot_;
     job_ = Job::RestoreLoad;
-    if (!worker_.Start(hwnd_, WM_BIOS_DONE, [path, out] {
-            try { LoadSnapshot(path, out); }
+    // Only Hadron's own sessions under the backup root, every byte checked against manifest.txt.
+    if (!worker_.Start(hwnd_, WM_BIOS_DONE, [path, root, out] {
+            try { LoadBackupSession(root, path, out); }
             catch (const std::bad_alloc&) { *out = SnapLoad{}; out->error = L"Out of memory while reading the backup."; }
             catch (const std::exception& e) { *out = SnapLoad{}; out->error = L"Reading the backup failed: " + FromUtf8(e.what()); }
         })) {
@@ -2496,8 +2498,48 @@ std::string ReadSmall(const std::wstring& path) {
     return s;
 }
 
+// Runs Execute on its own thread (the write-lock selftest: a mutex is recursive within one thread).
+struct ExecRun {
+    MockBackend* m;
+    const Plan* p;
+    std::wstring root, stamp;
+    ExecResult r;
+    bool ok = false;
+};
+DWORD WINAPI ExecRunThread(LPVOID a) {
+    ExecRun* x = static_cast<ExecRun*>(a);
+    x->ok = Execute(*x->m, *x->p, x->root, {}, {}, &x->r, ExecOptions{x->stamp});
+    return 0;
+}
+
+// Removes the folder tree this selftest run created (its own fixtures, hard rule 1 doesn't cover them).
+// Never follows a link: a reparse point anywhere stops the removal and leaves it in place.
+bool RemoveSelftestTree(const std::wstring& dir, std::wstring* err, int depth = 0) {
+    if (depth > 16) { *err = L"too deep: " + Shell(dir); return false; }
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(sys::ToExtended(dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        if (e != ERROR_FILE_NOT_FOUND) { *err = Shell(dir) + L": " + sys::ErrorText(e); return false; }
+    } else {
+        bool ok = true;
+        do {
+            std::wstring n = fd.cFileName;
+            if (n == L"." || n == L"..") continue;
+            std::wstring p = dir + L"\\" + n;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { *err = L"a link was found, left in place: " + Shell(p); ok = false; break; }
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { if (!RemoveSelftestTree(p, err, depth + 1)) { ok = false; break; } }
+            else if (!DeleteFileW(sys::ToExtended(p).c_str())) { *err = Shell(p) + L": " + sys::ErrorText(GetLastError()); ok = false; break; }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        if (!ok) return false;
+    }
+    if (!RemoveDirectoryW(sys::ToExtended(dir).c_str())) { *err = Shell(dir) + L": " + sys::ErrorText(GetLastError()); return false; }
+    return true;
+}
+
 // docs/design/bios-write.md "Selftests": everything through MockBackend, backups under root (a fresh
-// folder next to the fixture or in %TEMP%), never %LOCALAPPDATA%, never real firmware.
+// folder in %TEMP% that RunCli removes afterwards), never %LOCALAPPDATA%, never real firmware.
 void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstring&)>& check, const std::wstring& root) {
     std::wstring err;
     // A small map: Setup (8 bytes) with a oneof, a 2-byte numeric (step 5), a checkbox, a 1-byte numeric that
@@ -2750,8 +2792,17 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         ExecResult r;
         BuildPlan(d, {{0, 1}, {2, 1}, {3, 50000}}, liveOf(*m), open, &pl, &why);
         Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000004"});   // m now holds the new values
+        std::string man = ReadSmall(r.backupDir + L"\\manifest.txt");
+        std::wstring shaOld;
+        Sha256Hex(setupOld, &shaOld, &err);
+        check(man.find("Hadron BIOS backup manifest 1\r\nSetup\tg1\t8\t00000007\t" + ToUtf8(shaOld) + "\r\n") == 0,
+              L"Restore: the session's manifest.txt lists name, guid, size, attributes and SHA-256");
+        std::wstring shaAbc;
+        check(Sha256Hex({'a', 'b', 'c'}, &shaAbc, &err) &&
+              shaAbc == L"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", L"SHA-256(\"abc\") is the FIPS 180-2 vector");
         SnapLoad bl;
-        bool loaded = LoadSnapshot(r.backupDir, &bl);
+        bool loaded = LoadBackupSession(root, r.backupDir, &bl);
+        check(loaded, L"Restore: a genuine session under the backup root loads" + (loaded ? L"" : L": " + bl.error));
         Plan rp;
         bool planned = loaded && BuildRestorePlan(d, bl.vars, bl.label, bl.sysBoard, bl.sysBios, liveOf(*m), open, &rp, &why);
         std::set<std::wstring> prompts;
@@ -2779,6 +2830,88 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         SnapLoad pre;
         check(restored && LoadSnapshot(rr.backupDir, &pre) && pre.vars[MakeVarKey(L"Setup", L"g1")] == pl.vars[0].newData,
               L"Restore: its own backup holds the bytes it replaced");
+
+        // Only Hadron's own sessions: a hand-edited .bin, a folder outside the root and a plain Save
+        // snapshot folder are refused.
+        {
+            auto m3 = freshMock();
+            Plan p3;
+            ExecResult r3;
+            bool made = BuildPlan(d, {{0, 1}}, liveOf(*m3), open, &p3, &why) &&
+                        Execute(*m3, p3, root, {}, {}, &r3, ExecOptions{L"20260101-000006"});
+            bool edited = false;
+            WIN32_FIND_DATAW fd;
+            HANDLE fh = made ? FindFirstFileW(sys::ToExtended(r3.backupDir + L"\\vars\\0001_*.bin").c_str(), &fd) : INVALID_HANDLE_VALUE;
+            if (fh != INVALID_HANDLE_VALUE) {
+                FindClose(fh);
+                HANDLE f = CreateFileW(sys::ToExtended(r3.backupDir + L"\\vars\\" + fd.cFileName).c_str(), GENERIC_WRITE, 0,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (f != INVALID_HANDLE_VALUE) {
+                    const uint8_t x = 0x5A;   // this selftest's own fixture: one byte changed in place
+                    DWORD put = 0;
+                    edited = WriteFile(f, &x, 1, &put, nullptr) && put == 1;
+                    CloseHandle(f);
+                }
+            }
+            SnapLoad s3;
+            bool refused = edited && !LoadBackupSession(root, r3.backupDir, &s3) && s3.error.find(L"SHA-256") != std::wstring::npos &&
+                           s3.vars.empty();
+            check(refused, L"Restore: a hand-edited .bin is refused (" + s3.error + L")");
+        }
+        {
+            auto m4 = freshMock();
+            Plan p4;
+            ExecResult r4;
+            bool made = BuildPlan(d, {{0, 1}}, liveOf(*m4), open, &p4, &why) &&
+                        Execute(*m4, p4, root + L"\\elsewhere", {}, {}, &r4, ExecOptions{L"20260101-000007"});
+            SnapLoad s4, s5;
+            bool outside = made && !LoadBackupSession(root, r4.backupDir, &s4) && s4.error.find(L"directly inside") != std::wstring::npos;
+            bool rootItself = !LoadBackupSession(root, root, &s5) && !s5.error.empty();
+            check(outside && rootItself, L"Restore: a genuine session outside the backup root (and the root itself) is refused (" + s4.error + L")");
+        }
+        {
+            auto m5 = freshMock();
+            SaveResult sr;
+            SmbiosInfo smb;
+            DWORD se = 0;
+            m5->Smbios(&smb, &se);
+            bool saved = SaveSnapshot(root, liveOf(*m5), smb, &sr);
+            SnapLoad s6, s7;
+            bool plainLoads = saved && LoadSnapshot(sr.folder, &s7);
+            bool refused = saved && !LoadBackupSession(root, sr.folder, &s6) && s6.error.find(L"isn't a Hadron write backup") != std::wstring::npos;
+            check(plainLoads && refused, L"Restore: a plain Save snapshot folder under the root loads as a snapshot but is refused as a backup (" +
+                  s6.error + L")");
+        }
+    }
+    // --- the write lock (one writer across Hadron windows) ---
+    {
+        using Run = ExecRun;
+        auto onThread = [](Run* run) {
+            HANDLE t = CreateThread(nullptr, 0, ExecRunThread, run, 0, nullptr);
+            if (!t) return false;
+            WaitForSingleObject(t, INFINITE);
+            CloseHandle(t);
+            return true;
+        };
+        auto m = freshMock();
+        Plan pl;
+        bool planned = BuildPlan(d, {{0, 1}}, liveOf(*m), open, &pl, &why);
+        HANDLE mx = CreateMutexW(nullptr, FALSE, kWriteMutexName);
+        bool held = mx && WaitForSingleObject(mx, 0) == WAIT_OBJECT_0;
+        Run busy{m.get(), &pl, root, L"20260101-000008", ExecResult{}, false};
+        bool ran = planned && held && onThread(&busy);
+        if (held) ReleaseMutex(mx);
+        check(ran && !busy.ok && m->writes == 0 && !busy.r.started &&
+              busy.r.error == L"Another Hadron window is writing BIOS settings. Nothing was written.",
+              L"lock: Execute refuses while another thread holds " + std::wstring(kWriteMutexName) + L" (" + busy.r.error + L")");
+        Run good{m.get(), &pl, root, L"20260101-000009", ExecResult{}, false};
+        bool ran2 = planned && onThread(&good);
+        // Released by RAII when Execute returned: the thread has exited, so a mutex it still held would
+        // come back WAIT_ABANDONED here.
+        DWORD w = mx ? WaitForSingleObject(mx, 0) : WAIT_FAILED;
+        if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) ReleaseMutex(mx);
+        check(ran2 && good.ok && m->writes == 1 && w == WAIT_OBJECT_0, L"lock: after the lock is free Execute writes and releases it on return");
+        if (mx) CloseHandle(mx);
     }
     // --- Incomplete sessions ---
     {
@@ -2796,6 +2929,18 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
                     WriteNewFile(dir + L"\\journal.txt", "BEGIN Setup g1\r\n", &err);
         bool found = made && FindIncompleteSession(root, &is) && is.stamp == L"29991231-235959" && is.vars.size() == 1;
         check(none && found, L"journal: the newest session's unfinished journal is found on start; a completed one isn't");
+        // "Newest" is the folder's creation time, not its name: a session created later under a name that
+        // sorts first (the clock went back) and completed hides the older unfinished one.
+        Sleep(50);
+        std::wstring dir2;
+        bool made2 = CreateBackupSession(root, L"00000101-000000", &dir2, &err) &&
+                     WriteNewFile(dir2 + L"\\journal.txt", "BEGIN Setup g1\r\nOK Setup\r\nEND\r\n", &err);
+        WIN32_FILE_ATTRIBUTE_DATA a1{}, a2{};
+        bool times = GetFileAttributesExW(sys::ToExtended(dir).c_str(), GetFileExInfoStandard, &a1) &&
+                     GetFileAttributesExW(sys::ToExtended(dir2).c_str(), GetFileExInfoStandard, &a2) &&
+                     CompareFileTime(&a2.ftCreationTime, &a1.ftCreationTime) > 0;
+        check(made2 && times && !FindIncompleteSession(root, &is),
+              L"journal: the newest session is picked by folder creation time, not by name");
     }
     // --- latch ---
     {
@@ -3261,25 +3406,30 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
     std::wstring fx = cl.fixture;
     for (size_t i = 0; i + 1 < cl.rest.size(); i++) if (cl.rest[i] == L"--snapshot") fx = sys::ToExtended(cl.rest[i + 1]);
     // --- guarded writes (docs/design/bios-write.md), all through MockBackend ---
+    // Backups always go to a new folder under %TEMP% (never next to the fixture, never %LOCALAPPDATA%),
+    // which is removed at the end; only the folder this run created.
     {
-        std::wstring base;
-        if (!fx.empty()) {
-            std::wstring e = sys::ToExtended(fx);
-            while (!e.empty() && (e.back() == L'\\' || e.back() == L'/')) e.pop_back();
-            size_t k = e.find_last_of(L"\\/");
-            if (k != std::wstring::npos) base = e.substr(0, k);   // next to the fixture folder or zip
-        }
-        if (base.empty()) {
-            wchar_t t[MAX_PATH + 1] = {};
-            DWORD n = GetTempPathW(MAX_PATH + 1, t);
-            base = std::wstring(t, n);
+        wchar_t t[MAX_PATH + 1] = {};
+        DWORD n = GetTempPathW(MAX_PATH + 1, t);
+        if (n == 0 || n > MAX_PATH) {
+            DWORD e = n == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER;
+            check(false, L"write selftest: GetTempPath failed (" + sys::ErrorText(e) + L"); the write selftests didn't run");
+        } else {
+            std::wstring base(t, n);
             while (!base.empty() && base.back() == L'\\') base.pop_back();
+            wchar_t tag[64];
+            swprintf(tag, 64, L"\\bios-write-selftest-%lu-%lu", (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
+            std::wstring root = sys::ToExtended(base + tag);
+            bool fresh = CreateDirectoryW(root.c_str(), nullptr) != 0;
+            DWORD ce = fresh ? 0 : GetLastError();
+            check(fresh, L"write selftest: new folder " + Shell(root) + (fresh ? L"" : L": " + sys::ErrorText(ce)));
+            if (fresh) {
+                SelftestWrites(check, root);
+                std::wstring re;
+                bool removed = RemoveSelftestTree(root, &re);
+                check(removed, L"write selftest: removed its own folder " + Shell(root) + (removed ? L"" : L": " + re));
+            }
         }
-        wchar_t tag[64];
-        swprintf(tag, 64, L"\\bios-write-selftest-%lu-%lu", (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
-        std::wstring root = base + tag;
-        wprintf(L"  [info] write selftest backups go to %ls (left in place)\n", Shell(root).c_str());
-        SelftestWrites(check, root);
     }
     if (!fx.empty()) {
         SnapLoad sl;
