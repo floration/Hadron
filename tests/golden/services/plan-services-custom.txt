@@ -3,7 +3,7 @@ Source: custom:services:Gaming rig
 Rows: 3 ticked, 3 unticked, 1 kept or protected; already set: 1
 Note: 1 row(s) need TrustedInstaller (Windows refuses the write to administrators): left out while the TrustedInstaller toggle is off.
 Note: Your custom preset "Gaming rig": nothing is changed until you press Apply, and the apply is snapshotted and undoable like every plan.
-Note: Dropped 3 item(s) that every preset leaves alone: Fax (third-party or unknown: no Hadron KB entry), WinDefend (launch-protected (Antimalware light (protected process light)): only a protected process can change it), RpcSs (core Windows service: boot, sign-in, RPC, audio, network or Hadron itself needs it).
+Note: Dropped 3 item(s) that every preset leaves alone: Fax (Hadron's KB keeps it out of every preset), WinDefend (launch-protected (Antimalware light (protected process light)): only a protected process can change it), RpcSs (core Windows service: boot, sign-in, RPC, audio, network or Hadron itself needs it).
 Note: 1 item(s) in the preset are not on this PC: HxNotOnThisPc.
 Note: 1 item(s) are not on the Services tab, so this preset leaves them: nvlddmkm.
 Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.

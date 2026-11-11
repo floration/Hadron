@@ -37,6 +37,14 @@ it was designed.
 - **TrustedInstaller toggle** (rule 4): off at every launch and never saved. When on, the writes admin can't make run
   on a thread impersonating TrustedInstaller, and TI is put back the way it was found.
 - **Undo** of any apply, and **Resume or Undo** of an apply that was interrupted (crash, power loss).
+- **Custom presets.** Any plan's ticks can be saved under a name, then reopened, exported or imported as a plain-text
+  `HXPRESET 1` file (Hadron's own strict parser; an export never overwrites, an import refuses cloud placeholders and
+  offline files unread). Opening one only builds a plan, which goes through the same guards as the built-in presets
+  (never-touch, never-preset, no KB entry, drivers without `sysok`, the hardware check) and the same confirm, snapshot
+  and undo. Remove writes a tombstone; nothing is deleted.
+- **Measure.** "Measure before" on a plan, then "Measure after" once the PC has restarted. Each records RAM in use, commit,
+  the process and `svchost.exe` counts, minutes after boot, build and machine. The compare table is labelled
+  `owner-measured`, warns when the conditions differ, names any Hadron applies between the two, and says how to test fairly.
 
 ### What it never does
 - It never restarts the PC. Presets change only `Start` and `DelayedAutostart`, effective at the next restart.
@@ -45,7 +53,7 @@ it was designed.
   runs. A System-start driver is lowered only with a curated `sysok` entry.
 - Protected (PPL) services, the Defender/Security stack, TrustedInstaller, VSS and swprv are never in a preset.
 - It never creates or deletes a service, and never deletes a registry key (CI greps for those APIs).
-- It never shows a predicted saving. Measured before/after numbers are a follow-up idea.
+- It never shows a predicted saving. The only numbers on the Measure page are values it recorded on this PC.
 
 ## How it works
 1. **Load** (on a `Worker`): enumerate through the SCM, query each item, read hardware evidence through CfgMgr32
@@ -80,6 +88,8 @@ The safety mechanics, file formats and every resolved ambiguity are in `docs/des
 | `modules/services/plan.*` | Guards, presets, single, Default, Undo and Resume plans, dependency checks, `RunApply` |
 | `modules/services/store.*` | The data folder checks, snapshot and undo-log formats, `CREATE_NEW` writers, the apply lock |
 | `modules/services/recovery.*` | The restore scripts, `.reg` files and a stored-only zip writer (rule 3) |
+| `modules/services/custom.*` | Custom presets: the `HXPRESET 1` format, the preset store, export and import |
+| `modules/services/measure.*` | Before/after measurements: taking, storing and pairing records |
 | `modules/services/ti.*` | TrustedInstaller impersonation (module-local; moving it to core is a lead follow-up) |
 | `modules/services/selftest.cpp`, `cli.h`, `standalone.cpp` | `--selftest` (282 checks), `--dump-plan`, and `--live-test` (test-hooks build only) |
 | `tools/services/kb.py`, `genkb.py` | KB source (289 entries) and the rule-7 gate (`tools/services/README.md`) |
