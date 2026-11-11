@@ -51,6 +51,16 @@ CI. Use the core as-is.
 7. **Safe-to-delete claims:** the 9 reasons + 28 rules (docs/legacy/diskmap.md §3) go through `kb-auditor`
    before merge; each rule carries a `basis`. KB text may be improved during the port.
 
+Added during the port (2026-11-11):
+8. **Command line:** `--drive X` (validated against the drive list) replaces the legacy bare drive-letter
+   argument (legacy notes §5 item 27). Lead-approved; low impact.
+9. **Narrowed rules (owner's call, decision card):** `users\*\appdata\**\cache` skips per-user installs
+   (`Local\Programs`, `node_modules`, `site-packages`); root `AMD`/`NVIDIA` is flagged only when a
+   `setup.exe` or `Packages` folder is found anywhere inside it (post-scan subtree check, no extra I/O).
+10. **"Check for data streams" toggle (owner's request), off by default:** when on, each counted file's
+    named `:$DATA` streams are summed (`FindFirstStreamW`; never on cloud or reparse files) and toggling
+    rescans; when off, alternate data streams are named in the "Not mapped" explanation.
+
 ## Data model (`scan.h`)
 Flat arrays, `u32` indices, one name pool (legacy §1). `FileE{size,nameOff,dir,cat,safe}`,
 `DirE{name,parent,file range,kids,recursive totals, per-cat and per-reason sums, own safe reason,
