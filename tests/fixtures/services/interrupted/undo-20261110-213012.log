@@ -3,7 +3,8 @@ B	20261110-213012	preset:bloat:services	3	6f1c2a4e-fixture-0000-0000-00000000000
 P	1	MapsBroker	start	2/1	4/1	admin	44D309B2
 P	2	lfsvc	start	3/-	4/-	admin	A5826543
 P	3	RetailDemo	start	3/-	4/-	admin	7ED3B558
-T	started	FF02565B
+T	starting	0E6780B2
+T	started	1372	01DC00000000055C	0861DC91
 I	1	2/1	admin	FA92C5AD
 D	1	ok	4/1	admin	305064C3
 I	2	3/-	admin	D4754155

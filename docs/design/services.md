@@ -278,9 +278,9 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 | `--keys F1,F2,text:abc,...` | module | Replay keys after the fixture loads (`F1`-`F12`, `up`, `down`, `pgup`, `pgdn`, `home`, `end`, `tab`, `esc`, `space`, `enter`, `text:<chars>`) |
 | `--ti on` | module | Start with the TrustedInstaller toggle on (fixture renders only; live it is off at every launch) |
 | `--data-dir <dir>` | module, `--live-test` | Use another data folder instead of `%ProgramData%\Hadron\services\` |
-| `--readonly` | module | Never arm the backend. Without `--data-dir` it also sets no data folder, so the page shows no first-run snapshot, no undo logs and no interrupted banner |
+| `--readonly` | module | Never arm the backend. Without `--data-dir` it opens the default data folder read-only, so the first-run snapshot, undo logs and interrupted banner still show |
 | `--selftest [--update-golden] [--golden <dir>]` | selftest | Run the selftest. `--golden` points at another golden folder (default `<fixture>\..\..\golden\services`); `--update-golden` rewrites every golden it compares instead of comparing |
-| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` works but has no golden |
+| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (no data yet: the plan says so) |
 | `--live-test HadronTest<name> [--ti] [--data-dir <dir>]` | `HadronServices.exe` | CI's round trip on a dummy service (see below) |
 
 **Regenerating goldens** (only when a change is meant to alter them, and review every diff):

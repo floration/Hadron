@@ -30,12 +30,18 @@ bool ParseSnapshot(const std::string& utf8, Snapshot* out, std::wstring* err);
 // HXSVC 1 undo
 // B  stamp  source  count  machine  build  order   (begin; order: 1 + the highest order of the logs before it)
 // P  seq  name  start  before  after  identity     (every plan row, up front)
-// T  started|stopped                               (TrustedInstaller service started / stopped by Hadron)
+// T  starting                                      (flushed BEFORE Hadron may start the TrustedInstaller service)
+// T  started  pid  pstart                          (Hadron's own request started it: its pid and process creation time)
+// T  notstarted                                    (it was running already, or someone else started it: not Hadron's)
+// T  stopped | stopfailed  text                    (Hadron stopped it again / could not)
 // I  seq  observed  identity-verified              (flushed BEFORE the SCM call)
 // D  seq  ok|skip|fail  observed-after  text       (flushed after the call and a re-read)
+// N  text                                          (a resolution record: what happened, in words)
 // E  stamp  ok  skipped  failed                    (end)
 // Every record ends with a TAB and the CRC-32 (hex) of the text before it. A record with a bad or
 // missing CRC (a torn last write) is ignored and counted.
+// A resolution log has no rows: B with source "dismiss:<stamp>" (the user dismissed that interrupted apply) or
+// "ti-resolved:<stamp>" (that log's TrustedInstaller claim is closed), one N, then E. Logs are never appended to.
 struct UndoRow {
     int seq = 0;
     std::wstring name, identity;
@@ -45,10 +51,19 @@ struct UndoRow {
     std::wstring result, text, iIdentity;
 };
 struct UndoLog {
-    std::wstring file, stamp, source, machine, build;
+    std::wstring file, stamp, source, machine, build, note;
     int count = 0, badRecords = 0, order = 0;
-    bool hasB = false, hasE = false, tiStarted = false, tiStopped = false;
+    bool hasB = false, hasE = false;
+    // TrustedInstaller records (R4): starting (written before a possible start), started (with pid and process
+    // creation time when the record has them), notstarted, stopped, stopfailed (with Hadron's note).
+    bool tiStarting = false, tiStarted = false, tiNotStarted = false, tiStopped = false, tiStopFailed = false;
+    DWORD tiPid = 0;
+    uint64_t tiPstart = 0;
+    std::wstring tiStopNote;
     std::vector<UndoRow> rows;
+    // Filled by LoadLogs for a "resume:X" log: X (and what X resumed), oldest first, without their own chains. Undo
+    // of a resume puts back the rows its interrupted apply had already written too (Review R7).
+    std::vector<UndoLog> chain;
     UndoRow* Row(int seq);
 };
 bool ParseUndoLog(const std::string& utf8, UndoLog* out, std::wstring* err);
@@ -92,13 +107,18 @@ public:
     bool Valid() const { return !root_.empty(); }
 
     static std::wstring DefaultRoot(std::wstring* err);    // %ProgramData%\Hadron\services
-    // Creates the root (and missing parents, up to the volume or share root). secure: the root gets a protected
-    // DACL, Administrators + SYSTEM full control, inherited. On every call (the folder may have been made by
-    // someone else): the root and each parent must not be a reparse point; with secure, the folder that holds the
-    // root (unless that is a volume or share root) must be owned by Administrators, SYSTEM or TrustedInstaller
-    // (checked before the root is created), the root's owner must be Administrators or SYSTEM, and the protected
-    // DACL is (re)applied. Any failure: false, with the reason, and the caller writes nothing there.
+    // Creates the root (and missing parents, up to the volume or share root). secure: a root Hadron creates gets a
+    // protected DACL, Administrators + SYSTEM full control, inherited. The security of a folder that already exists is
+    // never changed (Review R1). On every call (the folder may have been made by someone else): the root and each
+    // parent must not be a reparse point; with secure, the folder that holds the root (unless that is a volume or
+    // share root) must be owned by Administrators, SYSTEM or TrustedInstaller (checked before the root is created),
+    // and the root, checked by handle, must be owned by Administrators or SYSTEM with a DACL that lets nobody else
+    // write, delete or re-permission anything in it. Any failure: false, with the reason, and the caller writes
+    // nothing there.
     bool EnsureRoot(bool secure, std::wstring* err);
+    // "" when sd's DACL lets nobody but Administrators, SYSTEM and TrustedInstaller write, delete or re-permission
+    // anything (inherit-only entries included), else why not. EnsureRoot's test for an existing root.
+    static std::wstring WriteAccessProblem(PSECURITY_DESCRIPTOR sd);
     // The path without a \\?\ prefix (\\?\UNC\x -> \\x), for display and for the README.
     static std::wstring Plain(const std::wstring& path);
 #ifdef HX_SERVICES_TEST_HOOKS

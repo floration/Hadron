@@ -157,6 +157,12 @@ bool ReadOne(SC_HANDLE scm, const std::wstring& name, const SERVICE_STATUS_PROCE
     i.state = ssp.dwCurrentState ? ssp.dwCurrentState : SERVICE_STOPPED;
     i.controls = ssp.dwControlsAccepted;
     i.pid = ssp.dwProcessId;
+    if (i.pid) {   // the process's creation time: with the pid it names one process instance (TrustedInstaller claim, R4)
+        HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, i.pid);
+        FILETIME c{}, x{}, k{}, u{};
+        if (ph && GetProcessTimes(ph, &c, &x, &k, &u)) i.pstart = ((uint64_t)c.dwHighDateTime << 32) | c.dwLowDateTime;
+        if (ph) CloseHandle(ph);   // a process Hadron may not open (protected) keeps 0: never claimed
+    }
     i.kind = KindOf(i.type);
     *out = std::move(i);
     return true;
@@ -236,7 +242,8 @@ public:
                 i.state = e.second.dwCurrentState;
                 i.type = e.second.dwServiceType;
                 i.kind = KindOf(i.type);
-                i.readError = L"configuration unreadable: " + rerr;
+                i.readError = std::wstring(kCfgUnreadable) + L": " + rerr;
+                i.cfgUnknown = true;   // cfg is the default, not this service's: never planned or recorded
             }
             out->push_back(std::move(i));
         }
@@ -379,10 +386,43 @@ private:
 
 std::unique_ptr<Backend> MakeLiveBackend() { return std::make_unique<LiveBackend>(); }
 
-// VERSIONINFO CompanyName of a service's image (ServiceDll for svchost services). Read-only; "" if none.
+bool CompanyPathAllowed(const std::wstring& path) {
+    // Only a plain local drive path: never a UNC path (a dead share stalls the load), never \\?\UNC\ or a device path.
+    std::wstring p = path;
+    if (p.rfind(L"\\\\?\\", 0) == 0) p = p.substr(4);
+    if (p.size() < 3 || !iswalpha(p[0]) || p[1] != L':' || p[2] != L'\\') return false;
+    return true;
+}
+
+bool CompanyAttrsAllowed(DWORD attrs) {
+    // Hard rule 1: never read data from a file that would be recalled from the cloud or from offline storage.
+    const DWORD kRecall = FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_OFFLINE;
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & kRecall) && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+namespace {
+// Metadata only (no data is read, nothing is recalled): a local drive that is not a network drive, and a file
+// without the recall or offline attributes.
+bool CompanyReadable(const std::wstring& path) {
+    if (!CompanyPathAllowed(path)) return false;
+    std::wstring p = path.rfind(L"\\\\?\\", 0) == 0 ? path.substr(4) : path;
+    std::wstring root = p.substr(0, 3);
+    if (GetDriveTypeW(root.c_str()) == DRIVE_REMOTE) return false;   // a mapped network drive: same as UNC
+    return CompanyAttrsAllowed(GetFileAttributesW(sys::ToExtended(p).c_str()));
+}
+}  // namespace
+
+// VERSIONINFO CompanyName of a service's image (ServiceDll for svchost services). Read-only; "" if none, and "" without
+// opening the file when it is on a network path or would be recalled from the cloud (R3).
 std::wstring FileCompany(const SvcItem& item) {
-    wchar_t win[MAX_PATH] = {};
-    GetSystemWindowsDirectoryW(win, MAX_PATH);
+    std::wstring win;
+    {
+        std::vector<wchar_t> w(MAX_PATH);
+        UINT n = GetSystemWindowsDirectoryW(w.data(), (UINT)w.size());
+        if (n >= w.size()) { w.assign(n + 1, 0); n = GetSystemWindowsDirectoryW(w.data(), (UINT)w.size()); }
+        if (n == 0 || n >= w.size()) return {};   // no Windows folder to resolve \SystemRoot\ against: show nothing
+        win.assign(w.data(), n);
+    }
     ImageInfo im = NormalizeImage(item.image, win, item.name, IsDriverType(item.type));
     std::wstring path = im.path;
     if (!im.svchostGroup.empty()) {
@@ -391,8 +431,16 @@ std::wstring FileCompany(const SvcItem& item) {
         if (!dll.empty()) path = dll;
     }
     if (path.empty()) return {};
-    wchar_t exp[MAX_PATH * 2] = {};
-    if (ExpandEnvironmentStringsW(path.c_str(), exp, MAX_PATH * 2)) path = exp;
+    if (path.find(L'%') != std::wstring::npos) {
+        // The return is the size needed (with the terminator), or 0 on failure: a too-small buffer is never used.
+        DWORD need = ExpandEnvironmentStringsW(path.c_str(), nullptr, 0);
+        if (need == 0) return {};
+        std::vector<wchar_t> exp(need + 1, 0);
+        DWORD got = ExpandEnvironmentStringsW(path.c_str(), exp.data(), (DWORD)exp.size());
+        if (got == 0 || got > exp.size()) return {};
+        path = exp.data();
+    }
+    if (!CompanyReadable(path)) return {};
     std::wstring ext = sys::ToExtended(path);
     DWORD dummy = 0;
     DWORD sz = GetFileVersionInfoSizeExW(FILE_VER_GET_NEUTRAL, ext.c_str(), &dummy);

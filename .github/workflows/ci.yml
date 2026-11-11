@@ -131,6 +131,9 @@ jobs:
           }
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
+          # --live-test exists only in a test-hooks build (R25): a release build has no command-line write path.
+          cmake -S . -B build-svctest -G Ninja -DCMAKE_BUILD_TYPE=Release -DHADRON_SERVICES_TEST_HOOKS=ON
+          cmake --build build-svctest --target HadronServices
       - name: Selftests
         shell: pwsh
         run: |
@@ -152,7 +155,7 @@ jobs:
         run: |
           mkdir svcplans | Out-Null
           foreach ($tab in 'services','drivers') {
-            foreach ($lvl in 'default','bloat','stripped','minimum') {
+            foreach ($lvl in 'default','bloat','stripped','minimum','stock') {
               $out = "svcplans\plan-$tab-$lvl.txt"
               $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow `
                 -ArgumentList '--dump-plan',$lvl,'--tab',$tab,'--fixture','tests\fixtures\services','--out',$out
@@ -170,7 +173,7 @@ jobs:
           if ((Get-FileHash $out).Hash -ne (Get-FileHash "tests\golden\services\plan-services-default-delayedlinger.txt").Hash) {
             throw "plan-services-default-delayedlinger.txt differs from tests\golden\services"
           }
-          "ok: 8 plans and the delayedlinger plan match tests/golden/services"
+          "ok: 10 plans and the delayedlinger plan match tests/golden/services"
       # Wine's cmd tolerates what real cmd.exe rejects (a ")" in a name closing an IF block), so the generated
       # restore.cmd runs here on the real one. restore-dryrun.cmd is the golden script with every reg call echoed
       # (call :dry), Select\Current read as 1, every Start read as 3, an extra "Intel(R) Dry Run (x86)" row fed to
@@ -200,7 +203,7 @@ jobs:
           sc.exe create HadronTestSvc binPath= "C:\Windows\System32\cmd.exe /c exit 0" start= demand
           if ($LASTEXITCODE) { throw "sc.exe create failed" }
           try {
-            $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live.txt `
+            $p = Start-Process build-svctest\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live.txt `
               -ArgumentList '--live-test','HadronTestSvc','--data-dir',"$env:RUNNER_TEMP\hadron-live\services"
             Get-Content live.txt
             if ($p.ExitCode) { throw "live test exited $($p.ExitCode)" }
@@ -216,7 +219,7 @@ jobs:
           sc.exe create HadronTestSvc binPath= "C:\Windows\System32\cmd.exe /c exit 0" start= demand
           if ($LASTEXITCODE) { throw "sc.exe create failed" }
           try {
-            $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live-ti.txt `
+            $p = Start-Process build-svctest\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live-ti.txt `
               -ArgumentList '--live-test','HadronTestSvc','--ti','--data-dir',"$env:RUNNER_TEMP\hadron-live-ti\services"
             Get-Content live-ti.txt
             if ($p.ExitCode) { throw "TI live test exited $($p.ExitCode)" }

@@ -1,7 +1,7 @@
 Plan: Minimum (Drivers)
 Source: preset:minimum:drivers
 Rows: 6 ticked, 0 unticked, 1 kept or protected; already set: 0
-Note: 31 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
+Note: 7 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
 Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
 [x] hyperkbd  Manual -> Disabled  (3/- -> 4/-)
     why: Hyper-V guest keyboard; kept when this Windows is a VM guest

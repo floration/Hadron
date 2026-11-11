@@ -5,26 +5,40 @@ Only start types are restored. Service state can't be restored offline.
 A. If Windows doesn't start (WinRE)
 1. Windows opens the recovery environment by itself after failed starts. Choose
    Troubleshoot > Advanced options > Command Prompt.
+   If it doesn't open, start the PC from Windows installation media (a USB stick), choose
+   your language, then Repair your computer > Troubleshoot > Advanced options > Command Prompt.
 2. If the Windows drive uses BitLocker, unlock it first (you need the recovery key):
      manage-bde -unlock C: -RecoveryPassword <your-48-digit-key>
    (use the drive letter WinRE shows for Windows; it is often not C:).
 3. Find the drive that holds Windows. Either try:  dir C:\Windows  then  dir D:\Windows
    or run:  bcdedit | find "osdevice"
-4. Run, replacing D: with that drive:
+4. Run this. Replace the last D: with the Windows drive, and the first D: with the drive
+   that holds this folder (the same drive, unless Hadron's data folder is on another one):
      D:\ProgramData\Hadron\services\recovery\first\restore.cmd D:
    The script refuses if D:\Windows\System32\config\SYSTEM is missing, loads that hive,
    reads Select\Current, writes the values below for keys that exist, and unloads it.
 5. Close the window and choose Continue.
 
+Which folder to use
+Each apply has its own folder in the recovery folder, named by the UTC time it started
+(yyyyMMdd-HHmmss), so the names sort oldest first. "first" holds the start types from when
+Hadron first ran on this PC. List them with:
+     dir D:\ProgramData\Hadron\services\recovery
+Run the newest folder first. If Windows still doesn't start, run the next older one, and so on:
+each puts back the start types from before its own apply. "first" goes back to how Hadron
+first saw this PC.
+
 If you copied this folder to a USB stick, run it from there and give the Windows drive:
      E:\restore.cmd D:
-WinRE can't open .zip files: use the plain folder. The .zip beside it is the same files.
+WinRE has no Explorer to open a .zip (reasoning): use the plain folder. The zip
+     D:\ProgramData\Hadron\services\recovery-first.zip
+holds the same files, for copying.
 
 B. If Windows starts in Safe Mode
 Open an administrator Command Prompt and run:
      C:\ProgramData\Hadron\services\recovery\first\restore-online.cmd     (C: is where Windows normally runs)
 It checks for admin rights with fltmc and writes the same values to the running registry.
-Or start Hadron in Safe Mode and use Undo.
+Or start Hadron in Safe Mode and use Default: as first seen.
 
 C. Names the scripts can't carry
 None.
@@ -129,17 +143,19 @@ D. Values (96 items)
 
 E. Rows that may print FAILED
 Some service keys accept writes only from TrustedInstaller, not from administrators or SYSTEM.
-Hadron changed those while impersonating TrustedInstaller. In WinRE and in Safe Mode the scripts
+Hadron writes those while impersonating TrustedInstaller. In WinRE and in Safe Mode the scripts
 run as SYSTEM or as an administrator, so the reg add for such a key may fail and print FAILED.
-That changes nothing else. Restore those rows with Hadron's Undo, with the TrustedInstaller
-toggle on, once Windows starts.
+That changes nothing else. Restore those rows with Hadron's Default: as first seen,
+with the TrustedInstaller toggle on, once Windows starts.
 Rows here that needed TrustedInstaller: 2 (marked in D).
 
 F. Not in these scripts (55 items)
-Hadron never changes these, so the scripts never write them either: Boot- and System-start
-values, the storage and boot path, never-touch items and launch-protected services. Windows sets
-those per PC, and writing an old value back after a disk or controller change can stop Windows
-from starting.
+Hadron never changes these, so the scripts never write them either: items at Boot or System
+start, storage and boot-path drivers, items Hadron never touches (core services Windows needs
+to start, sign in or reach the network, filter drivers, and services whose failure restarts
+Windows), items it never puts in a preset (Defender, TrustedInstaller, Volume Shadow Copy and
+others) and launch-protected services. Windows sets the storage and boot-path drivers per PC:
+writing an old value back after a disk or controller change can stop Windows from starting.
   TrustedInstaller
   VSS
   swprv

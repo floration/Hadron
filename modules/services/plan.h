@@ -49,6 +49,7 @@ struct PlanRow {
     StartCfg before, after;
     WriteOp op;
     std::vector<std::wstring> deps;    // the item's DependOnService, for ordering
+    std::wstring group;                // the item's load-order group: a "+group" dependency orders it too (R17)
     bool include = true, canToggle = true;
     std::wstring blocked;              // non-empty: shown for information, never applied
     std::wstring reason, basis, basisNote, evidence, warning, contested;
@@ -70,16 +71,28 @@ struct Plan {
     int alreadySet = 0, unknown = 0;
     std::vector<std::wstring> notes;
     bool restartNeeded = true;         // start-type changes act at the next restart
+    int what = -1;                     // control plans: 0 start, 1 stop, 2 restart
+    DWORD tiPid = 0;                   // "ti-stop:" plans: the TrustedInstaller process Hadron started (R4)
+    uint64_t tiPstart = 0;
+    // What the plan screen shows instead of a bare "Nothing to change." when the plan has no rows for a reason the
+    // user must see (R20: no Windows-stock data for this build). Also in notes.
+    std::wstring emptyText;
     int Included() const;
     int Optional() const;
     int Blocked() const;
 };
 
 Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ctx& c);
+// stock: Windows stock values from the KB (R20: an empty plan says Hadron has no data for the build). Else "as first
+// seen": first.txt, only when it is from this PC (machine GUID) and this Windows build (R11).
 Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const Ctx& c);
+// "10.0.19045.5737" and "19045" -> "19045": the build number alone, for comparing builds.
+std::wstring BuildNumber(const std::wstring& build);
 Plan BuildSingle(const SvcItem& item, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c);
 // Stop / Start / Restart a service (spec §5.2): dependents that will stop are listed first.
-Plan BuildControl(const SvcItem& item, int what /*0 start, 1 stop, 2 restart*/, Backend& b, const std::vector<SvcItem>& items);
+// Never-touch items (and anything whose stop would stop one as a dependent) come back with every row blocked (R5).
+Plan BuildControl(const SvcItem& item, int what /*0 start, 1 stop, 2 restart*/, Backend& b, const std::vector<SvcItem>& items,
+                  const Ctx& c);
 // Undo and Resume refuse a log whose machine GUID or build differs from the PC's (empty plan, the reason as a
 // note), and run every row through the same guards as a plan (CheckGuard on the live item, no Boot start, no
 // Boot/System on a service, System-start drivers only with sysok): a log has a CRC, not an author.
@@ -111,7 +124,8 @@ std::vector<size_t> ApplyOrder(const Plan& p);
 class TiProvider {
 public:
     virtual ~TiProvider() = default;
-    virtual bool Acquire(std::wstring* err) = 0;        // once per apply: SeDebug, SYSTEM, TI token
+    // Once per apply: SeDebug, SYSTEM, TI token. cancel (may be null) is honoured by every wait, Release's included.
+    virtual bool Acquire(const std::atomic<bool>* cancel, std::wstring* err) = 0;
     virtual bool StartedService() const = 0;            // Acquire started the TrustedInstaller service
     virtual bool Impersonate(std::wstring* identity, std::wstring* err) = 0;   // verified TI identity text
     virtual void Revert() = 0;
@@ -130,6 +144,9 @@ struct ApplyEnv {
     std::wstring build, machine;
     int crashAfterBegin = -1;   // selftest: stop dead after the I record and the write of this seq
     int failFlushAfter = -1;    // selftest: the undo log's flush fails after this many records
+    // R12: every plan but an Undo is refused while the data folder has no first.txt (it failed to write, or was
+    // removed): a change with no record of the state before Hadron is never made. The selftest's fixtures turn it off.
+    bool requireFirst = true;
 };
 
 struct ApplyResult {
@@ -140,17 +157,51 @@ struct ApplyResult {
 };
 
 bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r);
-// Live start/stop/restart (control plans): confirm + log line, no undo entry (spec §5.2).
+// Live start/stop/restart (control plans): confirm + log line, no undo entry (spec §5.2). A failed stop starts again,
+// newest first, what this run already stopped (R13).
 bool RunControl(const Plan& p, const ApplyEnv& env, ApplyResult* r);
 
 // ---- logs, interrupted applies, drift ------------------------------------------------------------------
 std::vector<UndoLog> LoadLogs(const Store& s, std::vector<std::wstring>* problems);
 int FindInterrupted(const std::vector<UndoLog>& logs);   // newest B-without-E log not resolved by a finished undo/resume
-// The log an Undo of logs[k] should start from: for an interrupted "undo:X" log that is X itself (undoing the
-// undo would re-apply X), otherwise k.
+// The log an Undo of logs[k] should start from: for an interrupted "undo:X" log, or a resume of one, that is X itself
+// (undoing the undo would re-apply X), otherwise k.
 int UndoBase(const std::vector<UndoLog>& logs, int k);
-int FindUndoable(const std::vector<UndoLog>& logs);      // newest finished log with changes, not undone yet
-bool TiLeftRunning(const std::vector<UndoLog>& logs);    // a log says Hadron started TI and never stopped it
+// Newest finished log with changes, not undone yet. Never an undo's log or a resume of one (R8). A "resume:X" log is
+// offered with X's rows (UndoLog::chain, R7).
+int FindUndoable(const std::vector<UndoLog>& logs);
+// "Stripped (Services)", "the undo of 20261110-213012 UTC": a log source in words, never a raw preset id.
+std::wstring SourceLabel(const std::wstring& source);
+// The interrupted-apply banner's text for logs[k] (stamp in UTC, source in words, a crash while starting TI noted).
+std::wstring InterruptedText(const std::vector<UndoLog>& logs, int k);
+// The user's Dismiss of an interrupted apply (R9): a resolution log "dismiss:<stamp>" (B, N, E; no rows), under the
+// apply lock. FindInterrupted no longer returns that log. Nothing else changes; its log and recovery folder stay.
+bool DismissInterrupted(Store& st, const UndoLog& log, const std::wstring& machine, const std::wstring& build,
+                        const std::wstring& lockName, std::wstring* err);
+
+// TrustedInstaller left running (R4). A log claims "Hadron started TrustedInstaller" when it has T started (or a
+// T starting with no outcome after a crash) and no T stopped, and no "ti-resolved:<stamp>" log closes it. The claim is
+// shown and acted on only while the running TrustedInstaller is that same process (pid and creation time from the
+// T started record); a T started without them (older logs, or a start whose process couldn't be read) is never shown.
+struct TiClaim {
+    int log = -1;                 // index into logs; -1 = none
+    std::wstring stamp, source, stopNote;
+    bool finished = false;        // the apply has its E record
+    bool verified = false;        // pid and creation time are recorded
+    DWORD pid = 0;
+    uint64_t pstart = 0;
+};
+TiClaim LiveTiClaim(const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);
+bool TiLeftRunning(const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);
+std::wstring TiLeftText(const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);   // the banner, from data
+// The banner's "Stop it": a control plan (BuildControl, stop TrustedInstaller) gets source "ti-stop:<stamp>", the
+// claimed process and a reason from data; with no live claim every row is blocked. RunControl stops it only while it
+// is still that process, then writes "ti-resolved:<stamp>".
+void MarkTiStop(Plan* p, const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);
+// Load time: closes every open claim whose process is gone (TrustedInstaller stopped, or another process running) with
+// a "ti-resolved:<stamp>" log. Returns how many it wrote; 0 when the apply lock is busy (the next load tries again).
+int ResolveStaleTiClaims(Store& st, const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items, const std::wstring& machine,
+                         const std::wstring& build, const std::wstring& lockName = L"Global\\Hadron.services.apply");
 // name (lower case) -> the value Hadron last wrote and verified, from finished logs in order.
 std::map<std::wstring, StartCfg> LastApplied(const std::vector<UndoLog>& logs);
 

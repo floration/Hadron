@@ -1,6 +1,6 @@
 Plan: Pure bloat removal (Drivers)
 Source: preset:bloat:drivers
 Rows: 0 ticked, 0 unticked, 0 kept or protected; already set: 0
-Note: Pure bloat removal on the Drivers tab is expected to be near-empty: Hadron found no Microsoft source that names a stock driver as safe to disable.
-Note: 31 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
+Note: Pure bloat removal has no drivers: Hadron found no Microsoft source that names a stock driver as safe to disable.
+Note: 7 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
 Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.

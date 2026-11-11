@@ -26,6 +26,9 @@ public:
     bool Started() const { return started_; }
     bool StopIfStarted(std::wstring* note);        // true only when it was claimed and the stop succeeded
     DWORD waitMs = 30000, pollMs = 250;            // the START_PENDING wait
+    // Checked by every wait in Ensure and passed to Control (R22): Cancel and module Shutdown never wait out a stuck
+    // TrustedInstaller start. A stop request is still sent when cancelled; only the wait for STOPPED is cut short.
+    const std::atomic<bool>* cancel = nullptr;
 private:
     Backend* b_;
     bool started_ = false;

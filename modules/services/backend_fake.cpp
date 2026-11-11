@@ -12,6 +12,7 @@ bool FakeBackend::Load(const std::wstring& dir, std::wstring* err) {
     Snapshot snap;
     if (!ParseSnapshot(text, &snap, err)) { *err = L"snapshot.txt: " + *err; return false; }
     items_ = std::move(snap.items);
+    for (auto& i : items_) if (i.pid && !i.pstart) i.pstart = FakeProcStart(i.pid);
     if (snap.meta.count(L"build")) {
         std::wstring b = snap.meta[L"build"];
         // "10.0.19045.5737" -> "19045"
@@ -104,11 +105,26 @@ bool FakeBackend::Control(const std::wstring& name, Op op, const std::atomic<boo
     if (op == Op::Start) {
         if (i->cfg.start == 4) { *err = L"The service cannot be started, either because it is disabled or because it has no enabled devices associated with it."; return false; }
         bool race = faults.startRace.erase(Lower(name)) > 0;   // Windows started it between the caller's Query and this
-        if (ownStart) *ownStart = i->state == SERVICE_STOPPED && !race;
+        bool fresh = i->state == SERVICE_STOPPED;
+        if (ownStart) *ownStart = fresh && !race;
+        if (fresh || race) { i->pid = nextPid_++; i->pstart = FakeProcStart(i->pid); }   // a new process
+        if (faults.startNoWait.erase(Lower(name))) {
+            i->state = SERVICE_START_PENDING;
+            controlLog.push_back(L"start " + name + L" (still starting)");
+            *err = L"timed out waiting; last state Starting";
+            return false;
+        }
         i->state = SERVICE_RUNNING;
         controlLog.push_back(race ? L"start " + name + L" (already running)" : L"start " + name);
     } else {
+        if (faults.stopFail.count(Lower(name))) {
+            controlLog.push_back(L"stop " + name + L" (failed)");
+            *err = L"timed out waiting; last state Running";
+            return false;
+        }
         i->state = SERVICE_STOPPED;
+        i->pid = 0;
+        i->pstart = 0;
         controlLog.push_back(L"stop " + name);
     }
     return true;

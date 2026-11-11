@@ -116,22 +116,27 @@ bool TiService::Ensure(SvcItem* ti, std::wstring* err) {
     std::wstring e;
     if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read the TrustedInstaller service: " + e; return false; }
     // Stopping (Windows Update finishing, or its idle timeout): wait for STOPPED, then start it like a stopped one.
+    auto stop = [&]() { return cancel && cancel->load(); };
     DWORD s0 = GetTickCount();
     while (ti->state == SERVICE_STOP_PENDING && GetTickCount() - s0 < waitMs) {
+        if (stop()) { *err = L"cancelled while TrustedInstaller was stopping"; return false; }
         Sleep(pollMs);
         if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read the TrustedInstaller service: " + e; return false; }
     }
     if (ti->state == SERVICE_STOPPED) {
         bool own = false;
-        if (!b_->Control(L"TrustedInstaller", Op::Start, nullptr, &e, &own)) { *err = L"could not start TrustedInstaller: " + e; return false; }
+        bool ok = b_->Control(L"TrustedInstaller", Op::Start, cancel, &e, &own);
         // Claimed only when our own start request started it. ERROR_SERVICE_ALREADY_RUNNING means Windows started it
-        // between the Query and the start: it stays Windows's.
+        // between the Query and the start: it stays Windows's. Claimed even when the wait for RUNNING then failed
+        // (R14): the request was ours, so the apply's release stops it.
         started_ = own;
+        if (!ok) { *err = L"could not start TrustedInstaller: " + e; return false; }
         if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read TrustedInstaller after starting it: " + e; return false; }
     }
     // Someone else is starting it: wait for RUNNING, but it stays theirs.
     DWORD t0 = GetTickCount();
     while (ti->state == SERVICE_START_PENDING && GetTickCount() - t0 < waitMs) {
+        if (stop()) { *err = L"cancelled while TrustedInstaller was starting"; return false; }
         Sleep(pollMs);
         if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read the TrustedInstaller service: " + e; return false; }
     }
@@ -143,7 +148,7 @@ bool TiService::StopIfStarted(std::wstring* note) {
     if (!started_) return false;
     started_ = false;
     std::wstring e;
-    if (!b_->Control(L"TrustedInstaller", Op::Stop, nullptr, &e)) {
+    if (!b_->Control(L"TrustedInstaller", Op::Stop, cancel, &e)) {
         *note = L"Hadron started TrustedInstaller and could not stop it again: " + e;
         return false;
     }
@@ -158,8 +163,9 @@ public:
     explicit LiveTi(Backend* b) : svc_(b) {}
     ~LiveTi() override { if (tok_) CloseHandle(tok_); }
 
-    bool Acquire(std::wstring* err) override {
+    bool Acquire(const std::atomic<bool>* cancel, std::wstring* err) override {
         if (tok_) { CloseHandle(tok_); tok_ = nullptr; }   // never reuse a token across applies
+        svc_.cancel = cancel;
         // Start TrustedInstaller only if it is stopped (through the Backend); the claim is reset here.
         SvcItem ti;
         if (!svc_.Ensure(&ti, err)) return false;
