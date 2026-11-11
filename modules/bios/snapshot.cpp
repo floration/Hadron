@@ -296,8 +296,7 @@ bool LoadSnapshot(const std::wstring& path, SnapLoad* out) {
 }
 
 // ---- save ---------------------------------------------------------------------------------------
-namespace {
-bool WriteNew(const std::wstring& path, const std::string& data, std::wstring* err) {
+bool WriteNewFile(const std::wstring& path, const std::string& data, std::wstring* err) {
     HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) { if (err) *err = sys::ToShell(path) + L": " + sys::ErrorText(GetLastError()); return false; }
@@ -312,10 +311,13 @@ bool WriteNew(const std::wstring& path, const std::string& data, std::wstring* e
         }
         done += put;
     }
+    // Flushed before close: a write backup must be on disk before the firmware write that relies on it.
+    if (ok && !FlushFileBuffers(h)) { if (err) *err = sys::ToShell(path) + L": " + sys::ErrorText(GetLastError()); ok = false; }
     if (!CloseHandle(h) && ok) { if (err) *err = sys::ToShell(path) + L": " + sys::ErrorText(GetLastError()); ok = false; }
     return ok;
 }
 
+namespace {
 std::wstring CpuName() {
     wchar_t buf[256] = {};
     DWORD sz = sizeof(buf);
@@ -346,6 +348,15 @@ bool SaveSnapshot(const std::wstring& parent, const std::vector<FwVar>& vars, co
     }
     if (folder.empty()) { out->error = L"Too many snapshots with the same timestamp in " + sys::ToShell(parent); return false; }
     out->folder = sys::ToShell(sys::ToExtended(folder));
+    return WriteSnapshotFiles(folder, vars, smb, L"Hadron BIOS module (read-only)", out);
+}
+
+bool WriteSnapshotFiles(const std::wstring& folder, const std::vector<FwVar>& vars, const SmbiosInfo& smb,
+                        const std::wstring& savedBy, SaveResult* out) {
+    out->ok = false;
+    out->found = out->read = 0;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
     if (!CreateDirectoryW(sys::ToExtended(folder + L"\\vars").c_str(), nullptr)) {
         out->error = L"Can't create the vars folder: " + sys::ErrorText(GetLastError());
         return false;
@@ -359,7 +370,7 @@ bool SaveSnapshot(const std::wstring& parent, const std::vector<FwVar>& vars, co
         if (v.err == 0 && !v.data.empty()) {
             file = SnapFileName(idx, v.name, v.guid);
             std::wstring err;
-            if (!WriteNew(folder + L"\\vars\\" + file, std::string(v.data.begin(), v.data.end()), &err)) {
+            if (!WriteNewFile(folder + L"\\vars\\" + file, std::string(v.data.begin(), v.data.end()), &err)) {
                 out->error = L"Writing a variable failed: " + err;
                 return false;
             }
@@ -372,7 +383,7 @@ bool SaveSnapshot(const std::wstring& parent, const std::vector<FwVar>& vars, co
                CsvQuote(std::to_wstring(v.err)) + L"," + CsvQuote(file) + L"\r\n";
     }
     std::wstring err;
-    if (!WriteNew(folder + L"\\index.csv", "\xEF\xBB\xBF" + ToUtf8(csv), &err)) { out->error = err; return false; }
+    if (!WriteNewFile(folder + L"\\index.csv", "\xEF\xBB\xBF" + ToUtf8(csv), &err)) { out->error = err; return false; }
     wchar_t when[32];
     swprintf(when, 32, L"%04u-%02u-%02u %02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
     std::wstring txt = std::wstring(L"Dumped: ") + when + L"\r\n" +
@@ -380,8 +391,8 @@ bool SaveSnapshot(const std::wstring& parent, const std::vector<FwVar>& vars, co
                        L"BIOS: " + smb.biosVendor + L" " + smb.biosVersion + L" " + smb.biosDate + L"\r\n" +
                        L"CPU: " + CpuName() + L"\r\n" +
                        L"Variables: " + std::to_wstring(out->found) + L" found, " + std::to_wstring(out->read) +
-                       L" read\r\n" + L"Saved by: Hadron BIOS module (read-only)\r\n";
-    if (!WriteNew(folder + L"\\system.txt", "\xEF\xBB\xBF" + ToUtf8(txt), &err)) { out->error = err; return false; }
+                       L" read\r\n" + L"Saved by: " + savedBy + L"\r\n";
+    if (!WriteNewFile(folder + L"\\system.txt", "\xEF\xBB\xBF" + ToUtf8(txt), &err)) { out->error = err; return false; }
     out->ok = true;
     return true;
 }

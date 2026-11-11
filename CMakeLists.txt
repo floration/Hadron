@@ -52,11 +52,12 @@ target_sources(mod_runas PRIVATE modules/runas/launch.cpp)
 # enumeration, Userenv for the environment block, shlwapi for AssocQueryString, plus the shell.
 target_link_libraries(mod_runas PUBLIC credui netapi32 wtsapi32 userenv shlwapi advapi32)
 
-hadron_add_module(bios NAME HadronBios DESC "Hadron BIOS Settings Explorer: read-only view of UEFI setup settings")
+hadron_add_module(bios NAME HadronBios DESC "Hadron BIOS Settings Explorer: UEFI setup settings, with guarded writes")
 # Firmware access, snapshots, the settings.db model and the zip reader are separate files so they stay
-# testable headless (docs/design/bios.md). Read-only firmware (hard rule 2).
+# testable headless (docs/design/bios.md). fwwrite.cpp is the one guarded firmware write path (hard rule 2,
+# docs/design/bios-write.md); CI fails if the write API appears in any other file.
 target_sources(mod_bios PRIVATE modules/bios/db.cpp modules/bios/firmware.cpp modules/bios/snapshot.cpp
-                                modules/bios/zip.cpp)
+                                modules/bios/zip.cpp modules/bios/fwwrite.cpp)
 # The embedded settings.db (RCDATA BIOS_SETTINGS). An INTERFACE source, so every exe that links mod_bios
 # (HadronBios.exe and Hadron.exe) gets the resource; an .rc object inside a static library would never be
 # pulled in by the linker.
@@ -64,8 +65,9 @@ target_sources(mod_bios INTERFACE "${HADRON_ROOT}/modules/bios/resources/bios.rc
 set_property(SOURCE "${HADRON_ROOT}/modules/bios/resources/bios.rc" APPEND PROPERTY OBJECT_DEPENDS
              "${HADRON_ROOT}/modules/bios/data/settings.db")
 # Windows SDK libraries only (hard rule 3): advapi32 for tokens and the registry, ole32/uuid for the
-# folder picker, comdlg32 for the open/save dialogs, shell32 for ShellExecute.
-target_link_libraries(mod_bios PUBLIC advapi32 ole32 uuid comdlg32 shell32)
+# folder picker, comdlg32 for the open/save dialogs, shell32 for ShellExecute and the known-folder path,
+# msimg32 for AlphaBlend (the dimmed backdrop behind the write plan).
+target_link_libraries(mod_bios PUBLIC advapi32 ole32 uuid comdlg32 shell32 msimg32)
 
 # --- suite --------------------------------------------------------------------------------------
 # registry.cpp is compiled into the suite exe (not core) so the module factories resolve without a
