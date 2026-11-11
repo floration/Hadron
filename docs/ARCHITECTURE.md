@@ -17,7 +17,7 @@ hadron/
     resources/<id>.rc      resource fragment; every resource name is prefixed with the module id (BIOS_SETTINGS)
     tests/                 console test exe (hadron_<id>_tests.exe), fixtures, golden comparisons
   app/hadron.cpp           suite WinMain
-  tools/                   offline generators (BIOS pipeline, Python)
+  tools/                   offline generators and KB gates (Python): BIOS pipeline, services KB
   tests/fixtures, tests/golden
   legacy/                  original single-file tools, kept as the reference while porting
 ```
@@ -133,6 +133,12 @@ off-by-default toggle. The old `Admin::Optional` / `RequestElevation()` / single
 ## Settings, logs, crashes
 - Settings: `%LOCALAPPDATA%\Hadron\settings.ini`, or portable mode when `Hadron.ini` sits next to the exe.
 - Logs: `%LOCALAPPDATA%\Hadron\logs\` (session log).
+- Services module data: `%ProgramData%\Hadron\services\` (machine-wide, because start types are). It holds
+  `first.txt`, `snap-<stamp>.txt`, `undo-<stamp>.log`, `recovery\<stamp>\`, `recovery\first\` and
+  `recovery-<stamp>.zip`. Unlike the per-user folders it has its own rules: owner Administrators, a protected
+  DACL (Administrators + SYSTEM), no reparse point on the path, the holding folder owned by Administrators, SYSTEM
+  or TrustedInstaller, every file `CREATE_NEW` and flushed. If a check fails the module reads and writes nothing
+  there and turns changes off. `--data-dir` moves it. See `docs/design/services.md` "Data dir".
 - Crash dumps: `SetUnhandledExceptionFilter` + `MiniDumpWriteDump`.
 - Exports go through a Save dialog. Never write "next to the exe", which fails when run from inside a zip.
 
