@@ -121,6 +121,9 @@ public:
     ui::Layout Layout() override { return layout_; }
 
 private:
+    // Smallest content area any module is laid out for, in 96-DPI units (scaled by the window's DPI). The
+    // frame's minimum track size is this plus the sidebar and the status bar; modules degrade down to it.
+    static constexpr int kMinContentW = 800, kMinContentH = 560;
     int sidebarW() const { return suite_ ? S(188, dpi_) : 0; }
     int statusH() const { return S(28, dpi_); }
     RECT SidebarRect(const RECT& cl) const { return {0, 0, sidebarW(), cl.bottom - statusH()}; }
@@ -153,7 +156,7 @@ private:
     int active_ = -1;
     HWND frame_ = nullptr;
     UINT dpi_ = 96;
-    bool elevated_ = false, busy_ = false;
+    bool elevated_ = false, busy_ = false, shooting_ = false;
     std::wstring caption_ = L"Hadron", status_;
     sys::SettingsStore store_;
     std::vector<sys::Settings> prefs_;
@@ -266,6 +269,15 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         InvalidateChrome();
         return 0;
     }
+    case WM_GETMINMAXINFO: {
+        if (shooting_) break;   // --screenshot sets its own exact client size
+        RECT r{0, 0, sidebarW() + S(kMinContentW, dpi_), S(kMinContentH, dpi_) + statusH()};
+        AdjustWindowRectEx(&r, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrW(h, GWL_EXSTYLE));
+        auto* mm = reinterpret_cast<MINMAXINFO*>(l);
+        mm->ptMinTrackSize.x = r.right - r.left;
+        mm->ptMinTrackSize.y = r.bottom - r.top;
+        return 0;
+    }
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
@@ -316,6 +328,7 @@ int Host::Screenshot(const CommandLine& cl) {
     // composed into a top-down DIB and written as PNG. No PrintWindow, so Wine and Windows match.
     const int W = 1280, H = 800;
     dpi_ = 96;
+    shooting_ = true;
     themeId_ = cl.theme;
     layout_  = cl.layout;
     hasAccentOverride_ = cl.hasAccent;
