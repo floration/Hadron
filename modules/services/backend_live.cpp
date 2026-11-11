@@ -13,6 +13,7 @@
 #include "modules/services/svc_compat.h"
 #include "core/sys/sys.h"
 #include <algorithm>
+#include <set>
 
 namespace hx::services {
 
@@ -217,25 +218,44 @@ public:
         const DWORD types[] = {HXSVC_TYPE_ALL, SERVICE_TYPE_ALL, SERVICE_WIN32 | SERVICE_DRIVER};
         std::vector<std::pair<std::wstring, SERVICE_STATUS_PROCESS>> list;
         DWORD lastErr = 0;
+        lastEnum = EnumStats{};
+        bool accepted = false;
         for (DWORD type : types) {
             list.clear();
+            lastEnum.raw = lastEnum.rawDrivers = lastEnum.pages = lastEnum.duplicates = 0;
             DWORD resume = 0, need = 0, count = 0;
             std::vector<BYTE> buf(64 * 1024);
             bool ok = true;
+            std::set<std::wstring> seen;
             for (int guard = 0; guard < 1000; guard++) {
+                count = 0;
                 BOOL r = EnumServicesStatusExW(scm.h, SC_ENUM_PROCESS_INFO, type, SERVICE_STATE_ALL, buf.data(),
                                                (DWORD)buf.size(), &need, &count, &resume, nullptr);
                 DWORD e = r ? 0 : GetLastError();
                 auto* arr = reinterpret_cast<ENUM_SERVICE_STATUS_PROCESSW*>(buf.data());
-                for (DWORD k = 0; k < count; k++) list.push_back({arr[k].lpServiceName, arr[k].ServiceStatusProcess});
+                if (count) lastEnum.pages++;
+                for (DWORD k = 0; k < count; k++) {
+                    if (!arr[k].lpServiceName) continue;
+                    lastEnum.raw++;
+                    if (IsDriverType(arr[k].ServiceStatusProcess.dwServiceType)) lastEnum.rawDrivers++;
+                    // A page boundary must never list a name twice (the resume handle is the SCM's; Hadron keeps the first).
+                    if (!seen.insert(Lower(arr[k].lpServiceName)).second) { lastEnum.duplicates++; continue; }
+                    list.push_back({arr[k].lpServiceName, arr[k].ServiceStatusProcess});
+                }
                 if (r) break;
                 if (e != ERROR_MORE_DATA) { ok = false; lastErr = e; break; }
-                if (need > buf.size()) buf.assign(std::min<size_t>(need + 1024, 256 * 1024), 0);
+                // No entry fitted and the SCM asks for no more than this buffer: grow anyway, so the loop always moves.
+                if (count == 0 && need <= buf.size() && buf.size() >= 256 * 1024) { ok = false; lastErr = ERROR_MORE_DATA; break; }
+                if (need > buf.size() || count == 0) buf.assign(std::min<size_t>(std::max<size_t>(need + 1024, buf.size() * 2), 256 * 1024), 0);
             }
-            if (ok) break;
+            wchar_t m[16];
+            swprintf(m, 16, L"0x%X", (unsigned)type);
+            lastEnum.masksTried += (lastEnum.masksTried.empty() ? L"" : L"; ") + std::wstring(m) +
+                                   (ok ? L" ok" : L" failed (" + sys::ErrorText(lastErr) + L")");
+            if (ok) { lastEnum.mask = type; accepted = true; break; }
             if (lastErr != ERROR_INVALID_PARAMETER) { *err = L"EnumServicesStatusEx: " + sys::ErrorText(lastErr); return false; }
         }
-        if (list.empty() && lastErr) { *err = L"EnumServicesStatusEx: " + sys::ErrorText(lastErr); return false; }
+        if (!accepted) { *err = L"EnumServicesStatusEx: " + sys::ErrorText(lastErr); return false; }
         for (auto& e : list) {
             SvcItem i;
             std::wstring rerr;
@@ -247,6 +267,7 @@ public:
                 i.kind = KindOf(i.type);
                 i.readError = std::wstring(kCfgUnreadable) + L": " + rerr;
                 i.cfgUnknown = true;   // cfg is the default, not this service's: never planned or recorded
+                lastEnum.unreadable++;
             }
             out->push_back(std::move(i));
         }
@@ -328,7 +349,8 @@ public:
     bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err, bool* ownStart,
                  DWORD waitMs) override {
         if (ownStart) *ownStart = false;
-        if (!armed_) { *err = kNotArmed; return false; }
+        // The TrustedInstaller read pass may start and stop TrustedInstaller itself, nothing else (AllowTiControl).
+        if (!armed_ && !(tiCtl_.load() && name == L"TrustedInstaller")) { *err = kNotArmed; return false; }
         Sc scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
         if (!scm) { *err = L"OpenSCManager: " + sys::ErrorText(GetLastError()); return false; }
         Sc s(OpenServiceW(scm.h, name.c_str(), SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG));
@@ -499,7 +521,77 @@ private:
         };
         return dword(L"Start", &out->start) && dword(L"DelayedAutostart", &out->delayed);
     }
+
+public:
+    void AllowTiControl(bool on) override { tiCtl_.store(on); }
+
+    // Every subkey of Services in the current control set (Select\Current), each opened with REG_OPTION_OPEN_LINK and
+    // KEY_QUERY_VALUE only. A key that is a link (SymbolicLinkValue of type REG_LINK) is a leaf: its values are never
+    // read. Values are read from the opened handle, never by a path that could follow a link.
+    bool ListServiceKeys(std::vector<RegSvcKey>* out, std::wstring* err) override {
+        out->clear();
+        std::wstring root = KeyPath(L"");
+        if (root.empty()) { *err = L"HKLM\\SYSTEM\\Select\\Current could not be read"; return false; }
+        root.pop_back();   // the trailing backslash
+        HKEY svc = nullptr;
+        LSTATUS e = RegOpenKeyExW(HKEY_LOCAL_MACHINE, root.c_str(), 0, KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE, &svc);
+        if (e == ERROR_FILE_NOT_FOUND)   // Wine keeps only CurrentControlSet; Windows always has ControlSetNNN
+            e = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services", 0, KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE, &svc);
+        if (e != ERROR_SUCCESS) { *err = L"RegOpenKeyEx(" + root + L"): " + sys::ErrorText((DWORD)e); return false; }
+        bool ok = true;
+        for (DWORD idx = 0;; idx++) {
+            wchar_t name[256];
+            DWORD cch = 256;
+            e = RegEnumKeyExW(svc, idx, name, &cch, nullptr, nullptr, nullptr, nullptr);
+            if (e == ERROR_NO_MORE_ITEMS) break;
+            if (e != ERROR_SUCCESS) { *err = L"RegEnumKeyEx: " + sys::ErrorText((DWORD)e); ok = !out->empty(); break; }
+            RegSvcKey k;
+            k.name.assign(name, cch);
+            HKEY h = nullptr;
+            LSTATUS oe = RegOpenKeyExW(svc, k.name.c_str(), REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE, &h);
+            if (oe != ERROR_SUCCESS) {
+                k.err = sys::ErrorText((DWORD)oe);
+                out->push_back(std::move(k));
+                continue;
+            }
+            DWORD lt = 0, lcb = 0;
+            if (RegQueryValueExW(h, L"SymbolicLinkValue", nullptr, &lt, nullptr, &lcb) == ERROR_SUCCESS && lt == REG_LINK) {
+                k.link = true;   // a leaf: nothing else is read
+            } else {
+                auto dword = [&](const wchar_t* v, long long* outv) {
+                    DWORD t = 0, d = 0, cb = sizeof(d);
+                    if (RegQueryValueExW(h, v, nullptr, &t, reinterpret_cast<BYTE*>(&d), &cb) == ERROR_SUCCESS && t == REG_DWORD &&
+                        cb == sizeof(d))
+                        *outv = d;
+                };
+                auto str = [&](const wchar_t* v) {
+                    DWORD t = 0, cb = 0;
+                    if (RegQueryValueExW(h, v, nullptr, &t, nullptr, &cb) != ERROR_SUCCESS || (t != REG_SZ && t != REG_EXPAND_SZ) ||
+                        cb == 0 || cb > 64 * 1024)
+                        return std::wstring();
+                    std::vector<wchar_t> b(cb / sizeof(wchar_t) + 2, 0);
+                    DWORD cb2 = cb;
+                    if (RegQueryValueExW(h, v, nullptr, &t, reinterpret_cast<BYTE*>(b.data()), &cb2) != ERROR_SUCCESS) return std::wstring();
+                    return std::wstring(b.data());
+                };
+                long long st = -1;
+                dword(L"Type", &k.type);
+                dword(L"Start", &st);
+                k.start = st < 0 || st > 0x7fffffff ? -1 : (int)st;
+                k.image = str(L"ImagePath");
+                k.display = str(L"DisplayName");
+                k.group = str(L"Group");
+            }
+            RegCloseKey(h);
+            out->push_back(std::move(k));
+        }
+        RegCloseKey(svc);
+        return ok;
+    }
+
+private:
     bool armed_ = false;
+    std::atomic<bool> tiCtl_{false};
 };
 
 }  // namespace

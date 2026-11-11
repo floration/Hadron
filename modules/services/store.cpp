@@ -38,7 +38,9 @@ std::string WriteSnapshot(const Snapshot& s, bool extras) {
             std::to_wstring(i.protect), HexW(i.controls), std::to_wstring(i.pid), Esc(i.failure), Esc(i.triggers),
             Esc(Join(i.ifaces, L";")), Esc(i.company), Esc(i.readError)};
         o += Join(f, L"\t") + L"\n";
-        if (extras && i.aclTi) o += L"X\t" + Esc(i.name) + L"\tacl=ti\n";
+        if (extras && (i.aclTi || i.fxEnumMiss || i.fxTiOnly || i.fxCfgTi))
+            o += L"X\t" + Esc(i.name) + (i.aclTi ? L"\tacl=ti" : L"") + (i.fxEnumMiss ? L"\tenum=miss" : L"") +
+                 (i.fxTiOnly ? L"\tscm=ti" : L"") + (i.fxCfgTi ? L"\tcfg=ti" : L"") + L"\n";
     }
     return ToUtf8(o);
 }
@@ -89,7 +91,13 @@ bool ParseSnapshot(const std::string& utf8, Snapshot* out, std::wstring* err) {
         } else if (f[0] == L"X" && f.size() >= 3) {
             auto it = seen.find(Lower(Unesc(f[1])));
             if (it == seen.end()) continue;
-            for (size_t k = 2; k < f.size(); k++) if (f[k] == L"acl=ti") out->items[it->second].aclTi = true;
+            for (size_t k = 2; k < f.size(); k++) {
+                SvcItem& x = out->items[it->second];
+                if (f[k] == L"acl=ti") x.aclTi = true;
+                else if (f[k] == L"enum=miss") x.fxEnumMiss = true;
+                else if (f[k] == L"scm=ti") x.fxTiOnly = true;
+                else if (f[k] == L"cfg=ti") x.fxCfgTi = true;
+            }
         } else {
             out->skippedLines++;   // unknown line kinds: forward compatibility
         }

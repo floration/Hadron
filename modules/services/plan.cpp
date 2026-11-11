@@ -170,6 +170,7 @@ Guard CheckGuard(const SvcItem& s, const Ctx& c) {
     bool drv = IsDriverType(s.type);
     auto never = [&](const std::wstring& r) { g.neverTouch = true; g.reason = r; return g; };
     // R2: an item whose configuration could not be read has a placeholder start type: never planned from it.
+    if (s.RegOnly()) return never(L"registry only: the SCM has not loaded it, so Hadron has no service to change and never writes its key");
     if (s.cfgUnknown) return never(L"its configuration could not be read, and Hadron never changes what it can't read");
     if (drv && s.cfg.start == 0) return never(L"Boot-start driver: loaded by the boot loader before Windows can read the disk");
     if (!drv && s.cfg.start < 2 && s.kind != Kind::UserInstance)
@@ -237,6 +238,7 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
     int stricter = 0, unreadable = 0;
     for (auto& s : items) {
         if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
+        if (s.RegOnly()) continue;   // registry-only keys are never planned (fix/svcdrv-visibility)
         if (s.cfgUnknown) { unreadable++; continue; }   // R2: its start type is not known
         const KbEntry* e = c.kb ? c.kb->Find(s.name) : nullptr;
         if (!e) { p.unknown++; continue; }
@@ -462,6 +464,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
             const SvcItem* f = c.first->Find(s.name);
             // R2: an item unreadable now, or recorded as unreadable (an older first.txt), has no real value to compare.
+            if (s.RegOnly()) continue;
             if (s.cfgUnknown || (f && f->cfgUnknown)) { unreadable++; continue; }
             if (!f) { added++; continue; }
             if (SameStart(s.cfg, f->cfg)) { p.alreadySet++; continue; }
@@ -523,7 +526,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             p.notes.push_back(L"This PC's component manifests could not be read, so only Hadron's KB is used: " + c.sxs->err);
         int withStock = 0, total = 0, shown = 0;
         for (auto& s : items) {
-            if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
+            if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance || s.RegOnly()) continue;
             total++;
             if (s.cfgUnknown) continue;   // R2: CheckGuard would refuse it anyway
             StockPick k = StockFor(s, c);
@@ -609,6 +612,7 @@ Plan BuildCustom(const CustomPreset& cp, const std::vector<SvcItem>& items, cons
         for (auto& i : items) if (IEq(i.name, ci.name) && i.kind != Kind::UserInstance) { s = &i; break; }
         if (!s) { missing.push_back(ci.name); continue; }
         if (!OnTab(*s, (Tab)cp.tab)) { otherTab.push_back(s->name); continue; }
+        if (s->RegOnly()) { dropped.push_back(s->name + L" (registry only: not loaded by the SCM)"); continue; }
         if (s->cfgUnknown) { unreadable++; continue; }   // R2
         // The guards every built-in preset gets: never-touch and never-in-a-preset items, and drivers without sysok.
         Guard g = CheckGuard(*s, c);
@@ -2001,6 +2005,7 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
     // would make Default (first snapshot) and recovery\first write a value this PC never had.
     int unreadable = 0;
     for (auto& i : items) {
+        if (i.RegOnly()) continue;   // not a service the SCM has: nothing to record or restore
         if (i.cfgUnknown) { unreadable++; continue; }
         snap.items.push_back(i);
         snap.items.back().company.clear();   // the file's claim, not configuration

@@ -482,6 +482,22 @@ def multi_logs():
     return {a: la, u: lu}
 
 
+REGKEYS_HDR = 'HXSVC\t1\tregkeys'
+
+
+def regkeys():
+    """Services keys the fake SCM does not have (fix/svcdrv-visibility): they list as "Registry only (not loaded by the
+    SCM)", read-only. Fs_Rec stands for the one Start=1 key the owner's SCM did not list; Winsock2 has no Type value (a
+    parameters-only key, on the Services tab); ExampleLinkKey is a registry link (a leaf, no values read). Made up for
+    the renders and tests, not read from a real PC."""
+    rows = [
+        ['Fs_Rec', '8', '1', 'System32\\drivers\\Fs_Rec.sys', 'File System Recognizer Driver', 'Boot file system', '0'],
+        ['Winsock2', '-', '-', '', '', '', '0'],
+        ['ExampleLinkKey', '-', '-', '', '', '', '1'],
+    ]
+    return REGKEYS_HDR + '\n' + ''.join('K\t' + '\t'.join(esc(f) for f in r) + '\n' for r in rows)
+
+
 def write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
@@ -503,6 +519,7 @@ def main(argv):
     write(os.path.join(out, 'snapshot.txt'), snapshot(META, {'DiagTrack': '4/-', 'WSearch': '3/-', 'XblGameSave': '4/-'}))
     write(os.path.join(out, 'signers.txt'), signers())
     write(os.path.join(out, 'events7040.txt'), events())
+    write(os.path.join(out, 'regkeys.txt'), regkeys())
     stamp, log = interrupted_log()
     idir = os.path.join(out, 'interrupted')
     over = {'DiagTrack': '4/-', 'WSearch': '3/-', 'XblGameSave': '4/-', 'MapsBroker': '4/1', 'lfsvc': '4/-'}

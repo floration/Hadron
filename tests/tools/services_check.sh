@@ -22,7 +22,7 @@ echo "ok: services.db is what genkb.py generates"
 
 echo "== fixture"
 python3 -I "$HERE/tests/fixtures/services/make_services_fixture.py" "$TMP/fix" > /dev/null
-for f in snapshot.txt hw.txt first.txt signers.txt events7040.txt interrupted/snapshot.txt interrupted/hw.txt interrupted/first.txt \
+for f in snapshot.txt hw.txt first.txt signers.txt events7040.txt regkeys.txt interrupted/snapshot.txt interrupted/hw.txt interrupted/first.txt \
          interrupted/undo-20261110-213012.log delayedlinger/snapshot.txt delayedlinger/hw.txt delayedlinger/first.txt \
          forged/snapshot.txt forged/hw.txt forged/first.txt forged/undo-20261110-210000.log \
          multi/snapshot.txt multi/hw.txt multi/first.txt multi/undo-20261110-210000.log multi/undo-20261110-220000.log; do

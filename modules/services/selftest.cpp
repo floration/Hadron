@@ -4,11 +4,13 @@
 // or %ProgramData%. Its one live call is a read-only Enumerate, plus a check that the unarmed live backend
 // refuses a write before reaching the SCM (on a service name that does not exist).
 #include "modules/services/cli.h"
+#include "modules/services/collect.h"
 #include "core/sys/sys.h"
 #include "modules/services/measure.h"
 #include "modules/services/plan.h"
 #include "modules/services/recovery.h"
 #include "modules/services/selftest_evidence.h"
+#include "modules/services/selftest_visibility.h"
 #include "modules/services/ti.h"
 
 #include <fcntl.h>
@@ -18,6 +20,7 @@
 #include <sddl.h>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <map>
@@ -2768,6 +2771,9 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
 
     // ---- follow-ups 6-9: signer, event 7040, interface evidence, registry fallback (selftest_evidence.cpp) ----
     RunEvidenceSelftest(fixture, kb, [](const std::wstring& tag) { return NewTempDir(tag); }, check, info);
+    // ---- fix/svcdrv-visibility and the protected-items override (selftest_visibility.cpp) ------------------------------
+    RunVisibilitySelftest(fixture, kb, [](const std::wstring& tag) { return NewTempDir(tag); }, check, info);
+    RunOverrideSelftest(fixture, kb, [](const std::wstring& tag) { return NewTempDir(tag); }, check, info);
 
     // ---- custom presets: format, strict import, guards, store; measured before/after (fix/svcdrv-presets) ----------
     {
@@ -3138,6 +3144,37 @@ int RunDumpStockLive(const std::vector<std::wstring>& args) {
     if (!s.ok) { fwprintf(stderr, L"dump-stock-live: %ls\n", s.err.c_str()); return 1; }
     fwprintf(stderr, L"dump-stock-live: %d manifests, %d failures, %d skipped, %d values\n", s.manifests, s.failed, s.skipped,
              s.Usable());
+    return 0;
+}
+
+// --dump-list-live [--ti on] --out <file>: every row the page would list, from the live backend, as TSV (collect.h).
+// Read only: the backend is never armed, no data folder is opened, and TrustedInstaller is used only when it is already
+// running (this never starts or stops a service). The one file written is --out, created new (an existing path or a
+// reparse point is refused).
+int RunDumpListLive(const std::vector<std::wstring>& args) {
+    const std::wstring out = ArgValue(args, L"--out");
+    const std::wstring tiArg = ArgValue(args, L"--ti");
+    if (out.empty() || (!tiArg.empty() && tiArg != L"on" && tiArg != L"off")) {
+        fwprintf(stderr, L"usage: --dump-list-live [--ti on] --out <file>\n");
+        return 2;
+    }
+    const bool useTi = tiArg == L"on";
+    if (!sys::IsElevated()) fwprintf(stderr, L"dump-list-live: not elevated: the list is what this token can see\n");
+    std::unique_ptr<Backend> b = MakeLiveBackend();
+    std::unique_ptr<TiProvider> ti = useTi ? MakeLiveTi(b.get()) : nullptr;
+    std::vector<SvcItem> items;
+    CollectStats st;
+    std::wstring err;
+    if (!CollectItems(*b, ti.get(), false, nullptr, &items, &st, &err)) { fwprintf(stderr, L"dump-list-live: %ls\n", err.c_str()); return 1; }
+    size_t before = items.size();
+    FoldInstances(&items);
+    st.folded = (int)(before - items.size());
+    std::sort(items.begin(), items.end(), [](const SvcItem& a, const SvcItem& c) { return Lower(a.name) < Lower(c.name); });
+    std::string text = DumpListTsv(items, st, b->Build());
+    std::wstring werr;
+    if (!WriteNewOut(out, text, &werr)) { fwprintf(stderr, L"dump-list-live: %ls\n", werr.c_str()); return 1; }
+    fwprintf(stderr, L"dump-list-live: %d rows (SCM raw %d, read by name %d, registry only %d)%ls\n", (int)items.size(), st.scm.raw,
+             st.direct, st.regOnly, useTi ? (L"; " + TiCollectText(st)).c_str() : L"");
     return 0;
 }
 

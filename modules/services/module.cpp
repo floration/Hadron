@@ -19,6 +19,7 @@
 #include "core/ui/widgets.h"
 #include "modules/services/backend.h"
 #include "modules/services/cli.h"
+#include "modules/services/collect.h"
 #include "modules/services/evidence_view.h"
 #include "modules/services/custom.h"
 #include "modules/services/hw.h"
@@ -205,6 +206,7 @@ struct LoadOut {
     std::vector<std::wstring> logProblems;
     std::vector<CustomPreset> presets;
     std::vector<Measurement> measures;
+    CollectStats stats;                   // the registry cross-check and the TrustedInstaller pass (collect.h)
 };
 
 // The second load pass (2-research: Company in a second Worker pass): each image's VERSIONINFO CompanyName, read after
@@ -542,6 +544,8 @@ private:
     Mode mode_ = Mode::List;
     int tab_ = TAB_SERVICES;
     bool tiOn_ = false;   // never persisted (spec §5.6)
+    bool tiReloadPending_ = false;   // the TI toggle flipped during a load: read again when it ends
+    std::wstring loadNote_;   // the last load's registry cross-check and TrustedInstaller sentence (collect.h), "" or ending in a space
     bool regOn_ = false;  // the registry fallback: never persisted, off at every launch, after every apply and plan close
     std::set<std::wstring> regApplied_;   // items whose last verified write went through the registry (LastAppliedViaReg)
     EvidencePasses ev_;   // signer and event 7040 (evidence_view.h)
@@ -878,11 +882,19 @@ void ServicesModule::StartLoad() {
     sys::Worker* w = &loadW_;
     std::wstring dismiss = std::move(dismissStamp_);
     dismissStamp_.clear();
-    bool started = loadW_.Start(hwnd_, WM_SVC_LOADED, [b, st, mayWrite, out, kb, w, dismiss]() mutable {
+    // The TrustedInstaller read pass (fix/svcdrv-visibility): only while the user's toggle is on, live only.
+    const bool tiRead = tiOn_ && b->IsLive();
+    bool started = loadW_.Start(hwnd_, WM_SVC_LOADED, [b, st, mayWrite, out, kb, w, dismiss, tiRead]() mutable {
         *out = LoadOut{};
         std::wstring err;
         auto cancelled = [&]() { if (w->Cancelled()) { out->err = L"Loading was cancelled."; return true; } return false; };
-        if (!b->Enumerate(&out->items, &err)) { out->err = L"Could not read the services: " + err; return; }
+        {
+            std::unique_ptr<TiProvider> ti = tiRead ? MakeLiveTi(b) : nullptr;
+            if (!CollectItems(*b, ti.get(), true, w->CancelFlag(), &out->items, &out->stats, &err)) {
+                out->err = L"Could not read the services: " + err;
+                return;
+            }
+        }
         // Company is read in a second pass once the list is shown (StartCompany), not here.
         b->ReadHw(&out->hw);
         // Follow-up 8: the device classes the items' interface-arrival triggers name, present or seen before. Evidence
@@ -890,11 +902,13 @@ void ServicesModule::StartLoad() {
         if (b->IsLive() && out->hw.ok) AddLiveIfaceEvidence(out->items, &out->hw);
         out->build = b->Build();
         out->machine = b->MachineGuid();
+        size_t before = out->items.size();
         FoldInstances(&out->items);
+        out->stats.folded = (int)(before - out->items.size());
         // Write access per item here, on the worker: the detail pane never calls the SCM from paint.
         for (auto& i : out->items) {
             if (cancelled()) return;
-            if (i.kind == Kind::UserInstance) continue;
+            if (i.kind == Kind::UserInstance || i.RegOnly()) continue;
             bool denied = false;
             std::wstring e;
             out->access[Lower(i.name)] = b->CanWrite(i.name, &denied, &e) ? 0 : (denied ? 1 : -1);
@@ -987,6 +1001,7 @@ void ServicesModule::OnLoaded() {
     RefreshPresetList();
     RefreshMeasureList();
     auto keep = std::move(writeAccess_);
+    loadNote_ = VisibilityText(o.stats);
     TakeData(std::move(o.items), o.hw, o.build, o.machine);
     writeAccess_ = std::move(keep);
     StartCompany();
@@ -994,6 +1009,7 @@ void ServicesModule::OnLoaded() {
     if (!sxs_ && !sxsPending_) StartSxs();
     if (planReq_.type != PlanReq::None && !applyW_.Running()) OpenPlan(planReq_, true);
     if (!dismissStamp_.empty() && !applyW_.Running()) StartLoad();   // a Dismiss pressed during this load (A2)
+    else if (tiReloadPending_ && !applyW_.Running()) { tiReloadPending_ = false; StartLoad(); }
 }
 
 // The second load pass: each live item's file company, read on companyW_ after the list is shown, so a slow disk or
@@ -1141,7 +1157,7 @@ void ServicesModule::TakeData(std::vector<SvcItem> items, const HwInfo& hw, std:
     PrepareCtx();
     Refilter();
     // CLAUDE.md: v1 has no screen-reader support, and the UI says so.
-    Status(L"Services: loaded " + std::to_wstring(items_.size()) + L" services and drivers. " +
+    Status(L"Services: loaded " + std::to_wstring(items_.size()) + L" services and drivers. " + loadNote_ +
            (Console() ? L"Keyboard: F1 lists the keys." : L"Keyboard: Tab and Shift+Tab move, Enter or Space activates.") +
            L" No screen-reader support in v1.");
     Invalidate();
@@ -1188,12 +1204,15 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
     writesOff_ = true;
     for (auto& p : fx.problems) notices_.push_back(p);
     std::vector<SvcItem> items;
-    fake_->Enumerate(&items, &err);
+    CollectStats cst;
+    CollectItems(*fake_, nullptr, false, nullptr, &items, &cst, &err);   // the fixture's registry-only keys too (regkeys.txt)
     FoldInstances(&items);
     HwInfo hw;
     fake_->ReadHw(&hw);
+    loadNote_ = VisibilityText(cst);
     TakeData(std::move(items), hw, fake_->Build(), fake_->MachineGuid());
     for (auto& s : items_) {
+        if (s.RegOnly()) continue;
         bool denied = false;
         std::wstring e;
         writeAccess_[Lower(s.name)] = fake_->CanWrite(s.name, &denied, &e) ? 0 : (denied ? 1 : -1);
@@ -1246,6 +1265,7 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
 // column from "goes first" to "never touched": bloat < stripped < minimum < kept < no preset < protected <
 // not in the KB. Current start types don't matter here (a preset that finds it already set skips it).
 ServicesModule::Verdict ServicesModule::KbVerdict(const SvcItem& s) const {
+    if (s.RegOnly()) return {L"registry only", 7};
     Guard g = CheckGuard(s, ctx_);
     if (g.neverTouch) return {L"protected", 5};
     const KbEntry* e = kbOk_ ? kb_.Find(s.name) : nullptr;
@@ -1356,7 +1376,7 @@ void ServicesModule::Refilter() {
             else if (k == L"signer") r.push_back(SignerCell(s));
             else if (k == L"account") r.push_back(s.account);
             else if (k == L"group") r.push_back(s.group);
-            else if (k == L"type") r.push_back(s.kind == Kind::FsDriver ? L"File system" : TypeName(s.type));
+            else if (k == L"type") r.push_back(s.RegOnly() ? L"Registry only" : s.kind == Kind::FsDriver ? L"File system" : TypeName(s.type));
             else if (k == L"changed") r.push_back(ChangedText(s));
             else if (k == L"basis") r.push_back(BasisShort(s));
             else if (k == L"image") {
@@ -1738,9 +1758,14 @@ void ServicesModule::OnClickId(int id) {
     if (id == ID_TI) {
         if (applyW_.Running()) { Status(L"Services: the TrustedInstaller toggle can't change during an apply."); return; }
         tiOn_ = !tiOn_;
-        Status(tiOn_ ? L"Services: TrustedInstaller toggle on for this session (never remembered)."
-                     : L"Services: TrustedInstaller toggle off.");
+        Status(tiOn_ ? L"Services: TrustedInstaller toggle on for this session (never remembered). Reading the list again as TrustedInstaller…"
+                     : L"Services: TrustedInstaller toggle off. Reading the list again as administrator…");
         if (mode_ == Mode::Plan) OpenPlan(planReq_, true);   // same plan, TI rows re-marked; the user's ticks stay
+        // fix/svcdrv-visibility: the list itself is read again under the new identity (the load rebuilds an open plan).
+        if (!fixture_ && backend_ && backend_->IsLive()) {
+            if (loadW_.Running()) tiReloadPending_ = true;
+            else StartLoad();
+        }
         return;
     }
     if (id == ID_REG) {
@@ -2387,8 +2412,28 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
         if (!v.empty()) d.push_back({P_KV, k, v, col});
     };
     d.push_back({P_TITLE, L"", s.display.empty() ? s.name : s.display, kNoColor});
-    d.push_back({P_SUB, L"", s.name + L"   \u2022   " + TypeName(s.type) + L"   \u2022   " + StateName(s.state), kNoColor});
+    d.push_back({P_SUB, L"", s.name + L"   \u2022   " + (s.RegOnly() ? std::wstring(kRegOnlyKind) : TypeName(s.type)) +
+                                 (s.RegOnly() ? L"" : L"   \u2022   " + StateName(s.state)), kNoColor});
     Guard g = CheckGuard(s, ctx_);
+    // fix/svcdrv-visibility: where the row came from, when it isn't the SCM's own list.
+    if (s.RegOnly()) {
+        d.push_back({P_TEXT, L"", std::wstring(kRegOnlyKind) + L". " + s.regWhy, p.warnT});
+        d.push_back({P_HEAD, L"", L"Its Services key", kNoColor, SIDE_LEFT});
+        if (s.regLink) kv(L"Key", L"a registry link (not followed, no values read)");
+        else {
+            kv(L"Type value", s.regNoType ? std::wstring(L"none (listed on the Services tab)") : L"0x" + Hex8(s.type) + L" (" + TypeName(s.type) + L")");
+            kv(L"Start value", s.regStart >= 0 ? StartName(s.regStart) : std::wstring(L"none"));
+            kv(L"ImagePath", s.image);
+            kv(L"Group", s.group);
+        }
+        if (!s.readError.empty()) kv(L"Read error", s.readError, p.warnT);
+        return d;
+    }
+    if (s.src == SvcItem::Source::ScmDirect)
+        d.push_back({P_TEXT, L"", L"The SCM's list did not return this, but its Services key is there and the SCM opened it by name, so "
+                                  L"Hadron read it that way.", p.mute});
+    if (s.viaTi)
+        d.push_back({P_TEXT, L"", L"Read as TrustedInstaller: an administrator could not see this or read its configuration.", p.warnT});
     // Protected means "left alone", not a failure: body text, not the error red.
     if (g.neverTouch) d.push_back({P_TEXT, L"", L"Protected: Hadron never changes this (" + g.reason + L").", p.text});
     else if (g.neverPreset)   // without a KB entry, "Not in Hadron's KB" below says why (mini-design 10): only the rest here
@@ -3301,6 +3346,7 @@ std::wstring ShortStart(const StartCfg& c) {
 // The Start type cell of the list, both layouts. A8: an item whose configuration could not be read has a placeholder
 // start type, so the cell says "unknown" instead of showing it as fact.
 std::wstring StartCellText(const SvcItem& s, bool drift, bool console, bool shortTrig) {
+    if (s.RegOnly()) return s.regStart >= 0 ? (console ? ShortStart(StartCfg{s.regStart, -1}) : StartName(s.regStart)) + L" (reg)" : L"-";
     if (s.cfgUnknown) return L"unknown";
     bool pending = s.regStart >= 0 && s.regStart != s.cfg.start;   // a change waits for a restart
     if (console) return ShortStart(s.cfg) + (s.trigger ? L"+t" : L"") + (pending ? L"!" : L"") + (drift ? L" *" : L"");
@@ -3309,6 +3355,7 @@ std::wstring StartCellText(const SvcItem& s, bool drift, bool console, bool shor
 }
 std::wstring ShortState(DWORD st) {
     switch (st) {
+        case 0: return L"registry";
         case SERVICE_STOPPED: return L"stopped";
         case SERVICE_START_PENDING: return L"starting";
         case SERVICE_STOP_PENDING: return L"stopping";
