@@ -15,6 +15,25 @@
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)
 
+### 2026-11-11 (lead, Opus) — update 3
+- **core/ui built** on the same branch (PR #1): the theme system and the shared widgets.
+  - `core/ui/theme.{h,cpp}`: four themes (Light/Dark/Fun/Boring) with neutral tokens, the two layouts
+    (Baseline/Console), and the accent derivation — main accent from the live Windows accent (registry/DWM),
+    three more at +90/+180/+270 hue (own HSL maths), per-theme fallback when the accent is achromatic. Deterministic
+    `Resolve()` for screenshots, `ResolveLive()` for the app.
+  - `core/ui/widgets.{h,cpp}` + `core/ui/draw.h`: `ScrollBar` (draggable), `ListView` (sortable headers, wheel +
+    scrollbar, keyboard nav, focus rect, high-contrast fallback), `SearchBox`, `DetailPane`. Plain objects painted
+    from `Module::Paint`; input arrives via the new `Module::OnInput`, forwarded by the content window.
+  - Host owns theme + layout, chosen by `--theme`/`--layout`; modules read `IHost::Theme()/Fonts()/Layout()`; the
+    suite chrome themes too.
+  - `HadronUikit.exe` (`modules/uikit`) is the gallery/screenshot target (not in the suite catalogue). CI renders all
+    eight theme×layout combinations on Linux (Wine) and Windows (MSVC) and uploads them; both run a `--selftest`.
+  - Verified: clean MinGW build, hello goldens byte-identical (no regression), eight gallery screenshots render.
+- **Fixed CI** earlier this session (PR #1 went green): MinGW enum-vs-`#define` clash, the windows-msvc job couldn't
+  find VS so it now builds via vswhere+vcvars+Ninja, and two MSVC-only source issues (`small` macro, missing
+  `<objbase.h>`). See [[hadron-ci-build]].
+- **Next**: diskmap port (Baseline + Console), then bios, then core/fs header + design note, then runas.
+
 ### 2026-11-11 (lead, Opus) — update 2
 - **Core skeleton built and on the branch.** `core/sys` (elevation, privileges, long paths, Worker, Settings,
   logging + minidump, a dependency-free PNG writer) and `core/host` (the Module contract, one command-line parse,

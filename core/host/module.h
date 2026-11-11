@@ -6,6 +6,7 @@
 #pragma once
 
 #include "core/sys/win_compat.h"
+#include "core/ui/theme.h"
 #include <memory>
 #include <vector>
 
@@ -39,6 +40,9 @@ struct IHost {
     virtual bool IsElevated() = 0;
     virtual sys::Settings& Prefs() = 0;           // per-module section (renamed from Settings(): see plan)
     virtual void Log(LogLevel, const wchar_t*) = 0;
+    virtual const ui::Theme& Theme() = 0;         // active palette (theme id + resolved accents)
+    virtual const ui::Fonts& Fonts() = 0;         // per-DPI fonts for the active layout
+    virtual ui::Layout Layout() = 0;              // Baseline (default) or Console
 };
 
 class Module {
@@ -50,6 +54,9 @@ public:
     virtual void OnDeactivate() {}                     // workers keep running while hidden
     virtual void OnDpiChanged(UINT dpi) {}             // before the host resizes; rebuild fonts/metrics
     virtual bool PreTranslateMessage(MSG&) { return false; }   // active module only (accelerators)
+    // Forwarded from the content window for interactive widgets: WM_LBUTTONDOWN/UP, WM_MOUSEMOVE,
+    // WM_MOUSEWHEEL, WM_KEYDOWN, WM_CHAR. Return true when state changed so the host repaints.
+    virtual bool OnInput(UINT msg, WPARAM w, LPARAM l) { (void)msg; (void)w; (void)l; return false; }
     virtual bool CanClose() { return true; }           // false while a plan executes
     virtual void Shutdown() {}                         // cancel; must not return while any worker is alive
     virtual int  RunCli(int argc, wchar_t** argv) { return -1; }   // exports and other headless modes

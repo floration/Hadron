@@ -140,3 +140,23 @@ off-by-default toggle. The old `Admin::Optional` / `RequestElevation()` / single
 Generated data (e.g. the BIOS settings map) is embedded as module-prefixed `RCDATA`. Generators live in `tools/`,
 and their output is committed so a C++-only build works. Copyrighted inputs (vendor BIOS images) and personal data
 (the owner's NVRAM snapshot) are never committed.
+
+## core/ui (theme, layouts, widgets)
+- **Two layouts** (`ui::Layout`): `Baseline` (default, Segoe UI card look) and `Console` (dense, Consolas). The
+  layout changes widget metrics and fonts, not the palette.
+- **Four themes** (`ui::ThemeId`): `Light`, `Dark`, `Fun` (colourful), `Boring` (beige). Each supplies the neutral
+  tokens (bg/panels/border/text/warn/bad/good) in `ThemeBase()`.
+- **Accent**: the main accent is the live **Windows accent colour** (`SystemAccent()` reads
+  `HKCU\...\DWM\AccentColor`, then `ColorizationColor`, then `DwmGetColorizationColor`). Three more accents are the
+  base hue rotated +90/+180/+270 (`RotateHue`, own HSL maths) — a square/tetradic split. When the Windows accent is
+  achromatic (grey/black/white, `IsAchromatic`), the theme's own `FallbackAccent()` is used. `ResolveLive(id)` does
+  this; `Resolve(id, accent)` is the deterministic form used by `--screenshot`/`--selftest` so goldens are stable.
+- **Host owns theme + layout**, chosen by `--theme light|dark|fun|boring` and `--layout baseline|console`. Modules
+  read them through `IHost::Theme()`, `IHost::Fonts()`, `IHost::Layout()`; the suite chrome themes too. High contrast
+  (`Theme::highContrast`) makes widgets fall back to the system colours.
+- **Widgets** (`core/ui/widgets.h`) are plain objects, not HWNDs: the module owns them, paints them from
+  `Module::Paint` (so WM_PAINT and `--screenshot` match), and forwards input via `Module::OnInput`. `ScrollBar`
+  (draggable), `ListView` (sortable headers, wheel + scrollbar, keyboard nav, focus rect), `SearchBox`, `DetailPane`.
+  Drawing primitives are in `core/ui/draw.h`.
+- **Gallery**: `HadronUikit.exe` (`modules/uikit`) renders the whole set in any theme/layout; it is a reference and
+  screenshot target, not a suite tool, so it is not in `MakeAllModules()`. CI renders all eight combinations.

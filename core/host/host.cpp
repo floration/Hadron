@@ -77,6 +77,17 @@ LRESULT CALLBACK ContentProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (ctx && ctx->module) ctx->module->Paint((HDC)w, rc);
         return 0;
     }
+    case WM_LBUTTONDOWN:
+        SetFocus(h);   // so the content window gets keyboard and wheel messages
+        [[fallthrough]];
+    case WM_LBUTTONUP:
+    case WM_MOUSEMOVE:
+    case WM_MOUSEWHEEL:
+    case WM_KEYDOWN:
+    case WM_CHAR:
+        if (ctx && ctx->module && ctx->module->OnInput(m, w, l))
+            InvalidateRect(h, nullptr, FALSE);
+        return 0;
     case WM_NCDESTROY:
         delete ctx;
         SetWindowLongPtrW(h, GWLP_USERDATA, 0);
@@ -104,6 +115,9 @@ public:
     bool IsElevated() override { return elevated_; }
     sys::Settings& Prefs() override { return prefs_[active_ < 0 ? 0 : active_]; }
     void Log(LogLevel lv, const wchar_t* msg) override { sys::Write(lv, msg ? msg : L""); }
+    const ui::Theme& Theme() override { return theme_; }
+    const ui::Fonts& Fonts() override { return fonts_; }
+    ui::Layout Layout() override { return layout_; }
 
 private:
     int sidebarW() const { return suite_ ? S(188, dpi_) : 0; }
@@ -142,7 +156,17 @@ private:
     std::wstring caption_ = L"Hadron", status_;
     sys::SettingsStore store_;
     std::vector<sys::Settings> prefs_;
-    Fonts fonts_;
+    ui::Fonts fonts_;
+    ui::ThemeId themeId_ = ui::ThemeId::Dark;
+    ui::Layout  layout_  = ui::Layout::Baseline;
+    ui::Theme   theme_   = Resolve(ui::ThemeId::Dark, FallbackAccent(ui::ThemeId::Dark));
+
+    // Build fonts for the active layout and resolve the palette. deterministic => use the theme's own
+    // accent (stable goldens for --screenshot/--selftest); otherwise follow the live Windows accent.
+    void BuildTheme(bool deterministic) {
+        fonts_.Build(dpi_, layout_);
+        theme_ = deterministic ? Resolve(themeId_, FallbackAccent(themeId_)) : ResolveLive(themeId_);
+    }
 };
 
 const wchar_t* kFrameClass = L"Hadron.Frame";
@@ -178,7 +202,7 @@ void Host::Activate(int i) {
 }
 
 void Host::PaintChrome(HDC dc, const RECT& cl) {
-    const Theme& t = Baseline();
+    const ui::Theme& t = theme_;
     FillSolid(dc, cl, t.bg);
     if (suite_) {
         RECT sb = SidebarRect(cl);
@@ -225,7 +249,7 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_DPICHANGED: {
         dpi_ = HIWORD(w);
-        fonts_.Build(dpi_);
+        fonts_.Build(dpi_, layout_);
         RECT* sug = reinterpret_cast<RECT*>(l);
         SetWindowPos(h, nullptr, sug->left, sug->top, sug->right - sug->left, sug->bottom - sug->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
@@ -284,7 +308,9 @@ int Host::Screenshot(const CommandLine& cl) {
     // composed into a top-down DIB and written as PNG. No PrintWindow, so Wine and Windows match.
     const int W = 1280, H = 800;
     dpi_ = 96;
-    fonts_.Build(dpi_);
+    themeId_ = cl.theme;
+    layout_  = cl.layout;
+    BuildTheme(/*deterministic=*/true);
     RECT want{0, 0, W, H};
     DWORD style = WS_OVERLAPPEDWINDOW;
     AdjustWindowRectEx(&want, style, FALSE, 0);
@@ -319,7 +345,7 @@ int Host::Screenshot(const CommandLine& cl) {
         RECT cr = ContentRect(cl2);
         POINT o; SetViewportOrgEx(mem, cr.left, cr.top, &o);
         RECT local{0, 0, cr.right - cr.left, cr.bottom - cr.top};
-        FillSolid(mem, local, Baseline().bg);
+        FillSolid(mem, local, theme_.bg);
         modules_[active_]->Paint(mem, local);
         SetViewportOrgEx(mem, o.x, o.y, nullptr);
     }
@@ -370,7 +396,9 @@ int Host::Run(const CommandLine& cl) {
     }
 
     dpi_ = DpiOf(nullptr);
-    fonts_.Build(dpi_);
+    themeId_ = cl.theme;
+    layout_  = cl.layout;
+    BuildTheme(/*deterministic=*/false);
     int cw = S(1200, dpi_), ch = S(800, dpi_);
     RECT wa{0, 0, 0, 0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int x = wa.left + ((wa.right - wa.left) - cw) / 2;

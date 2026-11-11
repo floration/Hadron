@@ -1,46 +1,83 @@
-// core/ui/theme.h — colour tokens, DPI scaling and fonts. Minimal in the skeleton; the full widget
-// set, the four themes and the Windows-accent logic arrive in the core/ui PR. The Baseline palette
-// below is DiskMap's legacy palette (docs/legacy/diskmap.md), which is the project default.
+// core/ui/theme.h — colour tokens, the four themes, DPI scaling and fonts.
+//
+// Every module renders in one of two layouts (Baseline, the default card look; Console, a dense
+// terminal look) and one of four colour themes (Light, Dark, Fun, Boring). Colour comes from the
+// theme; the layout changes widget metrics and fonts, not the palette. The main accent is the
+// Windows accent colour, with three more accents at +90/+180/+270 hue (a square/tetradic split);
+// when the Windows accent is achromatic (grey/black/white) each theme supplies its own accent.
+// See docs/DECISIONS.md (2026-11-11) and docs/ARCHITECTURE.md.
 #pragma once
 
 #include "core/sys/win_compat.h"
+#include <initializer_list>
 
 namespace hx::ui {
 
+enum class ThemeId { Light, Dark, Fun, Boring };
+enum class Layout  { Baseline, Console };
+
+constexpr int kThemeCount = 4;
+const wchar_t* ThemeName(ThemeId id);   // "Light" / "Dark" / "Fun" / "Boring"
+const wchar_t* LayoutName(Layout l);    // "Baseline" / "Console"
+
+// A fully-resolved palette. Neutral tokens come from the ThemeId; the four accents are derived from
+// one base accent (the Windows accent, or the theme's fallback). highContrast is set when Windows is
+// in a high-contrast scheme, so widgets can switch to the system colours (CLAUDE.md "UI").
 struct Theme {
+    ThemeId  id = ThemeId::Dark;
     COLORREF bg, panel, panel2, panel3, border;
     COLORREF text1, text2, text3;
-    COLORREF accent, warn, bad, good;
+    COLORREF accent, accent2, accent3, accent4;   // base, +90, +180, +270 hue
+    COLORREF warn, bad, good;
+    bool     highContrast = false;
 };
 
-// Baseline (default look). TODO(core/ui PR): light/dark/fun/boring + accent from the Windows accent.
+// The per-theme neutral palette and the accent each theme uses when the Windows accent is achromatic.
+const Theme&  ThemeBase(ThemeId id);          // neutral tokens; accents are placeholders
+COLORREF      FallbackAccent(ThemeId id);     // the theme's own accent for the achromatic case
+
+// Colour maths (defined in theme.cpp). Hue is degrees [0,360).
+bool     IsAchromatic(COLORREF c);            // grey/black/white: low saturation or extreme lightness
+COLORREF RotateHue(COLORREF c, double degrees);
+
+// The live Windows accent colour. Sets *achromatic when it is grey/black/white or can't be read
+// (e.g. under Wine), so the caller knows to use FallbackAccent. Reads the DWM accent, then the
+// colorization colour, then DwmGetColorizationColor.
+COLORREF SystemAccent(bool* achromatic);
+
+// Build a theme from a ThemeId and an explicit base accent (accent2/3/4 are hue-rotated from it).
+// Deterministic — used by --screenshot/--selftest with FallbackAccent for stable goldens.
+Theme Resolve(ThemeId id, COLORREF baseAccent);
+
+// Build a theme using the live Windows accent, falling back to the theme's accent when achromatic.
+Theme ResolveLive(ThemeId id);
+
+// Dark theme with its fallback accent: the project default, and what the skeleton host draws.
 inline const Theme& Baseline() {
-    static const Theme t{
-        RGB(17, 19, 23),   RGB(24, 27, 33),  RGB(32, 36, 43), RGB(42, 47, 56), RGB(40, 44, 52),
-        RGB(232, 235, 240), RGB(156, 163, 176), RGB(108, 115, 128),
-        RGB(96, 160, 255), RGB(240, 180, 80), RGB(240, 110, 100), RGB(110, 200, 140),
-    };
+    static const Theme t = Resolve(ThemeId::Dark, FallbackAccent(ThemeId::Dark));
     return t;
 }
 
 inline int S(int px, UINT dpi) { return MulDiv(px, (int)dpi, 96); }
 
-// Per-DPI fonts, rebuilt on WM_DPICHANGED (OnDpiChanged). Segoe UI, with Consolas for numbers.
+// Per-DPI fonts, rebuilt on WM_DPICHANGED (OnDpiChanged). Segoe UI, with Consolas for numbers and
+// for the whole Console layout. Build(dpi, layout): Console uses the monospace face for body text.
 struct Fonts {
     HFONT ui = nullptr, semi = nullptr, caption = nullptr, title = nullptr, mono = nullptr;
 
-    void Build(UINT dpi) {
+    void Build(UINT dpi, Layout layout = Layout::Baseline) {
         Free();
         auto f = [&](int px, int weight, const wchar_t* face) {
             return CreateFontW(-S(px, dpi), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                DEFAULT_PITCH | FF_DONTCARE, face);
         };
-        ui    = f(15, FW_NORMAL,   L"Segoe UI");
-        semi  = f(15, FW_SEMIBOLD, L"Segoe UI");
-        caption = f(12, FW_NORMAL,   L"Segoe UI");
-        title = f(20, FW_SEMIBOLD, L"Segoe UI");
-        mono  = f(14, FW_NORMAL,   L"Consolas");
+        const wchar_t* body = (layout == Layout::Console) ? L"Consolas" : L"Segoe UI";
+        ui      = f(15, FW_NORMAL,   body);
+        semi    = f(15, FW_SEMIBOLD, body);
+        caption = f(12, FW_NORMAL,   body);
+        title   = f(20, FW_SEMIBOLD, (layout == Layout::Console) ? L"Consolas" : L"Segoe UI");
+        mono    = f(14, FW_NORMAL,   L"Consolas");
     }
     void Free() {
         for (HFONT* h : {&ui, &semi, &caption, &title, &mono})

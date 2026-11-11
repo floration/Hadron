@@ -27,6 +27,8 @@ add_library(hadron_core STATIC
   core/sys/settings.cpp
   core/sys/log.cpp
   core/sys/png.cpp
+  core/ui/theme.cpp
+  core/ui/widgets.cpp
   core/host/cmdline.cpp
   core/host/host.cpp)
 target_link_libraries(hadron_core PUBLIC
@@ -36,6 +38,8 @@ include(cmake/HadronModule.cmake)
 
 # --- modules (each builds a static lib + its standalone exe) -------------------------------------
 hadron_add_module(hello NAME HadronHello DESC "Hadron Hello module")
+# Dev/reference gallery for core/ui; builds HadronUikit.exe but is not in the suite catalogue.
+hadron_add_module(uikit NAME HadronUikit DESC "Hadron core/ui gallery")
 
 # --- suite --------------------------------------------------------------------------------------
 # registry.cpp is compiled into the suite exe (not core) so the module factories resolve without a

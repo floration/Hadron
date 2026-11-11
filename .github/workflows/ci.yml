@@ -37,13 +37,19 @@ jobs:
           export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
           wineboot -i || true
           wine build/HadronHello.exe --selftest
+          wine build/HadronUikit.exe --selftest
       - name: Screenshots (Wine + Xvfb)
         run: |
           export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
           mkdir -p shots
-          xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" bash -c '
-            wine build/HadronHello.exe --screenshot shots/hello-standalone.png
-            wine build/Hadron.exe --screenshot shots/hello-suite.png'
+          shot() { xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" wine "$@"; }
+          shot build/HadronHello.exe --screenshot shots/hello-standalone.png
+          shot build/Hadron.exe --screenshot shots/hello-suite.png
+          for th in light dark fun boring; do
+            for ly in baseline console; do
+              shot build/HadronUikit.exe --theme $th --layout $ly --screenshot shots/uikit-$ly-$th.png
+            done
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-linux
@@ -70,12 +76,21 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
       - name: Selftests
-        run: build\HadronHello.exe --selftest
+        shell: pwsh
+        run: |
+          build\HadronHello.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronUikit.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Screenshots
+        shell: pwsh
         run: |
           mkdir shots
           build\HadronHello.exe --screenshot shots\hello-standalone.png
           build\Hadron.exe --screenshot shots\hello-suite.png
+          foreach ($th in 'light','dark','fun','boring') {
+            foreach ($ly in 'baseline','console') {
+              build\HadronUikit.exe --theme $th --layout $ly --screenshot "shots\uikit-$ly-$th.png"
+            }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-windows

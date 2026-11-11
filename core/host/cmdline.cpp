@@ -22,7 +22,16 @@ CommandLine CommandLine::Parse(const wchar_t* raw) {
         else if (a == L"--selftest")   cl.selftest = true;
         else if (a == L"--screenshot") cl.screenshot = sys::ToExtended(next(i));
         else if (a == L"--fixture")    cl.fixture = sys::ToExtended(next(i));
-        else                           cl.rest.push_back(a);
+        else if (a == L"--theme") {
+            std::wstring v = next(i);
+            if (v == L"light")       cl.theme = ui::ThemeId::Light;
+            else if (v == L"dark")   cl.theme = ui::ThemeId::Dark;
+            else if (v == L"fun")    cl.theme = ui::ThemeId::Fun;
+            else if (v == L"boring") cl.theme = ui::ThemeId::Boring;
+        } else if (a == L"--layout") {
+            std::wstring v = next(i);
+            cl.layout = (v == L"console") ? ui::Layout::Console : ui::Layout::Baseline;
+        } else                         cl.rest.push_back(a);
     }
     LocalFree(argv);
     return cl;
