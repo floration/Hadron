@@ -18,6 +18,14 @@ jobs:
             echo "::error::firmware-write API found (hard rule 2)"; exit 1
           fi
           echo "ok: no firmware-write APIs"
+      # The Services page writes service start types only. It never creates or deletes a service or a
+      # registry key (docs/design/services.md); this keeps it that way.
+      - name: No service create/delete or key-delete APIs in modules/services
+        run: |
+          if grep -rnE 'DeleteService|CreateService|RegDeleteKey|RegDeleteTree|SetFirmwareEnvironmentVariable|NtSetSystemEnvironmentValue' modules/services; then
+            echo "::error::banned API under modules/services"; exit 1
+          fi
+          echo "ok: modules/services has no banned APIs"
 
   linux-mingw:
     runs-on: ubuntu-latest
@@ -83,6 +91,12 @@ jobs:
         run: |
           export WINEPREFIX="$PWD/.wine"
           bash tests/tools/bios_check.sh build shots
+      # Hard rule 7 gate (genkb selftest + byte-for-byte services.db), the fixture cmp, both selftests,
+      # the 8 golden plans and the screenshots. Fixture mode only: nothing is applied to any service.
+      - name: Services KB, selftests, golden plans and screenshots (Wine + Xvfb)
+        run: |
+          export WINEPREFIX="$PWD/.wine"
+          bash tests/tools/services_check.sh build shots
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-linux
@@ -122,6 +136,55 @@ jobs:
           python tests\fixtures\make_bios_snapshot.py modules\bios\data\settings.db biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronBios.exe --selftest --fixture biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\Hadron.exe --solo bios --selftest --snapshot biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronServices.exe --selftest --fixture tests\fixtures\services; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\Hadron.exe --solo services --selftest --fixture tests\fixtures\services; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Services golden plans
+        shell: pwsh
+        run: |
+          mkdir svcplans | Out-Null
+          foreach ($tab in 'services','drivers') {
+            foreach ($lvl in 'default','bloat','stripped','minimum') {
+              $out = "svcplans\plan-$tab-$lvl.txt"
+              $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow `
+                -ArgumentList '--dump-plan',$lvl,'--tab',$tab,'--fixture','tests\fixtures\services','--out',$out
+              if ($p.ExitCode) { throw "dump-plan $tab $lvl exited $($p.ExitCode)" }
+              if ((Get-FileHash $out).Hash -ne (Get-FileHash "tests\golden\services\plan-$tab-$lvl.txt").Hash) {
+                throw "plan-$tab-$lvl.txt differs from tests\golden\services"
+              }
+            }
+          }
+          "ok: 8 plans match tests/golden/services"
+      # The one test that writes a real service: a throwaway HadronTestSvc this step creates and deletes.
+      # Hadron sets its start type, verifies, undoes and verifies (--live-test refuses any other name).
+      - name: Services live test (dummy service)
+        shell: pwsh
+        run: |
+          sc.exe create HadronTestSvc binPath= "C:\Windows\System32\cmd.exe /c exit 0" start= demand
+          if ($LASTEXITCODE) { throw "sc.exe create failed" }
+          try {
+            $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live.txt `
+              -ArgumentList '--live-test','HadronTestSvc','--data-dir',"$env:RUNNER_TEMP\svc-live"
+            Get-Content live.txt
+            if ($p.ExitCode) { throw "live test exited $($p.ExitCode)" }
+          } finally {
+            sc.exe delete HadronTestSvc
+          }
+      # The same round trip written while impersonating TrustedInstaller. Informational: the hosted
+      # runner's session layout (winlogon, TI start rights) may not match a desktop PC.
+      - name: Services live test, TrustedInstaller (informational)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          sc.exe create HadronTestSvc binPath= "C:\Windows\System32\cmd.exe /c exit 0" start= demand
+          if ($LASTEXITCODE) { throw "sc.exe create failed" }
+          try {
+            $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live-ti.txt `
+              -ArgumentList '--live-test','HadronTestSvc','--ti','--data-dir',"$env:RUNNER_TEMP\svc-live-ti"
+            Get-Content live-ti.txt
+            if ($p.ExitCode) { throw "TI live test exited $($p.ExitCode)" }
+          } finally {
+            sc.exe delete HadronTestSvc
+          }
       # A real de-elevated launch, reading back the child's integrity. Informational: the hosted
       # runner has no interactive Explorer shell and may run with UAC off (no linked medium token),
       # so a failure here can be the runner, not the code. The owner's PC is the real check.
@@ -161,6 +224,15 @@ jobs:
             }
           }
           build\Hadron.exe --module bios --snapshot biosfix\snap --screenshot "shots\bios-suite-baseline.png"
+          $sf = 'tests\fixtures\services'
+          build\HadronServices.exe --fixture $sf --screenshot "shots\services-list.png"
+          build\HadronServices.exe --fixture $sf --tab drivers --screenshot "shots\services-drivers.png"
+          build\HadronServices.exe --fixture $sf --select DiagTrack --screenshot "shots\services-detail-kb.png"
+          build\HadronServices.exe --fixture $sf --select RpcSs --screenshot "shots\services-detail-protected.png"
+          build\HadronServices.exe --fixture $sf --plan stripped --screenshot "shots\services-plan-stripped.png"
+          build\HadronServices.exe --fixture "$sf\interrupted" --screenshot "shots\services-interrupted.png"
+          build\HadronServices.exe --fixture $sf --ti on --plan bloat --select dmwappushservice --screenshot "shots\services-ti-on.png"
+          build\Hadron.exe --module services --fixture $sf --screenshot "shots\services-suite.png"
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-windows
