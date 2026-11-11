@@ -32,6 +32,8 @@
 #include <cmath>
 #include <initializer_list>
 #include <iterator>
+#include <cwctype>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -58,6 +60,7 @@ enum ClickId {
     ID_SET = 200,      // + start type 2..4, + 5 for Auto (delayed)
     ID_CTL = 300,      // + 0 start, 1 stop, 2 restart
     ID_FOCUS_LIST = 900, ID_FOCUS_DETAIL,   // tab stops that are not click targets
+    ID_CONKEY = 400,   // + a Console action (CA_*), the F-key bar's click targets
 };
 // Keyboard focus. Control = a chip or button (focusId_), reached with Tab/Shift+Tab in reading order and
 // activated with Enter or Space. Apply is never a tab stop: a plan is applied by a mouse click only.
@@ -279,6 +282,57 @@ private:
     bool SetListColumns(int widthPx);   // true when the visible columns changed
     void SetPlanColumns(int widthPx);
 
+    // Console layout (docs/pipeline/svcdrv/design/console.md): its own dense grid (18 px rows; core's ListView
+    // is fixed at 22), a bottom detail pane in two columns, and an F-key bar. Selection still lives in
+    // list_/plist_ so the shared code (Refilter, SelectName, plans) works unchanged in both layouts.
+    struct ConCol { std::wstring key, title; int w; bool path; };
+    struct ConCell { std::wstring text; COLORREF color; };
+    struct ConGrid {
+        ScrollBar sb;
+        RECT rc{}, body{}, track{};
+        int rowH = 18, lastSel = -2;
+        std::vector<int> colL, colR;   // header cells in client pixels, for sort clicks
+        int Rows() const { return rowH > 0 ? std::max(1, (int)(body.bottom - body.top) / rowH) : 1; }
+        void Ensure(int sel) {
+            if (sel < 0 || rowH <= 0) return;
+            int top = sel * rowH, view = body.bottom - body.top;
+            if (top < sb.Offset()) sb.SetOffset(top);
+            else if (top + rowH > sb.Offset() + view) sb.SetOffset(top + rowH - view);
+        }
+    };
+    struct FKey { std::wstring cap, label, shortLabel; int act; bool enabled, on; };
+    void PaintConsole(HDC dc, const RECT& rc);
+    int PaintConsoleBanners(HDC dc, const RECT& rc, int y);
+    void PaintConsoleList(HDC dc, const RECT& rc, int y, int bottom);
+    void PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom);
+    void PaintConsoleGrid(HDC dc, ConGrid& g, const RECT& rc, const std::vector<ConCol>& cols, int n, int sel,
+                          int sortCol, bool asc, const std::function<void(int, std::vector<ConCell>&)>& cellsOf);
+    void PaintConsoleDetail(HDC dc, const RECT& r, const std::wstring& name, const std::wstring& info,
+                            const std::vector<Para>& doc, bool actions);
+    void PaintConsoleHelp(HDC dc, const RECT& r);
+    void PaintFKeyBar(HDC dc, const RECT& r);
+    int ConButton(HDC dc, int x, int y, const std::wstring& label, int id, bool on, bool enabled, bool primary = false);
+    std::vector<ConCol> ConsoleListColumns(HDC dc, int widthPx);
+    std::vector<ConCol> ConsolePlanColumns(HDC dc, int widthPx);
+    void ConsoleListCells(int row, std::vector<ConCell>& out);
+    void ConsolePlanCells(int row, std::vector<ConCell>& out);
+    std::vector<FKey> ConsoleKeys() const;
+    bool OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled);
+    bool OnConsoleKey(UINT vk);
+    void OnConsoleAction(int act);
+    void ConsoleSortPlan(int col);
+    void ConsoleStatus();
+    void ReplayKeys(const std::wstring& keys);
+
+    ConGrid conList_, conPlan_;
+    ScrollBar conLeftSb_;              // the detail pane's left column; detSb_ scrolls the right one
+    RECT conLeftRc_{}, conLeftTrack_{};
+    std::vector<std::wstring> conPlanKeys_;
+    int conPlanSort_ = -1;
+    bool conPlanAsc_ = true;
+    bool conHelp_ = false, conItemBar_ = false;
+    std::wstring conWindir_;
+
     IHost* host_ = nullptr;
     HWND hwnd_ = nullptr;
 
@@ -351,7 +405,7 @@ private:
     std::vector<std::wstring> notices_;
 
     // --screenshot / --fixture arguments applied after the fixture loads
-    std::wstring argSelect_, argPlan_;
+    std::wstring argSelect_, argPlan_, argKeys_;
 };
 
 // ============================================================================================
@@ -418,6 +472,9 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SVC_APPLIED: OnApplied(); return 0;
     case WM_SVC_PLANNED: OnPlanned(); return 0;
     case WM_RBUTTONDOWN: SetFocus(h); return 0;
+    case WM_SYSKEYDOWN:   // F10 arrives as a system key; in Console it is an F-key, not the menu key
+        if (w == VK_F10 && Console()) { if (OnInput(WM_KEYDOWN, w, l)) Invalidate(); return 0; }
+        break;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
         SetFocus(h);
@@ -492,6 +549,7 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
     argPlan_ = ArgValue(cl.rest, L"--plan");
     argFocus_ = ArgValue(cl.rest, L"--focus");
     argSort_ = ArgValue(cl.rest, L"--sort");   // fixture renders: <column key>[:desc], e.g. kb:desc
+    argKeys_ = ArgValue(cl.rest, L"--keys");   // fixture only: keys replayed after load (Console screenshots)
     readOnly_ = HasArg(cl.rest, L"--readonly");
     std::wstring dataDir = ArgValue(cl.rest, L"--data-dir");
     fixture_ = !cl.screenshot.empty() || cl.selftest || !cl.fixture.empty();
@@ -650,8 +708,9 @@ void ServicesModule::TakeData(std::vector<SvcItem> items, const HwInfo& hw, std:
     PrepareCtx();
     Refilter();
     // CLAUDE.md: v1 has no screen-reader support, and the UI says so.
-    Status(L"Services: loaded " + std::to_wstring(items_.size()) +
-           L" services and drivers. Keyboard: Tab and Shift+Tab move, Enter or Space activates. No screen-reader support in v1.");
+    Status(L"Services: loaded " + std::to_wstring(items_.size()) + L" services and drivers. " +
+           (Console() ? L"Keyboard: F1 lists the keys." : L"Keyboard: Tab and Shift+Tab move, Enter or Space activates.") +
+           L" No screen-reader support in v1.");
     Invalidate();
 }
 
@@ -723,6 +782,7 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
         else if (argFocus_ == L"detail") focus_ = Focus::Detail;
         else pendingStop_ = _wtoi(argFocus_.c_str());
     }
+    if (!argKeys_.empty()) ReplayKeys(argKeys_);
 }
 
 // What the presets do with this item, by the same tests BuildPreset runs per row (guards, the sysok rule for
@@ -799,6 +859,7 @@ void ServicesModule::Refilter() {
         if (key == L"type") return TypeName(s.type);
         if (key == L"changed") return ChangedText(s);
         if (key == L"basis") return BasisShort(s);
+        if (key == L"image") return Lower(s.image);
         return Lower(s.name);
     };
     // Keys once per row (the Hadron column runs CheckGuard), not once per comparison.
@@ -1114,6 +1175,7 @@ void ServicesModule::OnApplied() {
 }
 
 void ServicesModule::OnClickId(int id) {
+    if (id >= ID_CONKEY && id < ID_CONKEY + 100) { OnConsoleAction(id - ID_CONKEY); return; }
     if (id == ID_REFRESH) { if (!fixture_) StartLoad(); return; }
     if (id == ID_TAB_SVC || id == ID_TAB_DRV) {
         int t = id == ID_TAB_SVC ? TAB_SERVICES : TAB_DRIVERS;
@@ -1195,6 +1257,7 @@ void ServicesModule::OnClickId(int id) {
 
 bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (!host_) return false;
+    if (Console()) { bool handled = false; bool r = OnConsoleInput(msg, w, l, &handled); if (handled) return r; }
     PaintCtx c = PCtx();
     ListView& lv = mode_ == Mode::Plan ? plist_ : list_;
     RECT lrc = mode_ == Mode::Plan ? rcPlanList_ : rcList_;
@@ -1885,6 +1948,7 @@ void ServicesModule::Paint(HDC dc, const RECT& rc) {
 
 void ServicesModule::PaintPage(HDC dc, const RECT& rc) {
     clicks_.clear();
+    if (Console()) { PaintConsole(dc, rc); BuildTabStops(dc); return; }   // Tab reach and the focus ring in both layouts
     Pal p(host_->Theme());
     const Fonts& f = host_->Fonts();
     const bool con = Console();
@@ -2179,6 +2243,1131 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     int sel = plist_.Selected();
     if (sel >= 0 && sel < (int)plan_.rows.size()) PaintDetailPanel(dc, det, PlanRowDoc(plan_.rows[sel]));
     else rcDetail_ = det;
+}
+
+// ============================================================================================
+// Console layout (docs/pipeline/svcdrv/design/console.md)
+//
+// Everything below runs only when host_->Layout() == Layout::Console; Paint and OnInput dispatch here in
+// one line each. Same data, same plans, same safety: every key either changes the view or opens a plan, and no
+// key applies one (Apply stays a click on the plan screen, exactly as in Baseline).
+
+namespace {
+enum ConAct {
+    CA_NONE = 0, CA_HELP, CA_TAB, CA_FILTER, CA_ITEM, CA_REFRESH, CA_TI,
+    CA_PRESET,                 // + 0 first snapshot, 1 Windows stock, 2 bloat, 3 stripped, 4 minimum
+    CA_UNDO = CA_PRESET + 5,
+    CA_SET,                    // + 0 Auto, 1 Auto (delayed), 2 Manual, 3 Disabled
+    CA_CTL = CA_SET + 4,       // + 0 start, 1 stop, 2 restart
+    CA_BACK = CA_CTL + 3, CA_TICK, CA_CANCEL,
+};
+
+// WCAG 2 relative luminance and contrast ratio.
+double ChanLin(int v) { double c = v / 255.0; return c <= 0.03928 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); }
+double RelLum(COLORREF c) { return 0.2126 * ChanLin(GetRValue(c)) + 0.7152 * ChanLin(GetGValue(c)) + 0.0722 * ChanLin(GetBValue(c)); }
+double Contrast(COLORREF a, COLORREF b) {
+    double x = RelLum(a), y = RelLum(b);
+    return (std::max(x, y) + 0.05) / (std::min(x, y) + 0.05);
+}
+// A filled block with text on it (the selection, tags): white text, as Windows draws on its accent; black text when
+// white is well short (under 4:1) and black reaches 4.5:1. If the chosen text is still under 4.5:1, the fill is
+// moved away from it just enough (Windows blue 0078D7 gives white 4.50 and is darkened about 3%). The hue stays.
+void InverseVideo(COLORREF base, COLORREF* fill, COLORREF* ink) {
+    const COLORREF white = RGB(255, 255, 255), black = RGB(0, 0, 0);
+    double w = Contrast(white, base);
+    *ink = (w < 4.0 && Contrast(black, base) >= 4.5) ? black : white;
+    *fill = base;
+    for (int i = 1; i <= 12 && Contrast(*ink, *fill) < 4.5; i++) *fill = Mix(base, *ink == white ? black : white, i * 0.03);
+}
+// The colour, moved toward `toward` (the theme's body text) only as far as it takes to reach `target` on both
+// surfaces. Keeps the hue of an accent or a semantic colour while making it legible as text.
+COLORREF Ink(COLORREF c, COLORREF s1, COLORREF s2, COLORREF toward, double target) {
+    for (int i = 0; i <= 20; i++) {
+        COLORREF m = Mix(c, toward, i / 20.0);
+        if (Contrast(m, s1) >= target && Contrast(m, s2) >= target) return m;
+    }
+    return toward;
+}
+
+// Console colours over Pal: text-safe inks for the accent and the semantic colours, a 3:1 rule colour for
+// boundaries (the theme's border token is ~1.2-1.6:1), and an inverse-video selection that keeps 4.5:1.
+struct CPal : Pal {
+    COLORREF zebra, rule, accInk, warnInk, badInk, goodInk, barAccInk, selFill, selInk, dim;
+    explicit CPal(const Theme& t) : Pal(t) {
+        if (t.highContrast) {
+            zebra = panel; rule = border; accInk = warnInk = badInk = goodInk = barAccInk = text; dim = GetSysColor(COLOR_GRAYTEXT);
+            selFill = GetSysColor(COLOR_HIGHLIGHT); selInk = GetSysColor(COLOR_HIGHLIGHTTEXT);
+            return;
+        }
+        zebra = Mix(panel, hover, 0.55);
+        rule = Ink(border, panel, bg, mute, 3.0);
+        accInk = Ink(acc, panel, zebra, text, 4.5);
+        warnInk = Ink(warn, panel, zebra, text, 4.5);
+        badInk = Ink(bad, panel, zebra, text, 4.5);
+        goodInk = Ink(good, panel, zebra, text, 4.5);
+        barAccInk = Ink(acc, hover, hover, text, 4.5);
+        dim = faint;   // disabled controls only (WCAG exempts inactive components)
+        InverseVideo(acc, &selFill, &selInk);
+    }
+};
+
+std::wstring ShortStart(const StartCfg& c) {
+    if (c.Delayed()) return L"auto-delay";
+    switch (c.start) {
+        case 0: return L"boot";
+        case 1: return L"system";
+        case 2: return L"auto";
+        case 3: return L"manual";
+        case 4: return L"disabled";
+    }
+    return L"start " + std::to_wstring(c.start);
+}
+std::wstring ShortState(DWORD st) {
+    switch (st) {
+        case SERVICE_STOPPED: return L"stopped";
+        case SERVICE_START_PENDING: return L"starting";
+        case SERVICE_STOP_PENDING: return L"stopping";
+        case SERVICE_RUNNING: return L"running";
+        case SERVICE_CONTINUE_PENDING: return L"resuming";
+        case SERVICE_PAUSE_PENDING: return L"pausing";
+        case SERVICE_PAUSED: return L"paused";
+    }
+    return L"state " + std::to_wstring(st);
+}
+std::wstring ShortAccount(const std::wstring& a) {
+    const std::wstring nt = L"nt authority\\";
+    if (Lower(a.substr(0, nt.size())) == nt) return a.substr(nt.size());
+    return a;
+}
+std::wstring ShortBasis(const std::wstring& b) { return b == L"owner-measured" ? L"measured" : b; }
+// The image column: a shared svchost shows as "svchost -k group" (the group is what tells them apart); any other
+// image keeps its full path, shortened in the middle by DT_PATH_ELLIPSIS so the file name stays readable.
+std::wstring ConsoleImage(const SvcItem& s, const std::wstring& windir) {
+    ImageInfo im = NormalizeImage(s.image, windir, s.name, IsDriverType(s.type));
+    size_t slash = im.path.find_last_of(L"\\/");
+    std::wstring file = slash == std::wstring::npos ? im.path : im.path.substr(slash + 1);
+    if (IEq(file, L"svchost.exe")) return L"svchost " + im.args;
+    return im.path + (im.args.empty() ? L"" : L" " + im.args);
+}
+
+// Detail document into two columns: identity, warnings and configuration on the left; Hadron's KB text
+// (what it does, presets, basis) on the right. Title and subtitle go to the pane's header band instead.
+// Colours are moved to the console inks: the documents are built with the raw accent and semantic colours,
+// which miss 4.5:1 as text in some themes (accent on dark, warn on light/boring).
+void SplitDoc(const std::vector<Para>& d, const CPal& c, std::vector<Para>* left, std::vector<Para>* right) {
+    std::vector<Para>* cur = left;
+    for (Para p : d) {
+        if (p.kind == P_TITLE || p.kind == P_SUB) continue;
+        if (p.kind == P_HEAD) {
+            cur = (p.text.rfind(L"Configuration", 0) == 0 || p.text.rfind(L"From the service", 0) == 0) ? left : right;
+            if (p.color == kNoColor) p.color = c.accInk;
+        }
+        if (p.color == c.acc) p.color = c.accInk;
+        else if (p.color == c.warn) p.color = c.warnInk;
+        else if (p.color == c.bad) p.color = c.badInk;
+        else if (p.color == c.good) p.color = c.goodInk;
+        cur->push_back(p);
+    }
+    if (left->empty()) left->swap(*right);
+}
+}  // namespace
+
+int ServicesModule::ConButton(HDC dc, int x, int y, const std::wstring& label, int id, bool on, bool enabled, bool primary) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    int h = Sc(18);
+    int w = TextW(dc, label, f.caption) + Sc(14);
+    RECT r{x, y, x + w, y + h};
+    bool hot = enabled && hoverId_ == id;
+    COLORREF fill, ink, edge;
+    if (primary && enabled) { fill = hot ? Mix(p.selFill, p.selInk, 0.12) : p.selFill; ink = p.selInk; edge = fill; }
+    else if (on) { fill = Mix(p.panel, p.acc, 0.22); ink = p.text; edge = p.accInk; }
+    else if (enabled) { fill = hot ? p.chipHot : p.chip; ink = p.text; edge = p.rule; }
+    else { fill = p.panel; ink = p.dim; edge = Mix(p.rule, p.panel, 0.5); }
+    FillSolid(dc, r, fill);
+    FrameRectC(dc, r, edge);
+    ui::DrawText(dc, label, r, f.caption, ink, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+    if (enabled && !on) AddClick(r, id);
+    return w;
+}
+
+std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
+    std::vector<FKey> k;
+    bool busy = applyW_.Running() || loadW_.Running();
+    if (mode_ == Mode::Plan) {
+        k.push_back({L"F1", conHelp_ ? L"Close" : L"Keys", L"Keys", CA_HELP, true, conHelp_});
+        bool ctl = plan_.kind == PlanKind::Control;
+        k.push_back({L"Spc", L"Tick", L"Tick", CA_TICK, !ctl && !plan_.rows.empty(), false});
+        k.push_back({L"F6", tiOn_ ? L"TI on" : L"TI off", tiOn_ ? L"TI:on" : L"TI:off", CA_TI, !applyW_.Running(), tiOn_});
+        if (applyW_.Running()) k.push_back({L"Esc", L"Stop after this item", L"Stop", CA_CANCEL, !cancelApply_.load(), false});
+        else k.push_back({L"Esc", L"Cancel", L"Cancel", CA_CANCEL, true, false});
+        return k;
+    }
+    if (conItemBar_) {
+        const SvcItem* s = Selected();
+        std::wstring why;
+        bool can = CanApply(&why);
+        bool drv = s && IsDriverType(s->type);
+        bool en = false, cen = false, running = false, stoppable = false;
+        if (s) {
+            Guard g = CheckGuard(*s, ctx_);
+            en = can && !g.neverTouch && s->kind != Kind::UserInstance && s->cfg.start >= 2;
+            cen = can && s->kind != Kind::UserTemplate;
+            running = s->state == SERVICE_RUNNING;
+            stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
+        }
+        auto on = [&](int i) {
+            if (!s) return false;
+            return i == 0 ? (s->cfg.start == 2 && !s->cfg.Delayed()) : i == 1 ? s->cfg.Delayed() : s->cfg.start == i + 1;
+        };
+        static const wchar_t* const kSet[] = {L"Auto", L"Delayed", L"Manual", L"Disabled"};
+        for (int i = 0; i < 4; i++) {
+            if (i == 1 && drv) continue;
+            k.push_back({L"F" + std::to_wstring(i + 1), kSet[i], kSet[i], CA_SET + i, en && !on(i), on(i)});
+        }
+        if (s && !drv) {
+            k.push_back({L"F5", L"Start", L"Start", CA_CTL + 0, cen && !running && s->cfg.start != 4, false});
+            k.push_back({L"F6", L"Stop", L"Stop", CA_CTL + 1, cen && stoppable, false});
+            k.push_back({L"F7", L"Restart", L"Restart", CA_CTL + 2, cen && stoppable, false});
+        }
+        k.push_back({L"Esc", L"Back", L"Back", CA_BACK, true, false});
+        return k;
+    }
+    bool canPlan = loaded_ && !applyW_.Running() && !items_.empty();
+    std::wstring dummy;
+    bool canApply = CanApply(&dummy);
+    k.push_back({L"F1", conHelp_ ? L"Close" : L"Keys", L"Keys", CA_HELP, true, conHelp_});
+    k.push_back({L"F2", tab_ == TAB_SERVICES ? L"Drivers" : L"Services", L"Tab", CA_TAB, true, false});
+    k.push_back({L"F3", L"Filter", L"Find", CA_FILTER, true, focus_ == Focus::Search});
+    k.push_back({L"F4", L"Item", L"Item", CA_ITEM, Selected() != nullptr, false});
+    k.push_back({L"F5", L"Refresh", L"Rfsh", CA_REFRESH, !fixture_ && !busy, false});
+    k.push_back({L"F6", tiOn_ ? L"TI on" : L"TI off", tiOn_ ? L"TI:on" : L"TI:off", CA_TI, true, tiOn_});
+    k.push_back({L"F7", L"Snapshot", L"Snap", CA_PRESET + 0, canPlan, false});
+    k.push_back({L"F8", L"Stock", L"Stock", CA_PRESET + 1, canPlan, false});
+    k.push_back({L"F9", L"Bloat", L"Bloat", CA_PRESET + 2, canPlan && kbOk_, false});
+    k.push_back({L"F10", L"Stripped", L"Strip", CA_PRESET + 3, canPlan && kbOk_, false});
+    k.push_back({L"F11", L"Minimum", L"Min", CA_PRESET + 4, canPlan && kbOk_, false});
+    k.push_back({L"^Z", L"Undo last", L"Undo", CA_UNDO, undoable_ >= 0 && canApply, false});
+    return k;
+}
+
+void ServicesModule::PaintFKeyBar(HDC dc, const RECT& r) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    FillSolid(dc, r, p.hover);
+    HLine(dc, r.left, r.right, r.top, p.rule);
+    std::vector<FKey> keys = ConsoleKeys();
+    const int gap = Sc(4), pad = Sc(8);
+    std::wstring tag = mode_ == Mode::Plan ? L"PLAN" : conItemBar_ ? L"ITEM" : L"LIST";
+    std::wstring hint;
+    if (mode_ == Mode::Plan) hint = L"No key applies: click Apply";
+    else if (conItemBar_) {
+        std::wstring why;
+        if (!CanApply(&why)) hint = why;
+        else if (const SvcItem* s = Selected()) hint = L"opens a plan for " + s->name;
+    }
+    auto cellW = [&](const FKey& k, bool shortL) {
+        return TextW(dc, k.cap, f.semi) + Sc(5) + TextW(dc, shortL ? k.shortLabel : k.label, f.mono) + Sc(10);
+    };
+    int avail = r.right - r.left - 2 * pad - TextW(dc, tag, f.semi) - Sc(12);
+    int full = 0;
+    for (auto& k : keys) full += cellW(k, false) + gap;
+    bool shortL = full > avail;
+    int x = r.left + pad;
+    for (auto& k : keys) {
+        int w = cellW(k, shortL);
+        RECT cell{x, r.top + 1, x + w, r.bottom};
+        int id = ID_CONKEY + k.act;
+        if (k.enabled && hoverId_ == id) FillSolid(dc, cell, p.chipHot);
+        if (k.on) { RECT u{cell.left, cell.bottom - Sc(2), cell.right, cell.bottom}; FillSolid(dc, u, p.acc); }
+        RECT cr{cell.left + Sc(5), cell.top, cell.right, cell.bottom};
+        TextLeft(dc, k.cap, cr, f.semi, k.enabled ? p.barAccInk : p.dim);
+        cr.left += TextW(dc, k.cap, f.semi) + Sc(5);
+        TextLeft(dc, shortL ? k.shortLabel : k.label, cr, f.mono, k.enabled ? p.text : p.dim);
+        if (k.enabled) AddClick(cell, id);
+        x += w + gap;
+    }
+    // Right end: the mode, and a hint while it fits.
+    int tw = TextW(dc, tag, f.semi);
+    RECT tr{r.right - pad - tw, r.top + 1, r.right - pad, r.bottom};
+    TextLeft(dc, tag, tr, f.semi, p.mute);
+    if (!hint.empty()) {
+        int hw = TextW(dc, hint, f.caption);
+        if (x + Sc(12) + hw < tr.left - Sc(12)) {
+            RECT hr{tr.left - Sc(12) - hw, r.top + 1, tr.left - Sc(12), r.bottom};
+            TextLeft(dc, hint, hr, f.caption, p.mute);
+        }
+    }
+}
+
+int ServicesModule::PaintConsoleBanners(HDC dc, const RECT& rc, int y0) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    int pad = Sc(8);
+    int y = y0;
+    for (auto& b : Banners()) {
+        COLORREF tone = b.tone == 2 ? p.bad : (b.tone == 1 ? p.warn : p.acc);
+        const wchar_t* tagText = b.tone == 2 ? L"FAIL" : (b.tone == 1 ? L"WARN" : L"INFO");
+        int tagW = TextW(dc, L"WARN", f.semi) + Sc(10);
+        int actionsW = 0;
+        for (auto& a : b.actions) actionsW += TextW(dc, a.second, f.caption) + Sc(14) + Sc(6);
+        int right = rc.right - pad;
+        RECT tr{pad + tagW + Sc(8), 0, right - Sc(6) - actionsW, 0};
+        int lh = 0;
+        std::vector<std::wstring> lines = WrapLines(dc, f.caption, b.text, tr.right - tr.left, &lh);
+        if (lines.size() > 3) { lines.resize(3); lines[2] += L"\u2026"; }
+        int h = std::max(Sc(20), (int)lines.size() * lh + Sc(4));
+        RECT r{pad, y, right, y + h};
+        FillSolid(dc, r, Mix(p.panel, tone, 0.10));
+        RECT tagR{r.left, r.top, r.left + tagW, r.bottom};
+        COLORREF tagFill = tone, tagInk = p.text;
+        if (!host_->Theme().highContrast) InverseVideo(tone, &tagFill, &tagInk);
+        else { tagFill = p.selFill; tagInk = p.selInk; }
+        FillSolid(dc, tagR, tagFill);
+        ui::DrawText(dc, tagText, tagR, f.semi, tagInk, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        int ty = y + (h - (int)lines.size() * lh) / 2;
+        for (auto& ln : lines) {
+            RECT lr{tr.left, ty, tr.right, ty + lh};
+            ui::DrawText(dc, ln, lr, f.caption, p.text, DT_SINGLELINE | DT_NOCLIP);
+            ty += lh;
+        }
+        int ax = right - Sc(4);
+        for (auto it = b.actions.rbegin(); it != b.actions.rend(); ++it) {
+            int bw = TextW(dc, it->second, f.caption) + Sc(14);
+            ax -= bw;
+            ConButton(dc, ax, y + (h - Sc(18)) / 2, it->second, it->first, false, true, it->first != ID_DISMISS);
+            ax -= Sc(6);
+        }
+        y += h + Sc(3);
+    }
+    return y == y0 ? y : y + Sc(3);
+}
+
+void ServicesModule::PaintConsole(HDC dc, const RECT& rc) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    FillSolid(dc, rc, p.bg);
+    if (conWindir_.empty()) {
+        wchar_t buf[MAX_PATH];
+        UINT n = GetWindowsDirectoryW(buf, MAX_PATH);
+        conWindir_ = (n && n < MAX_PATH) ? std::wstring(buf, n) : L"C:\\Windows";
+    }
+    int pad = Sc(8);
+    RECT bar{rc.left, rc.bottom - Sc(22), rc.right, rc.bottom};
+    PaintFKeyBar(dc, bar);
+
+    // Header: title on the left, source facts on the right.
+    RECT hr{pad, Sc(4), rc.right - pad, Sc(24)};
+    TextLeft(dc, kAppTitle, hr, f.semi, p.text);
+    int tw = TextW(dc, kAppTitle, f.semi);
+    std::wstring sub;
+    if (!loaded_) sub = L"reading services and drivers\u2026";
+    else {
+        int nSvc = 0, nDrv = 0;
+        for (auto& s : items_) (IsDriverType(s.type) ? nDrv : nSvc)++;
+        sub = (fixture_ ? L"fixture" : L"this PC") + std::wstring(L" \u00B7 build ") + (build_.empty() ? L"?" : build_) + L" \u00B7 " +
+              std::to_wstring(nSvc) + L" svc \u00B7 " + std::to_wstring(nDrv) + L" drv";
+        if (kbOk_) sub += L" \u00B7 KB " + std::to_wstring(kb_.entries.size()) + L" (build " + kb_.build + L")";
+        if (!fixture_ && store_.Valid()) sub += L" \u00B7 data " + sys::ToShell(store_.Root());
+    }
+    RECT sr{hr.left + tw + Sc(16), hr.top, hr.right, hr.bottom};
+    ui::DrawText(dc, sub, sr, f.mono, p.mute, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_PATH_ELLIPSIS);
+    HLine(dc, pad, rc.right - pad, Sc(27), p.rule);
+    int y = PaintConsoleBanners(dc, rc, Sc(32));
+    int bottom = bar.top - Sc(6);
+    if (mode_ == Mode::Plan) PaintConsolePlan(dc, rc, y, bottom);
+    else PaintConsoleList(dc, rc, y, bottom);
+}
+
+std::vector<ServicesModule::ConCol> ServicesModule::ConsoleListColumns(HDC dc, int widthPx) {
+    const int cw = TextW(dc, L"0", host_->Fonts().mono);
+    struct D { const wchar_t* key; const wchar_t* title; int ch; int drop; bool path; };   // ch 0 = flexible
+    static const D kSvc[] = {{L"name", L"Name", 22, 0, false}, {L"state", L"State", 9, 0, false}, {L"start", L"Start", 14, 0, false},
+                             {L"changed", L"vs 1st", 8, 3, false}, {L"kb", L"Hadron", 10, 0, false}, {L"basis", L"Basis", 10, 2, false},
+                             {L"account", L"Account", 15, 1, false}, {L"display", L"Display name", 0, 0, false},
+                             {L"image", L"Image path", 0, 4, true}};
+    static const D kDrv[] = {{L"name", L"Name", 22, 0, false}, {L"state", L"State", 9, 0, false}, {L"start", L"Start", 14, 0, false},
+                             {L"changed", L"vs 1st", 8, 3, false}, {L"kb", L"Hadron", 10, 0, false}, {L"basis", L"Basis", 10, 2, false},
+                             {L"type", L"Type", 7, 1, false}, {L"group", L"Load group", 15, 1, false},
+                             {L"display", L"Display name", 0, 0, false}, {L"image", L"Image path", 0, 4, true}};
+    const D* all = tab_ == TAB_SERVICES ? kSvc : kDrv;
+    const size_t n = tab_ == TAB_SERVICES ? sizeof(kSvc) / sizeof(kSvc[0]) : sizeof(kDrv) / sizeof(kDrv[0]);
+    const int flexMin = 18 * cw;
+    std::vector<bool> on(n, true);
+    auto need = [&]() {
+        int fixed = 0, flex = 0;
+        for (size_t i = 0; i < n; i++) if (on[i]) { if (all[i].ch) fixed += all[i].ch * cw; else flex++; }
+        return fixed + flex * flexMin;
+    };
+    for (int rank = 1; rank <= 4 && need() > widthPx; rank++)
+        for (size_t i = 0; i < n; i++) if (all[i].drop == rank) on[i] = false;
+    int fixed = 0, flex = 0;
+    for (size_t i = 0; i < n; i++) if (on[i]) { if (all[i].ch) fixed += all[i].ch * cw; else flex++; }
+    int spare = std::max(0, widthPx - fixed);
+    std::vector<ConCol> cols;
+    std::vector<std::wstring> keys;
+    int flexDone = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!on[i]) continue;
+        int w = all[i].ch * cw;
+        if (!all[i].ch) {   // display name gets 45% of the spare room, the image path the rest
+            w = flex == 1 ? spare : (flexDone == 0 ? spare * 45 / 100 : spare - spare * 45 / 100);
+            w = std::max(w, flexMin);
+            flexDone++;
+        }
+        cols.push_back({all[i].key, all[i].title, w, all[i].path});
+        keys.push_back(all[i].key);
+    }
+    if (keys != colKeys_) { colKeys_ = keys; Refilter(); }
+    return cols;
+}
+
+void ServicesModule::ConsoleListCells(int row, std::vector<ConCell>& out) {
+    CPal p(host_->Theme());
+    const SvcItem& s = items_[V_[row]];
+    for (auto& k : colKeys_) {
+        if (k == L"name") out.push_back({s.name, p.text});
+        else if (k == L"display") out.push_back({s.display, p.mute});
+        else if (k == L"state")
+            out.push_back({ShortState(s.state), s.state == SERVICE_RUNNING ? p.goodInk : s.state == SERVICE_STOPPED ? p.mute : p.warnInk});
+        else if (k == L"start") {
+            bool drift = drift_.count(Lower(s.name)) != 0;
+            out.push_back({ShortStart(s.cfg) + (s.trigger ? L"+t" : L"") + (drift ? L" *" : L""), drift ? p.warnInk : p.text});
+        } else if (k == L"changed") {
+            std::wstring c = ChangedText(s);
+            out.push_back({c, c == L"new" ? p.accInk : p.warnInk});
+        } else if (k == L"kb") {
+            std::wstring c = KbVerdict(s).label;   // same verdict as Baseline's column and the detail pane
+            out.push_back({c, c == L"protected" ? p.badInk : (c == L"no preset" || c == L"KB" || c == L"\u2014") ? p.mute : p.text});
+        } else if (k == L"basis") {
+            std::wstring b = BasisShort(s);
+            out.push_back({b, b == L"folklore" ? p.warnInk : p.mute});
+        } else if (k == L"account") out.push_back({ShortAccount(s.account), p.mute});
+        else if (k == L"group") out.push_back({s.group, p.mute});
+        else if (k == L"type") out.push_back({s.kind == Kind::FsDriver ? L"fs" : s.kind == Kind::KernelDriver ? L"kernel" : L"other", p.mute});
+        else if (k == L"image") out.push_back({ConsoleImage(s, conWindir_), p.mute}); else out.push_back({L"", p.mute});
+    }
+}
+
+void ServicesModule::PaintConsoleGrid(HDC dc, ConGrid& g, const RECT& rc, const std::vector<ConCol>& cols, int n, int sel,
+                                      int sortCol, bool asc, const std::function<void(int, std::vector<ConCell>&)>& cellsOf) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    PaintCtx c = PCtx();
+    g.rc = rc;
+    g.rowH = Sc(18);
+    const int headH = Sc(20), inset = Sc(6), sbW = Sc(9);
+    FillSolid(dc, rc, p.panel);
+    RECT body{rc.left + 1, rc.top + 1 + headH, rc.right - 1, rc.bottom - 1};
+    bool hasSb = n * g.rowH > body.bottom - body.top;
+    if (hasSb) body.right -= sbW;
+    g.body = body;
+    g.track = RECT{body.right, body.top, rc.right - 1, body.bottom};
+    g.sb.Configure(body.bottom - body.top, n * g.rowH);
+    if (sel != g.lastSel) {
+        // First show (--select, a new plan): centre the row; later moves scroll only as far as needed.
+        if (g.lastSel == -2 && sel >= 0) g.sb.SetOffset(std::max(0, sel - g.Rows() / 2) * g.rowH);
+        else g.Ensure(sel);
+        g.lastSel = sel;
+    }
+
+    // Header: bold titles, the sorted one in the accent with a small triangle right after its text (never over it).
+    RECT hdr{rc.left + 1, rc.top + 1, rc.right - 1, rc.top + 1 + headH};
+    FillSolid(dc, hdr, p.hover);
+    HLine(dc, hdr.left, hdr.right, hdr.bottom - 1, p.rule);
+    g.colL.clear(); g.colR.clear();
+    int x = body.left + inset;
+    const int tri = Sc(7), gapCh = TextW(dc, L"0", f.mono);
+    for (int i = 0; i < (int)cols.size(); i++) {
+        int w = cols[i].w;
+        int right = std::min<int>(x + w, body.right);
+        g.colL.push_back(x - (i == 0 ? inset : 0));
+        g.colR.push_back(right);
+        bool sorted = i == sortCol;
+        RECT tr{x, hdr.top, right - gapCh, hdr.bottom};
+        int tw = TextW(dc, cols[i].title, f.semi);
+        if (sorted) tr.right = std::max<int>(tr.left, std::min<int>(tr.right, right - gapCh - tri - Sc(4)));
+        TextLeft(dc, cols[i].title, tr, f.semi, sorted ? p.barAccInk : p.mute);
+        if (sorted) {
+            int ax = std::min<int>(x + tw + Sc(5), right - gapCh - tri);
+            int ay = hdr.top + (headH - Sc(5)) / 2;
+            POINT pt[3];
+            if (asc) { pt[0] = {ax, ay + Sc(5)}; pt[1] = {ax + tri, ay + Sc(5)}; pt[2] = {ax + tri / 2, ay}; }
+            else { pt[0] = {ax, ay}; pt[1] = {ax + tri, ay}; pt[2] = {ax + tri / 2, ay + Sc(5)}; }
+            HBRUSH b = CreateSolidBrush(p.barAccInk);
+            HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, GetStockObject(NULL_PEN));
+            Polygon(dc, pt, 3);
+            SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b);
+        }
+        x += w;
+    }
+
+    const int saved = SaveDC(dc);
+    IntersectClipRect(dc, body.left, body.top, body.right, body.bottom);
+    int first = g.sb.Offset() / g.rowH;
+    int y0 = body.top - g.sb.Offset() % g.rowH;
+    std::vector<ConCell> cells;
+    bool listFocus = focus_ == Focus::List;
+    for (int i = first; i < n; i++) {
+        int ry = y0 + (i - first) * g.rowH;
+        if (ry >= body.bottom) break;
+        RECT row{body.left, ry, body.right, ry + g.rowH};
+        bool selected = i == sel;
+        COLORREF fill = i % 2 ? p.zebra : p.panel;
+        if (selected) fill = listFocus ? p.selFill : Mix(p.panel, p.acc, 0.22);
+        FillSolid(dc, row, fill);
+        if (selected && !listFocus) { RECT bar{row.left, row.top, row.left + Sc(3), row.bottom}; FillSolid(dc, bar, p.acc); }
+        cells.clear();
+        cellsOf(i, cells);
+        int cx = body.left + inset;
+        for (size_t ci = 0; ci < cols.size() && ci < cells.size(); ci++) {
+            RECT cr{cx, row.top, std::min<int>(cx + cols[ci].w - gapCh, body.right - Sc(2)), row.bottom};
+            COLORREF col = selected && listFocus ? p.selInk : (selected ? p.text : cells[ci].color);
+            if (cr.right > cr.left)
+                ui::DrawText(dc, cells[ci].text, cr, f.mono, col,
+                             DT_SINGLELINE | DT_VCENTER | DT_LEFT | (cols[ci].path && cells[ci].text.find(L'\\') != std::wstring::npos ? DT_PATH_ELLIPSIS : DT_END_ELLIPSIS));
+            cx += cols[ci].w;
+        }
+        if (selected && listFocus && GetFocus() == hwnd_) {
+            RECT fr{row.left + 1, row.top, row.right - 1, row.bottom};
+            FocusRectC(dc, fr, p.selInk);   // in the selection's own ink: an accent focus rect on an accent fill vanishes
+        }
+    }
+    RestoreDC(dc, saved);
+    if (hasSb) g.sb.Paint(dc, g.track, c);
+    FrameRectC(dc, rc, p.rule);
+}
+
+void ServicesModule::PaintConsoleList(HDC dc, const RECT& rc, int y, int bottom) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    PaintCtx c = PCtx();
+    int pad = Sc(8);
+    const int lineH = Sc(20);
+
+    // Tabs, the TrustedInstaller switch and its scope note, then the filter on the right.
+    int nSvc = 0, nDrv = 0;
+    for (auto& s : items_) (IsDriverType(s.type) ? nDrv : nSvc)++;
+    int x = pad;
+    auto tab = [&](const std::wstring& label, int id, bool on) {
+        int w = TextW(dc, label, f.mono) + Sc(16);
+        RECT r{x, y, x + w, y + lineH};
+        if (on) FillSolid(dc, r, p.selFill);
+        else if (hoverId_ == id) FillSolid(dc, r, p.chipHot);
+        else FrameRectC(dc, r, p.rule);
+        ui::DrawText(dc, label, r, f.mono, on ? p.selInk : p.text, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        if (!on) AddClick(r, id);
+        x += w + Sc(4);
+    };
+    tab(L"Services " + std::to_wstring(nSvc), ID_TAB_SVC, tab_ == TAB_SERVICES);
+    tab(L"Drivers " + std::to_wstring(nDrv), ID_TAB_DRV, tab_ == TAB_DRIVERS);
+    x += Sc(10);
+    {
+        std::wstring lbl = tiOn_ ? L"TrustedInstaller ON" : L"TrustedInstaller off";
+        int w = TextW(dc, lbl, f.mono) + Sc(16);
+        RECT r{x, y, x + w, y + lineH};
+        FillSolid(dc, r, tiOn_ ? Mix(p.panel, p.warn, 0.22) : (hoverId_ == ID_TI ? p.chipHot : p.panel));
+        FrameRectC(dc, r, tiOn_ ? p.warnInk : p.rule);
+        ui::DrawText(dc, lbl, r, f.mono, tiOn_ ? p.text : p.mute, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        AddClick(r, ID_TI);
+        x += w + Sc(8);
+    }
+    int sw = std::min(Sc(300), std::max(Sc(160), (int)(rc.right - pad - x) / 3));
+    rcSearch_ = RECT{rc.right - pad - sw, y, rc.right - pad, y + lineH};
+    {
+        // The note is drawn only where it fits whole: a clipped note about what TI can't do would mislead.
+        static const wchar_t* const kCaps[] = {
+            L"Only for writes Windows refuses to administrators. Not Defender, PPL or Tamper Protection.",
+            L"Only for writes Windows refuses to administrators.", L"For admin-refused writes."};
+        int room = rcSearch_.left - Sc(10) - x;
+        for (const wchar_t* cap : kCaps) {
+            int need = TextW(dc, cap, f.caption) * 105 / 100;
+            if (need <= room) {
+                RECT tr{x, y, x + need + Sc(8), y + lineH};
+                ui::DrawText(dc, cap, tr, f.caption, p.mute, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP);
+                break;
+            }
+        }
+    }
+    search_.Paint(dc, rcSearch_, c, focus_ == Focus::Search && GetFocus() == hwnd_);
+    if (focus_ == Focus::Search) FrameRectC(dc, rcSearch_, p.accInk);
+    AddClick(rcSearch_, ID_SEARCH);
+    y += lineH + Sc(6);
+
+    // Grid on top, the detail pane under it (about 40%: the KB text wants width more than height).
+    int avail = bottom - y;
+    int detH = std::max(Sc(150), avail * 40 / 100);
+    if (avail - detH < Sc(120)) detH = std::max(Sc(80), avail - Sc(120));
+    RECT grid{pad, y, rc.right - pad, bottom - detH - Sc(6)};
+    RECT det{pad, grid.bottom + Sc(6), rc.right - pad, bottom};
+    rcList_ = grid;
+    std::vector<ConCol> cols = ConsoleListColumns(dc, grid.right - grid.left - Sc(9) - Sc(8));
+    if (!loaded_ || !loadErr_.empty() || items_.empty()) {
+        FillSolid(dc, grid, p.panel);
+        FrameRectC(dc, grid, p.rule);
+        std::wstring t = !loadErr_.empty() ? loadErr_ : !loaded_ ? L"Reading services and drivers\u2026" : L"No data.";
+        RECT tr = grid;
+        InflateRect(&tr, -Sc(16), -Sc(16));
+        ui::DrawText(dc, t, tr, f.mono, loadErr_.empty() ? p.mute : p.badInk, DT_WORDBREAK);
+    } else {
+        bool shownAsc = true;
+        std::wstring shownKey = SortKeyShown(&shownAsc);
+        int sortCol = -1;
+        for (int i = 0; i < (int)cols.size(); i++) if (cols[i].key == shownKey) sortCol = i;
+        PaintConsoleGrid(dc, conList_, grid, cols, (int)V_.size(), list_.Selected(), sortCol, shownAsc,
+                         [this](int row, std::vector<ConCell>& out) { ConsoleListCells(row, out); });
+        if (V_.empty()) {
+            RECT tr{grid.left, grid.top + Sc(40), grid.right, grid.top + Sc(64)};
+            ui::DrawText(dc, L"Nothing matches the filter (Esc clears it).", tr, f.mono, p.mute, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        }
+    }
+
+    if (conHelp_) { PaintConsoleHelp(dc, det); return; }
+    const SvcItem* s = Selected();
+    if (!s) {
+        FillSolid(dc, det, p.panel);
+        FrameRectC(dc, det, p.rule);
+        rcDetail_ = det;
+        conLeftRc_ = RECT{};
+        RECT tr = det;
+        InflateRect(&tr, -Sc(12), -Sc(10));
+        ui::DrawText(dc, L"Select an item (Up/Down) to see what it does, why a preset would change it, and its configuration.",
+                     tr, f.mono, p.mute, DT_WORDBREAK);
+        return;
+    }
+    std::wstring info = (s->display.empty() || s->display == s->name ? L"" : s->display + L"  \u00B7  ") + TypeName(s->type) +
+                        L"  \u00B7  " + StateName(s->state);
+    PaintConsoleDetail(dc, det, s->name, info, ItemDoc(*s), true);
+}
+
+void ServicesModule::PaintConsoleDetail(HDC dc, const RECT& det, const std::wstring& name, const std::wstring& info,
+                                        const std::vector<Para>& doc, bool actions) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    PaintCtx c = PCtx();
+    FillSolid(dc, det, p.panel);
+    // Band: the item's ID in bold, then what it is.
+    RECT band{det.left + 1, det.top + 1, det.right - 1, det.top + 1 + Sc(22)};
+    FillSolid(dc, band, p.hover);
+    RECT nr{band.left + Sc(8), band.top, band.right - Sc(8), band.bottom};
+    TextLeft(dc, name, nr, f.semi, p.text);
+    nr.left += TextW(dc, name, f.semi) + Sc(12);
+    TextLeft(dc, info, nr, f.mono, p.mute);
+    int top = band.bottom;
+
+    // Actions: the same start-type and control buttons as Baseline (each opens a plan), with F4 for the keys.
+    if (actions) {
+        const SvcItem* s = Selected();
+        std::wstring why;
+        bool can = CanApply(&why);
+        Guard g = CheckGuard(*s, ctx_);
+        bool drv = IsDriverType(s->type);
+        bool en = can && !g.neverTouch && s->kind != Kind::UserInstance && s->cfg.start >= 2;
+        int ay = top + Sc(4);
+        int ax = det.left + Sc(8);
+        RECT lr{ax, ay, ax + Sc(200), ay + Sc(18)};
+        TextLeft(dc, L"start", lr, f.mono, p.mute);
+        ax += TextW(dc, L"start ", f.mono);
+        ax += ConButton(dc, ax, ay, L"Auto", ID_SET + 2, s->cfg.start == 2 && !s->cfg.Delayed(), en) + Sc(3);
+        if (!drv) ax += ConButton(dc, ax, ay, L"Auto (delayed)", ID_SET + 5, s->cfg.Delayed(), en) + Sc(3);
+        ax += ConButton(dc, ax, ay, L"Manual", ID_SET + 3, s->cfg.start == 3, en) + Sc(3);
+        ax += ConButton(dc, ax, ay, L"Disabled", ID_SET + 4, s->cfg.start == 4, en) + Sc(14);
+        if (!drv) {
+            bool running = s->state == SERVICE_RUNNING;
+            bool stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
+            bool cen = can && s->kind != Kind::UserTemplate;
+            lr = RECT{ax, ay, ax + Sc(100), ay + Sc(18)};
+            TextLeft(dc, L"now", lr, f.mono, p.mute);
+            ax += TextW(dc, L"now ", f.mono);
+            ax += ConButton(dc, ax, ay, L"Start", ID_CTL + 0, false, cen && !running && s->cfg.start != 4) + Sc(3);
+            ax += ConButton(dc, ax, ay, L"Stop", ID_CTL + 1, false, cen && stoppable) + Sc(3);
+            ax += ConButton(dc, ax, ay, L"Restart", ID_CTL + 2, false, cen && stoppable) + Sc(14);
+        }
+        RECT wr{ax, ay, det.right - Sc(8), ay + Sc(18)};
+        TextLeft(dc, can ? std::wstring(L"F4: keys for these; each opens a plan") : why, wr, f.caption, p.mute);
+        top = ay + Sc(18) + Sc(4);
+    }
+    HLine(dc, det.left + 1, det.right - 1, top, p.rule);
+    top += 1;
+
+    std::vector<Para> left, right;
+    SplitDoc(doc, p, &left, &right);
+    const int sbW = Sc(9);
+    int mid = right.empty() ? det.right : det.left + (det.right - det.left) * 44 / 100;
+    auto column = [&](ScrollBar& sb, const RECT& area, const std::vector<Para>& d, RECT* track) {
+        RECT body{area.left + Sc(10), area.top + Sc(4), area.right - Sc(8) - sbW, area.bottom - Sc(6)};
+        int total = PaintDoc(dc, body, d, 0, false);
+        sb.Configure(body.bottom - body.top, total);
+        *track = RECT{area.right - sbW - 1, area.top + 1, area.right - 1, area.bottom - 1};
+        const int saved = SaveDC(dc);
+        IntersectClipRect(dc, body.left, body.top, body.right, body.bottom);
+        PaintDoc(dc, body, d, sb.Offset(), true);
+        RestoreDC(dc, saved);
+        if (sb.Visible()) sb.Paint(dc, *track, c);
+    };
+    RECT la{det.left, top, mid, det.bottom};
+    conLeftRc_ = la;
+    column(conLeftSb_, la, left, &conLeftTrack_);
+    if (!right.empty()) {
+        VLine(dc, mid, top + Sc(4), det.bottom - Sc(4), p.rule);
+        RECT ra{mid + 1, top, det.right, det.bottom};
+        rcDetail_ = ra;
+        column(detSb_, ra, right, &rcDetSb_);
+    } else {
+        rcDetail_ = RECT{};
+        rcDetSb_ = RECT{};
+    }
+    FrameRectC(dc, det, p.rule);
+    if (focus_ == Focus::Detail) {
+        RECT fr = right.empty() ? la : rcDetail_;
+        InflateRect(&fr, -2, -2);
+        if (GetFocus() == hwnd_) FocusRectC(dc, fr, p.accInk);
+        else FrameRectC(dc, fr, Mix(p.panel, p.acc, 0.4));
+    }
+}
+
+void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    FillSolid(dc, det, p.panel);
+    FrameRectC(dc, det, p.rule);
+    rcDetail_ = RECT{};
+    conLeftRc_ = RECT{};
+    RECT band{det.left + 1, det.top + 1, det.right - 1, det.top + 1 + Sc(22)};
+    FillSolid(dc, band, p.hover);
+    RECT tr{band.left + Sc(8), band.top, band.right - Sc(8), band.bottom};
+    TextLeft(dc, L"Keys", tr, f.semi, p.text);
+    tr.left += TextW(dc, L"Keys", f.semi) + Sc(12);
+    TextLeft(dc, L"F1 or Esc closes. Every key changes the view or opens a plan; no key applies one: Apply is a click on the plan.",
+             tr, f.caption, p.mute);
+    typedef std::pair<const wchar_t*, const wchar_t*> KV;
+    static const KV kList[] = {
+        {L"F2", L"Services / Drivers tab"}, {L"F3", L"Filter (or just type); Esc clears it"},
+        {L"F4", L"Item keys for the selected row: start type, start/stop"}, {L"F5", L"Refresh (live data only)"},
+        {L"F6", L"TrustedInstaller toggle, this session only"}, {L"F7", L"Plan: Default, first snapshot"},
+        {L"F8", L"Plan: Default, Windows stock"}, {L"F9", L"Plan: Pure bloat removal"}, {L"F10", L"Plan: Stripped"},
+        {L"F11", L"Plan: Minimum"}, {L"Ctrl+Z", L"Plan: undo the last apply"},
+        {L"Up Down", L"Move; PgUp PgDn Home End"}, {L"Tab", L"List, filter, detail"}};
+    static const KV kPlan[] = {
+        {L"Space", L"Tick or untick the row (or click [x])"}, {L"F6", L"TrustedInstaller toggle; rebuilds the plan"},
+        {L"Esc", L"Cancel the plan"}, {L"Enter", L"Nothing: no key applies"}, {L"Up Down", L"Move; PgUp PgDn Home End"},
+        {L"Tab", L"List, detail"}};
+    static const KV kCols[] = {
+        {L"State", L"running, stopped, starting, stopping, paused"},
+        {L"Start", L"+t trigger-start; * changed since Hadron set it"},
+        {L"vs 1st", L"changed or new against the first-run snapshot"},
+        {L"Hadron", L"protected, no preset, or the lowest preset that changes it"},
+        {L"Basis", L"published, measured, reasoning or folklore (folklore: no evidence)"}};
+    std::vector<KV> a, b;
+    if (mode_ == Mode::Plan) a.assign(std::begin(kPlan), std::end(kPlan));
+    else a.assign(std::begin(kList), std::end(kList));
+    b.assign(std::begin(kCols), std::end(kCols));
+    b.push_back({L"Note", L"English only; no screen-reader support in v1."});
+    int top = band.bottom + Sc(6);
+    int lh = Sc(17);
+    int colW = (det.right - det.left - Sc(16)) / 2;
+    auto list = [&](const std::vector<KV>& v, int x0, int keyW) {
+        int yy = top;
+        for (auto& kv : v) {
+            if (yy + lh > det.bottom - Sc(4)) break;
+            RECT kr{x0, yy, x0 + keyW, yy + lh};
+            TextLeft(dc, kv.first, kr, f.semi, p.accInk);
+            RECT vr{x0 + keyW, yy, x0 + colW - Sc(10), yy + lh};
+            TextLeft(dc, kv.second, vr, f.mono, p.text);
+            yy += lh;
+        }
+    };
+    int cw = TextW(dc, L"0", f.mono);
+    list(a, det.left + Sc(10), cw * 9);
+    VLine(dc, det.left + Sc(8) + colW, top, det.bottom - Sc(6), p.rule);
+    list(b, det.left + Sc(18) + colW, cw * 8);
+}
+
+std::vector<ServicesModule::ConCol> ServicesModule::ConsolePlanColumns(HDC dc, int widthPx) {
+    const int cw = TextW(dc, L"0", host_->Fonts().mono);
+    bool ctl = plan_.kind == PlanKind::Control;
+    std::vector<ConCol> cols;
+    cols.push_back({L"box", L"", 5 * cw, false});
+    cols.push_back({L"name", L"Name", 22 * cw, false});
+    if (ctl) cols.push_back({L"op", L"Op", 7 * cw, false});
+    else {
+        cols.push_back({L"now", L"Now", 12 * cw, false});
+        cols.push_back({L"after", L"Planned", 13 * cw, false});
+        cols.push_back({L"basis", L"Basis", 10 * cw, false});
+    }
+    int used = 0;
+    for (auto& c : cols) used += c.w;
+    cols.push_back({L"why", L"Why / protection", std::max(20 * cw, widthPx - used), false});
+    conPlanKeys_.clear();
+    for (auto& c : cols) conPlanKeys_.push_back(c.key);
+    return cols;
+}
+
+void ServicesModule::ConsolePlanCells(int row, std::vector<ConCell>& out) {
+    CPal p(host_->Theme());
+    const PlanRow& r = plan_.rows[row];
+    for (auto& k : conPlanKeys_) {
+        if (k == L"box") {
+            if (!r.blocked.empty()) out.push_back({L"[-]", p.badInk});
+            else out.push_back({r.include ? L"[x]" : L"[ ]", r.include ? p.accInk : p.mute});
+        } else if (k == L"name") out.push_back({r.name, r.include || !r.blocked.empty() ? p.text : p.mute});
+        else if (k == L"op") out.push_back({r.ctl == Op::Stop ? L"stop" : L"start", p.text});
+        else if (k == L"now") out.push_back({ShortStart(r.before), p.mute});
+        else if (k == L"after") out.push_back({L"\u2192 " + ShortStart(r.after), r.blocked.empty() ? p.text : p.mute});
+        else if (k == L"basis") {
+            std::wstring b = ShortBasis(r.basis);
+            out.push_back({b, b == L"folklore" ? p.warnInk : p.mute});
+        } else if (k == L"why") {
+            if (!r.blocked.empty()) out.push_back({r.blocked, p.badInk});
+            else if (!r.warning.empty()) out.push_back({r.warning, p.warnInk});
+            else if (!r.depWarning.empty()) out.push_back({r.depWarning, p.warnInk});
+            else out.push_back({r.reason, p.mute});
+        } else out.push_back({L"", p.mute});
+    }
+}
+
+void ServicesModule::ConsoleSortPlan(int col) {
+    if (col < 0 || col >= (int)conPlanKeys_.size()) return;
+    if (conPlanSort_ == col) conPlanAsc_ = !conPlanAsc_;
+    else { conPlanSort_ = col; conPlanAsc_ = true; }
+    const std::wstring key = conPlanKeys_[col];
+    auto text = [&](const PlanRow& r) -> std::wstring {
+        if (key == L"box") return !r.blocked.empty() ? L"2" : (r.include ? L"0" : L"1");
+        if (key == L"now") return std::to_wstring(r.before.start) + (r.before.Delayed() ? L"1" : L"0");
+        if (key == L"after") return std::to_wstring(r.after.start) + (r.after.Delayed() ? L"1" : L"0");
+        if (key == L"op") return r.ctl == Op::Stop ? L"1" : L"0";
+        if (key == L"basis") return r.basis;
+        if (key == L"why") return Lower(!r.blocked.empty() ? r.blocked : !r.warning.empty() ? r.warning : !r.depWarning.empty() ? r.depWarning : r.reason);
+        return Lower(r.name);
+    };
+    std::wstring keep;
+    int sel = plist_.Selected();
+    if (sel >= 0 && sel < (int)plan_.rows.size()) keep = plan_.rows[sel].name;
+    bool asc = conPlanAsc_;
+    std::stable_sort(plan_.rows.begin(), plan_.rows.end(), [&](const PlanRow& a, const PlanRow& b) {
+        std::wstring ka = text(a), kb = text(b);
+        if (ka == kb) return Lower(a.name) < Lower(b.name);
+        return asc ? ka < kb : kb < ka;
+    });
+    RefreshPlanList();
+    for (int k = 0; k < (int)plan_.rows.size(); k++)
+        if (plan_.rows[k].name == keep) { plist_.Select(k); conPlan_.lastSel = -2; break; }   // re-shown at the next paint
+}
+
+void ServicesModule::PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    int pad = Sc(8);
+    std::wstring why;
+    bool can = CanApply(&why);
+    bool ctl = plan_.kind == PlanKind::Control;
+    int n = ctl ? (int)std::count_if(plan_.rows.begin(), plan_.rows.end(), [](const PlanRow& r) { return r.blocked.empty(); })
+                : plan_.Included();
+
+    // Title line: a PLAN tag, the plan's name, then Cancel and Apply on the right. Apply is a click only.
+    RECT tag{pad, y, pad + TextW(dc, L"PLAN", f.semi) + Sc(12), y + Sc(20)};
+    FillSolid(dc, tag, p.selFill);
+    ui::DrawText(dc, L"PLAN", tag, f.semi, p.selInk, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+    std::wstring applyLbl = ctl ? L"Run" : (n == 1 ? L"Apply 1 change" : L"Apply " + std::to_wstring(n) + L" changes");
+    int aw = TextW(dc, applyLbl, f.caption) + Sc(14);
+    int cw2 = TextW(dc, L"Cancel (Esc)", f.caption) + Sc(14);
+    int bx = rc.right - pad - aw;
+    ConButton(dc, bx, y + 1, applyLbl, ID_APPLY, false, can && n > 0, true);
+    ConButton(dc, bx - Sc(6) - cw2, y + 1, L"Cancel (Esc)", ID_CANCEL_PLAN, false, !applyW_.Running());
+    RECT tr{tag.right + Sc(10), y, bx - Sc(12) - cw2, y + Sc(20)};
+    TextLeft(dc, plan_.title, tr, f.semi, p.text);
+    if (tiOn_) {
+        tr.left += TextW(dc, plan_.title, f.semi) + Sc(14);
+        TextLeft(dc, L"TrustedInstaller on", tr, f.mono, p.warnInk);
+    }
+    y += Sc(24);
+    std::wstring sum;
+    if (ctl) sum = std::to_wstring(n) + L" operation(s), in this order. Nothing happens until you click Run.";
+    else
+        sum = std::to_wstring(plan_.Included()) + L" ticked, " + std::to_wstring(plan_.Optional()) + L" unticked, " +
+              std::to_wstring(plan_.Blocked()) + L" kept or protected; " + std::to_wstring(plan_.alreadySet) +
+              L" already set. Nothing changes until you click Apply. Space or a click on [x] ticks.";
+    if (!can) sum += L"  (" + why + L")";
+    RECT sr{pad, y, rc.right - pad, y + Sc(16)};
+    TextLeft(dc, sum, sr, f.caption, can ? p.mute : p.warnInk);
+    y += Sc(18);
+    for (auto& note : plan_.notes) {
+        int lh = 0;
+        std::vector<std::wstring> lines = WrapLines(dc, f.caption, note, rc.right - 2 * pad - Sc(14), &lh);
+        if (lines.size() > 2) { lines.resize(2); lines[1] += L"\u2026"; }
+        RECT dr{pad, y, pad + Sc(14), y + lh};
+        TextLeft(dc, L"\u00B7", dr, f.caption, p.mute);
+        for (auto& ln : lines) {
+            RECT lr{pad + Sc(14), y, rc.right - pad, y + lh};
+            TextLeft(dc, ln, lr, f.caption, p.mute);
+            y += lh;
+        }
+        y += Sc(2);
+    }
+    y += Sc(4);
+
+    int avail = bottom - y;
+    int detH = std::max(Sc(130), avail * 34 / 100);
+    if (avail - detH < Sc(120)) detH = std::max(Sc(80), avail - Sc(120));
+    RECT grid{pad, y, rc.right - pad, bottom - detH - Sc(6)};
+    RECT det{pad, grid.bottom + Sc(6), rc.right - pad, bottom};
+    rcPlanList_ = grid;
+    std::vector<ConCol> cols = ConsolePlanColumns(dc, grid.right - grid.left - Sc(9) - Sc(8));
+    PaintConsoleGrid(dc, conPlan_, grid, cols, (int)plan_.rows.size(), plist_.Selected(), conPlanSort_, conPlanAsc_,
+                     [this](int row, std::vector<ConCell>& out) { ConsolePlanCells(row, out); });
+    if (plan_.rows.empty()) {
+        RECT er{grid.left, grid.top + Sc(40), grid.right, grid.top + Sc(64)};
+        ui::DrawText(dc, planBusy_ ? L"Reading the live state\u2026" : L"Nothing to change.", er, f.mono, p.mute,
+                     DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    }
+    if (conHelp_) { PaintConsoleHelp(dc, det); return; }
+    int sel = plist_.Selected();
+    if (sel >= 0 && sel < (int)plan_.rows.size()) {
+        const PlanRow& r = plan_.rows[sel];
+        PaintConsoleDetail(dc, det, r.name, r.display.empty() || r.display == r.name ? L"" : r.display, PlanRowDoc(r), false);
+    } else {
+        FillSolid(dc, det, p.panel);
+        FrameRectC(dc, det, p.rule);
+        rcDetail_ = det;
+        conLeftRc_ = RECT{};
+    }
+}
+
+void ServicesModule::ConsoleStatus() {
+    if (!host_ || mode_ != Mode::List) return;
+    const SvcItem* s = Selected();
+    if (!s) return;
+    if (conWindir_.empty()) return;
+    ImageInfo im = NormalizeImage(s->image, conWindir_, s->name, IsDriverType(s->type));
+    std::wstring t = s->name + L"   " + im.path + (im.args.empty() ? L"" : L" " + im.args);
+    if (!IsDriverType(s->type) && !s->account.empty()) t += L"   \u00B7   " + s->account;
+    Status(t);
+}
+
+void ServicesModule::OnConsoleAction(int act) {
+    bool plan = mode_ == Mode::Plan;
+    if (act != CA_HELP) conHelp_ = false;
+    switch (act) {
+        case CA_HELP: conHelp_ = !conHelp_; return;
+        case CA_TAB: if (!plan) { conItemBar_ = false; OnClickId(tab_ == TAB_SERVICES ? ID_TAB_DRV : ID_TAB_SVC); } return;
+        case CA_FILTER: if (!plan) { conItemBar_ = false; focus_ = Focus::Search; search_.SelectAll(); } return;
+        case CA_ITEM: if (!plan && Selected()) conItemBar_ = !conItemBar_; return;
+        case CA_BACK: conItemBar_ = false; return;
+        case CA_REFRESH: if (!plan && !fixture_ && !applyW_.Running() && !loadW_.Running()) StartLoad(); return;
+        case CA_TI: if (!applyW_.Running()) OnClickId(ID_TI); return;
+        case CA_UNDO: {
+            std::wstring why;
+            if (!plan && undoable_ >= 0 && CanApply(&why)) OnClickId(ID_UNDO_LAST);   // opens the undo plan; never applies
+            return;
+        }
+        case CA_TICK: if (plan && plan_.kind != PlanKind::Control) TogglePlanRow(plist_.Selected()); return;
+        case CA_CANCEL:
+            // During an apply, Esc stops it after the current item (the banner's Cancel); cancelling is the safe way.
+            if (applyW_.Running()) { if (!cancelApply_.load()) OnClickId(ID_CANCEL_APPLY); }
+            else if (plan) ClosePlan();
+            return;
+    }
+    if (act >= CA_PRESET && act < CA_PRESET + 5) {
+        if (plan || !loaded_ || applyW_.Running() || items_.empty()) return;
+        if (act >= CA_PRESET + 2 && !kbOk_) return;
+        conItemBar_ = false;
+        OnClickId(ID_PRESET + (act - CA_PRESET));   // opens the plan, exactly like the Baseline chip
+        return;
+    }
+    if (act >= CA_SET && act < CA_CTL + 3) {
+        // The same enable rules as the buttons; each opens a single-item plan, never an apply.
+        if (plan || !conItemBar_) return;
+        for (auto& k : ConsoleKeys()) {
+            if (k.act != act || !k.enabled) continue;
+            conItemBar_ = false;
+            static const int kSetIds[] = {ID_SET + 2, ID_SET + 5, ID_SET + 3, ID_SET + 4};
+            OnClickId(act < CA_CTL ? kSetIds[act - CA_SET] : ID_CTL + (act - CA_CTL));
+            return;
+        }
+        return;
+    }
+}
+
+bool ServicesModule::OnConsoleKey(UINT vk) {
+    int act = CA_NONE;
+    if (mode_ == Mode::Plan) {
+        if (vk == VK_F1) act = CA_HELP;
+        else if (vk == VK_F6) act = CA_TI;
+    } else if (conItemBar_) {
+        // Inside the item bar F1..F7 are the item keys the bar shows (so F1 there is Auto, not help).
+        static const int kItem[] = {CA_SET + 0, CA_SET + 1, CA_SET + 2, CA_SET + 3, CA_CTL + 0, CA_CTL + 1, CA_CTL + 2};
+        if (vk >= VK_F1 && vk <= VK_F7) act = kItem[vk - VK_F1];
+    } else {
+        switch (vk) {
+            case VK_F1: act = CA_HELP; break;
+            case VK_F2: act = CA_TAB; break;
+            case VK_F3: act = CA_FILTER; break;
+            case VK_F4: act = CA_ITEM; break;
+            case VK_F5: act = CA_REFRESH; break;
+            case VK_F6: act = CA_TI; break;
+            case VK_F7: act = CA_PRESET + 0; break;
+            case VK_F8: act = CA_PRESET + 1; break;
+            case VK_F9: act = CA_PRESET + 2; break;
+            case VK_F10: act = CA_PRESET + 3; break;
+            case VK_F11: act = CA_PRESET + 4; break;
+        }
+    }
+    if (act == CA_NONE) return false;
+    OnConsoleAction(act);
+    return true;
+}
+
+bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled) {
+    *handled = false;
+    const bool plan = mode_ == Mode::Plan;
+    ConGrid& g = plan ? conPlan_ : conList_;
+    ListView& lv = plan ? plist_ : list_;
+    const int n = plan ? (int)plan_.rows.size() : (int)V_.size();
+    auto setSel = [&](int k) {
+        if (n <= 0) return false;
+        k = std::clamp(k, 0, n - 1);
+        g.Ensure(k);
+        g.lastSel = k;
+        if (k == lv.Selected()) return true;
+        lv.Select(k);
+        detSb_.SetOffset(0);
+        conLeftSb_.SetOffset(0);
+        if (!plan) { selName_ = items_[V_[k]].name; ConsoleStatus(); }
+        return true;
+    };
+
+    if (msg == WM_KEYDOWN) {
+        bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0 && (GetKeyState(VK_MENU) & 0x8000) == 0;
+        if (w >= VK_F1 && w <= VK_F12) {
+            *handled = true;
+            return OnConsoleKey((UINT)w);
+        }
+        if (w == VK_ESCAPE && (conItemBar_ || conHelp_)) { conItemBar_ = conHelp_ = false; *handled = true; return true; }
+        if (w == VK_ESCAPE && applyW_.Running()) { *handled = true; OnConsoleAction(CA_CANCEL); return true; }
+        if (ctrl && w == 'Z' && !plan && focus_ != Focus::Search) { *handled = true; OnConsoleAction(CA_UNDO); return true; }
+        bool nav = w == VK_UP || w == VK_DOWN || w == VK_PRIOR || w == VK_NEXT || w == VK_HOME || w == VK_END;
+        bool fromSearch = focus_ == Focus::Search && !plan && w != VK_HOME && w != VK_END;
+        if (nav && (focus_ == Focus::List || fromSearch)) {
+            *handled = true;
+            int sel = lv.Selected(), page = std::max(1, g.Rows() - 1);
+            int k = sel;
+            switch (w) {
+                case VK_UP: k = sel < 0 ? 0 : sel - 1; break;
+                case VK_DOWN: k = sel + 1; break;
+                case VK_PRIOR: k = sel - page; break;
+                case VK_NEXT: k = sel + page; break;
+                case VK_HOME: k = 0; break;
+                case VK_END: k = n - 1; break;
+            }
+            return setSel(k);
+        }
+        if (w == VK_TAB || w == VK_ESCAPE) conItemBar_ = false;
+        return false;   // Tab, Esc, Ctrl+F, Space, typing and detail scrolling: the shared handler
+    }
+    if (msg == WM_MOUSEWHEEL) {
+        POINT pt{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+        ScreenToClient(hwnd_, &pt);
+        int delta = GET_WHEEL_DELTA_WPARAM(w);
+        if (PtInRect(&g.rc, pt)) {
+            *handled = true;
+            int before = g.sb.Offset();
+            g.sb.SetOffset(before - delta * 3 * g.rowH / WHEEL_DELTA);
+            return g.sb.Offset() != before;
+        }
+        if (PtInRect(&conLeftRc_, pt)) {
+            *handled = true;
+            int before = conLeftSb_.Offset();
+            conLeftSb_.SetOffset(before - delta * Sc(54) / WHEEL_DELTA);
+            return conLeftSb_.Offset() != before;
+        }
+        return false;   // the right column (rcDetail_/detSb_): the shared handler
+    }
+    int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
+    POINT pt{x, y};
+    if (msg == WM_MOUSEMOVE) {
+        for (ScrollBar* sb : {&g.sb, &conLeftSb_}) {
+            if (!sb->Dragging()) continue;
+            *handled = true;
+            const RECT& tr = sb == &g.sb ? g.track : conLeftTrack_;
+            if (!(w & MK_LBUTTON)) { sb->OnMouse(WM_LBUTTONUP, x, y, tr); return true; }
+            return sb->OnMouse(msg, x, y, tr);
+        }
+        return false;
+    }
+    if (msg == WM_LBUTTONUP) {
+        bool any = false;
+        if (g.sb.Dragging()) { g.sb.OnMouse(msg, x, y, g.track); any = true; }
+        if (conLeftSb_.Dragging()) { conLeftSb_.OnMouse(msg, x, y, conLeftTrack_); any = true; }
+        if (!any) return false;
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        *handled = true;
+        return true;
+    }
+    if (msg != WM_LBUTTONDOWN && msg != WM_LBUTTONDBLCLK) return false;
+    for (auto& ck : clicks_) if (PtInRect(&ck.rc, pt)) return false;   // buttons, F-key bar, tabs, filter: shared
+    if (g.sb.Visible() && PtInRect(&g.track, pt)) {
+        *handled = true;
+        focus_ = Focus::List;
+        SetCapture(hwnd_);
+        g.sb.OnMouse(WM_LBUTTONDOWN, x, y, g.track);
+        return true;
+    }
+    if (conLeftSb_.Visible() && PtInRect(&conLeftTrack_, pt)) {
+        *handled = true;
+        focus_ = Focus::Detail;
+        SetCapture(hwnd_);
+        conLeftSb_.OnMouse(WM_LBUTTONDOWN, x, y, conLeftTrack_);
+        return true;
+    }
+    if (PtInRect(&g.rc, pt)) {
+        *handled = true;
+        focus_ = Focus::List;
+        conItemBar_ = conItemBar_ && !plan;
+        if (y < g.body.top) {   // header: sort by that column; a second click reverses
+            for (size_t i = 0; i < g.colL.size(); i++) {
+                if (x < g.colL[i] || x >= g.colR[i]) continue;
+                if (plan) ConsoleSortPlan((int)i);
+                else if (list_.onSortChanged) {
+                    bool asc = true;
+                    bool same = i < colKeys_.size() && SortKeyShown(&asc) == colKeys_[i];
+                    list_.onSortChanged((int)i, same ? !asc : true);
+                }
+                g.lastSel = -2;
+                return true;
+            }
+            return true;
+        }
+        if (y >= g.body.bottom || x >= g.body.right) return true;
+        int k = (y - g.body.top + g.sb.Offset()) / std::max(1, g.rowH);
+        if (k < 0 || k >= n) return true;
+        setSel(k);
+        if (plan && !g.colR.empty() && x < g.colR[0] && msg == WM_LBUTTONDOWN) TogglePlanRow(k);
+        return true;
+    }
+    if (PtInRect(&conLeftRc_, pt)) { *handled = true; focus_ = Focus::Detail; return true; }
+    return false;
+}
+
+void ServicesModule::ReplayKeys(const std::wstring& keys) {
+    // Fixture only (LoadFixture is never reached with live data): drives the same OnInput path a key press does.
+    if (!fixture_) return;
+    for (auto& k : Split(keys, L',')) {
+        std::wstring u = Lower(k);
+        UINT vk = 0;
+        if (u.size() >= 2 && u[0] == L'f' && iswdigit(u[1])) vk = VK_F1 + (UINT)_wtoi(u.c_str() + 1) - 1;
+        else if (u == L"up") vk = VK_UP;
+        else if (u == L"down") vk = VK_DOWN;
+        else if (u == L"pgup") vk = VK_PRIOR;
+        else if (u == L"pgdn") vk = VK_NEXT;
+        else if (u == L"home") vk = VK_HOME;
+        else if (u == L"end") vk = VK_END;
+        else if (u == L"tab") vk = VK_TAB;
+        else if (u == L"esc") vk = VK_ESCAPE;
+        else if (u == L"space") vk = VK_SPACE;
+        else if (u == L"enter") vk = VK_RETURN;
+        else if (u.rfind(L"text:", 0) == 0) { for (wchar_t ch : k.substr(5)) OnInput(WM_CHAR, ch, 0); continue; }
+        if (vk) OnInput(WM_KEYDOWN, vk, 0);
+    }
 }
 
 // ============================================================================================

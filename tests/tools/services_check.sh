@@ -74,4 +74,10 @@ shot services-ti-on "$S" --fixture "$FIX" --ti on --plan stripped --select dmwap
 shot services-ti-list "$S" --fixture "$FIX" --ti on --select dmwappushservice
 shot services-light "$S" --fixture "$FIX" --theme light --select WSearch
 shot services-suite "$BUILD/Hadron.exe" --module services --fixture "$FIX"
+# Console layout (docs/pipeline/svcdrv/design/console.md). --keys replays keys after the fixture loads (fixture only).
+shot services-console "$S" --fixture "$FIX" --layout console --select DiagTrack
+shot services-console-plan "$S" --fixture "$FIX" --layout console --plan stripped
+shot services-console-keys "$S" --fixture "$FIX" --layout console --keys F1
+shot services-console-f9 "$S" --fixture "$FIX" --layout console --theme light --keys F2,F9
+shot services-console-suite "$BUILD/Hadron.exe" --module services --fixture "$FIX" --layout console --select DiagTrack
 echo "temp files left at $TMP (not deleted by this script)"
