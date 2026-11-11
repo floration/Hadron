@@ -19,14 +19,17 @@
 #include "core/ui/widgets.h"
 #include "modules/services/backend.h"
 #include "modules/services/cli.h"
+#include "modules/services/custom.h"
 #include "modules/services/hw.h"
 #include "modules/services/kb.h"
+#include "modules/services/measure.h"
 #include "modules/services/model.h"
 #include "modules/services/plan.h"
 #include "modules/services/store.h"
 #include "modules/services/ti.h"
 
 #include <windowsx.h>
+#include <commdlg.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -52,6 +55,7 @@ constexpr UINT WM_SVC_LOADED = WM_MODULE_BASE + 1;    // load worker -> view
 constexpr UINT WM_SVC_APPLIED = WM_MODULE_BASE + 2;   // apply worker -> view
 constexpr UINT WM_SVC_PLANNED = WM_MODULE_BASE + 3;   // plan worker -> view
 constexpr UINT WM_SVC_COMPANY = WM_MODULE_BASE + 4;   // company worker -> view
+constexpr UINT WM_SVC_FILE = WM_MODULE_BASE + 5;      // preset/measurement file worker -> view
 constexpr UINT_PTR kProgressTimer = 1;
 const wchar_t* const kViewClass = L"Hadron.services.View";
 const wchar_t* const kAppTitle = L"Services and drivers";
@@ -59,6 +63,9 @@ const wchar_t* const kAppTitle = L"Services and drivers";
 enum ClickId {
     ID_NONE = 0, ID_REFRESH, ID_UNDO_LAST, ID_TAB_SVC, ID_TAB_DRV, ID_TI, ID_SEARCH,
     ID_APPLY, ID_CANCEL_PLAN, ID_CANCEL_APPLY, ID_INT_UNDO, ID_INT_RESUME, ID_RESULT_UNDO, ID_DISMISS, ID_TI_STOP, ID_INT_DISMISS,
+    // Custom presets and measurements (docs/design/services.md "Custom presets", "Measure")
+    ID_PRESETS, ID_MEASURE, ID_BACK, ID_IMPORT, ID_EXPORT, ID_PRE_PLAN, ID_PRE_REMOVE, ID_SAVE_START, ID_SAVE, ID_SAVE_CANCEL,
+    ID_NAME, ID_MEAS_BEFORE, ID_MEAS_AFTER, ID_MEAS_HIDE, ID_PRE_ERR_HIDE,
     ID_PRESET = 100,   // + 0 first snapshot, 1 Windows stock, 2 bloat, 3 stripped, 4 minimum
     ID_SET = 200,      // + start type 2..4, + 5 for Auto (delayed)
     ID_CTL = 300,      // + 0 start, 1 stop, 2 restart
@@ -67,8 +74,9 @@ enum ClickId {
 };
 // Keyboard focus. Control = a chip or button (focusId_), reached with Tab/Shift+Tab in reading order and
 // activated with Enter or Space. Apply is never a tab stop: a plan is applied by a mouse click only.
-enum class Focus { List, Search, Detail, DetailLeft, Control };
-enum class Mode { List, Plan };
+enum class Focus { List, Search, Detail, DetailLeft, Control, Name };   // Name: the custom preset name field
+// Presets: the custom preset manager (save, open, export, import, remove). Measure: measured before/after.
+enum class Mode { List, Plan, Presets, Measure };
 
 struct Click { RECT rc; int id; };
 struct Banner {
@@ -166,13 +174,14 @@ struct Para { ParaKind kind; std::wstring label, text; COLORREF color; int side 
 
 // The request a plan was built from, so it can be rebuilt (TI toggle, refresh) with the same intent.
 struct PlanReq {
-    enum Type { None, Preset, Default, Stock, Single, Control, Undo, Resume } type = None;
+    enum Type { None, Preset, Default, Stock, Single, Control, Undo, Resume, Custom } type = None;
     int level = 0, tab = 0;
     std::wstring item;
     StartCfg target;
     int what = 0;
     int logIndex = -1;
     bool tiStop = false;   // the "Stop it" action of the TrustedInstaller-left-running banner
+    CustomPreset preset;   // Custom: the saved or imported preset (a copy: the plan never reads the live list)
 };
 
 struct LoadOut {
@@ -187,6 +196,8 @@ struct LoadOut {
     FirstRunResult fr;
     std::vector<UndoLog> logs;
     std::vector<std::wstring> logProblems;
+    std::vector<CustomPreset> presets;
+    std::vector<Measurement> measures;
 };
 
 // The second load pass (2-research: Company in a second Worker pass): each image's VERSIONINFO CompanyName, read after
@@ -209,6 +220,19 @@ struct PlanJob {
     std::wstring build, machine;
     bool tiOn = false;
     Plan out;
+};
+
+// Custom-preset and measurement file work, on fileW_: the data folder is checked again (EnsureRoot, A1) before
+// anything is written there; user files (export, import) are written CREATE_NEW and read with a size cap.
+struct FileJob {
+    enum Kind { Save, Remove, Export, Import, Measure } kind = Save;
+    Store st;
+    CustomPreset preset;
+    std::vector<CustomPreset> existing;
+    std::wstring path, phase, build, machine, plan;
+    bool ok = false, exists = false;
+    std::wstring err;
+    Measurement measure;
 };
 
 struct Job {
@@ -251,8 +275,8 @@ public:
     }
     void Shutdown() override {
         cancelApply_.store(true);
-        loadW_.Cancel(); applyW_.Cancel(); planW_.Cancel(); companyW_.Cancel();
-        loadW_.Join(); applyW_.Join(); planW_.Join(); companyW_.Join();
+        loadW_.Cancel(); applyW_.Cancel(); planW_.Cancel(); companyW_.Cancel(); fileW_.Cancel();
+        loadW_.Join(); applyW_.Join(); planW_.Join(); companyW_.Join(); fileW_.Join();
         if (hwnd_) KillTimer(hwnd_, kProgressTimer);
     }
     int RunCli(int argc, wchar_t** argv) override;
@@ -312,12 +336,40 @@ private:
     void ApplyUserTicks();
     void OnPlanned();
     static Plan BuildFrom(PlanJob& j, Backend* b, const Kb* kb);
-    void ClosePlan() { mode_ = Mode::List; planReq_ = PlanReq{}; focus_ = Focus::List; replan_ = false; }
+    void ClosePlan() { mode_ = Mode::List; planReq_ = PlanReq{}; focus_ = Focus::List; replan_ = false; saving_ = false; fromPlan_ = false; }
     void RefreshPlanList();
     void TogglePlanRow(int row);
     void StartApply();
     void OnApplied();
     void OnClickId(int id);
+
+    // custom presets and measurements (docs/design/services.md "Custom presets", "Measure")
+    // Writes to the data folder (save, remove, measure): off in fixture, read-only and refused-folder modes.
+    bool CanWriteData(std::wstring* why) const;
+    bool StartFileJob(FileJob j);   // false (and a status line) when the worker is busy or can't start
+    void OnFileDone();
+    void OpenPresets();             // the manager, from the list
+    void StartSave();               // the plan's "Save as preset": the manager with the name form
+    void DoSave();
+    void DoExport();
+    void DoImport();
+    void ImportDone(const CustomPreset* p, const std::wstring& path, const std::wstring& err);
+    void OpenCustomPlan(const CustomPreset& p);
+    void BackFromPage();            // Back/Esc on the manager or the measure page
+    void StartMeasure(const std::wstring& phase, const std::wstring& forWhat);
+    void RefreshPresetList();
+    void RefreshMeasureList();
+    const CustomPreset* SelectedPreset() const;
+    ListView& ActiveList() { return mode_ == Mode::Plan ? plist_ : mode_ == Mode::Presets ? prelist_ : mode_ == Mode::Measure ? mlist_ : list_; }
+    RECT ActiveListRc() const { return mode_ == Mode::Plan ? rcPlanList_ : mode_ == Mode::Presets ? rcPreList_ : mode_ == Mode::Measure ? rcMeasList_ : rcList_; }
+    int PageButton(HDC dc, int x, int y, const std::wstring& label, int id, bool enabled, bool primary = false);   // left to right, both layouts
+    int PageButtonR(HDC dc, int right, int y, const std::wstring& label, int id, bool enabled, bool primary = false);   // right-anchored
+    void PaintPresetsMode(HDC dc, const RECT& rc, int y, int bottom);
+    void PaintMeasureMode(HDC dc, const RECT& rc, int y, int bottom);
+    int PaintCompare(HDC dc, const RECT& r, bool draw);   // the before/after table; returns its height
+    std::vector<Para> PresetDoc(const CustomPreset& p) const;
+    std::vector<Para> MeasureDoc() const;
+    int PaintTextLines(HDC dc, const std::wstring& text, int x, int y, int right, COLORREF col, int maxLines = 0);
 
     // paint
     int TextW(HDC dc, const std::wstring& s, HFONT f) const;
@@ -481,8 +533,39 @@ private:
     bool resultControl_ = false;
     std::vector<std::wstring> notices_;
 
+    // custom presets
+    std::vector<CustomPreset> presets_;
+    std::vector<int> preV_;                    // presets_ indices in the list's order
+    ListView prelist_;
+    ConGrid conPre_;
+    int conPreSort_ = -1;
+    bool conPreAsc_ = true;
+    std::wstring preSortKey_ = L"name";
+    bool preSortAsc_ = true;
+    RECT rcPreList_{}, rcName_{};
+    TextField nameField_;
+    bool saving_ = false;                      // the manager shows the name form for pendingSave_
+    CustomPreset pendingSave_;
+    std::wstring pendingFrom_;                 // the plan's title, for the form
+    std::wstring presetErr_, presetMsg_;       // an import refusal or a failed write; what the last action did
+    bool fromPlan_ = false;                    // the manager was opened from a plan: Back returns to it
+    // measurements
+    std::vector<Measurement> measures_;
+    std::vector<int> measV_;
+    ListView mlist_;
+    ConGrid conMeas_;
+    int conMeasSort_ = -1;
+    bool conMeasAsc_ = true;
+    RECT rcMeasList_{};
+    std::wstring bootNow_;                     // this boot's start (UTC), for "Measure after"
+    bool afterHidden_ = false;                 // the "measure after" banner was dismissed for this session
+    // the file worker (preset save/remove/export/import, measurements)
+    sys::Worker fileW_;
+    FileJob fileJob_;
+
     // --screenshot / --fixture arguments applied after the fixture loads
-    std::wstring argSelect_, argPlan_, argKeys_;
+    std::wstring argSelect_, argPlan_, argKeys_, argImport_, argSave_;
+    bool argPresets_ = false, argMeasure_ = false;
 };
 
 // ============================================================================================
@@ -540,6 +623,7 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_CAPTURECHANGED:
         if (detSb_.Dragging()) detSb_.OnMouse(WM_LBUTTONUP, 0, 0, rcDetSb_);
         search_.CancelDrag();
+        nameField_.CancelDrag();
         Invalidate();
         return 0;
     case WM_TIMER:
@@ -549,6 +633,7 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SVC_APPLIED: OnApplied(); return 0;
     case WM_SVC_PLANNED: OnPlanned(); return 0;
     case WM_SVC_COMPANY: OnCompany(); return 0;
+    case WM_SVC_FILE: OnFileDone(); Invalidate(); return 0;
     case WM_RBUTTONDOWN: SetFocus(h); return 0;
     case WM_SYSKEYDOWN:   // F10 arrives as a system key; in Console it is an F-key, not the menu key
         if (w == VK_F10 && Console()) { if (OnInput(WM_KEYDOWN, w, l)) Invalidate(); return 0; }
@@ -600,6 +685,15 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
         RefreshPlanList();
     };
 
+    nameField_.placeholder = L"Name for the custom preset";
+    prelist_.onSortChanged = [this](int col, bool asc) {
+        static const wchar_t* const kKeys[] = {L"name", L"tab", L"items", L"build", L"saved"};
+        preSortKey_ = col >= 0 && col < 5 ? kKeys[col] : L"name";
+        preSortAsc_ = asc;
+        RefreshPresetList();
+    };
+    mlist_.onSortChanged = [this](int, bool) { RefreshMeasureList(); };   // ListView holds the column and direction
+
     static bool registered = false;
     if (!registered) {
         WNDCLASSEXW wc = {};
@@ -629,6 +723,13 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
     argFocus_ = ArgValue(cl.rest, L"--focus");
     argSort_ = ArgValue(cl.rest, L"--sort");   // fixture renders: <column key>[:desc], e.g. kb:desc
     argKeys_ = ArgValue(cl.rest, L"--keys");   // fixture only: keys replayed after load (Console screenshots)
+    // Fixture renders of the custom-preset and measure pages: --presets opens the manager, --import <file> imports a
+    // preset file (it only fills a plan, or the manager shows why it was refused), --save <name> opens the plan's
+    // "Save as preset" form with that name, --measure opens the measure page.
+    argImport_ = ArgValue(cl.rest, L"--import");
+    argSave_ = ArgValue(cl.rest, L"--save");
+    argPresets_ = HasArg(cl.rest, L"--presets");
+    argMeasure_ = HasArg(cl.rest, L"--measure");
     readOnly_ = HasArg(cl.rest, L"--readonly");
     std::wstring dataDir = ArgValue(cl.rest, L"--data-dir");
     fixture_ = !cl.screenshot.empty() || cl.selftest || !cl.fixture.empty();
@@ -753,6 +854,8 @@ void ServicesModule::StartLoad() {
                     reload = true;
                 if (reload) { out->logProblems.clear(); out->logs = LoadLogs(st, &out->logProblems); }
             }
+            out->presets = LoadCustomPresets(st, &out->logProblems);
+            out->measures = LoadMeasurements(st, &out->logProblems);
         }
         out->ok = true;
     });
@@ -791,7 +894,14 @@ void ServicesModule::OnLoaded() {
     if (!o.fr.note.empty()) notices_.push_back(o.fr.note);
     if (o.fr.wrote && !o.fr.corrupt)
         notices_.push_back(L"Recorded this PC's start types in first.txt, with a recovery folder and zip, before any change.");
-    for (auto& p : o.logProblems) notices_.push_back(L"Undo log skipped: " + p);
+    for (auto& p : o.logProblems)
+        notices_.push_back(p.rfind(L"custom preset", 0) == 0 || p.rfind(L"measurement", 0) == 0 || p.rfind(L"presets", 0) == 0
+                               ? p : L"Undo log skipped: " + p);
+    presets_ = std::move(o.presets);
+    measures_ = std::move(o.measures);
+    bootNow_ = BootTimeUtc();
+    RefreshPresetList();
+    RefreshMeasureList();
     auto keep = std::move(writeAccess_);
     TakeData(std::move(o.items), o.hw, o.build, o.machine);
     writeAccess_ = std::move(keep);
@@ -899,7 +1009,11 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
     first_ = std::move(fx.first);
     store_.SetRoot(fixtureDir_);
     logs_ = LoadLogs(store_, nullptr);
+    presets_ = LoadCustomPresets(store_, &fx.problems);
+    measures_ = LoadMeasurements(store_, &fx.problems);
     store_.SetRoot(L"");   // read once; fixture mode never writes
+    RefreshPresetList();
+    RefreshMeasureList();
     writesOff_ = true;
     for (auto& p : fx.problems) notices_.push_back(p);
     std::vector<SvcItem> items;
@@ -931,8 +1045,20 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
         else if (argPlan_ == L"undo-last" && FindUndoable(logs_) >= 0) { r.type = PlanReq::Undo; r.logIndex = FindUndoable(logs_); }
         else if (argPlan_ == L"resume" && FindInterrupted(logs_) >= 0) { r.type = PlanReq::Resume; r.logIndex = FindInterrupted(logs_); }
         else if (argPlan_ == L"ti-stop") { r.type = PlanReq::Control; r.item = L"TrustedInstaller"; r.what = 1; r.tiStop = true; }
+        else if (argPlan_.rfind(L"custom:", 0) == 0) {   // a saved custom preset of the fixture, by name
+            for (auto& cp : presets_) if (IEq(cp.name, argPlan_.substr(7))) { r.type = PlanReq::Custom; r.preset = cp; }
+        }
         if (r.type != PlanReq::None) OpenPlan(r);
     }
+    if (!argImport_.empty()) {   // the same parser and plan path as the Import button, without its dialog
+        CustomPreset cp;
+        std::wstring e;
+        bool ok = ImportPresetFile(argImport_, &cp, &e);
+        ImportDone(ok ? &cp : nullptr, argImport_, e);
+    }
+    if (!argSave_.empty() && mode_ == Mode::Plan) { StartSave(); nameField_.SetText(argSave_); }
+    if (argPresets_ && mode_ == Mode::List) OpenPresets();
+    if (argMeasure_ && mode_ == Mode::List) { mode_ = Mode::Measure; focus_ = Focus::List; }
     if (!argFocus_.empty()) {   // design screenshots: show a focus state without a real keyboard
         shotFocus_ = true;
         if (argFocus_ == L"list") focus_ = Focus::List;
@@ -1201,6 +1327,7 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
         case PlanReq::Resume:
             if (b && r.logIndex >= 0 && r.logIndex < (int)j.logs.size()) p = BuildResume(j.logs[r.logIndex], *b, j.items, c);
             break;
+        case PlanReq::Custom: p = BuildCustom(r.preset, j.items, c); break;
         case PlanReq::None: break;
     }
     if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, j.tiOn, j.items);   // re-runs the dependency check
@@ -1217,8 +1344,10 @@ void ServicesModule::OpenPlan(const PlanReq& r, bool rebuild) {
         keepPlanSel_ = plan_.rows[plist_.Selected()].name;   // the rebuilt plan opens on the same row
     }
     planReq_ = r;
-    mode_ = Mode::Plan;
-    if (!rebuild) focus_ = Focus::List;
+    // A rebuild (reload, TI toggle) keeps the page the user is on: the manager or the measure page opened from this
+    // plan returns to it with Back.
+    if (!rebuild || mode_ == Mode::List) mode_ = Mode::Plan;
+    if (!rebuild) { focus_ = Focus::List; saving_ = false; fromPlan_ = false; }
     detSb_.SetOffset(0);
     if (planBusy_) {   // the running build finishes first, then this one
         replanRebuild_ = replan_ ? (replanRebuild_ && rebuild) : rebuild;
@@ -1267,7 +1396,7 @@ void ServicesModule::OnPlanned() {
             if (mode_ == Mode::Plan && planReq_.type != PlanReq::None) { OpenPlan(planReq_, replanRebuild_); return; }
         }
     }
-    if (mode_ != Mode::Plan) return;   // closed while it was being built
+    if (planReq_.type == PlanReq::None) return;   // closed while it was being built
     ApplyUserTicks();
     RefreshPlanList();
     // Start on the item selected in the list when the plan has it, so the row detail answers "what about this one?".
@@ -1473,6 +1602,36 @@ void ServicesModule::OnClickId(int id) {
         else StartLoad();
         return;
     }
+    if (id == ID_PRESETS) { OpenPresets(); return; }
+    if (id == ID_MEASURE) { mode_ = Mode::Measure; focus_ = Focus::List; detSb_.SetOffset(0); fromPlan_ = false; return; }
+    if (id == ID_BACK) { BackFromPage(); return; }
+    if (id == ID_IMPORT) { DoImport(); return; }
+    if (id == ID_EXPORT) { DoExport(); return; }
+    if (id == ID_SAVE_START) { StartSave(); return; }
+    if (id == ID_SAVE) { DoSave(); return; }
+    if (id == ID_SAVE_CANCEL) { saving_ = false; if (fromPlan_ && planReq_.type != PlanReq::None) BackFromPage(); else focus_ = Focus::List; return; }
+    if (id == ID_NAME) { focus_ = Focus::Name; return; }
+    if (id == ID_PRE_ERR_HIDE) { presetErr_.clear(); return; }
+    if (id == ID_PRE_PLAN) { if (const CustomPreset* cp = SelectedPreset()) OpenCustomPlan(*cp); return; }
+    if (id == ID_PRE_REMOVE) {
+        const CustomPreset* cp = SelectedPreset();
+        std::wstring why;
+        if (!cp) return;
+        if (!CanWriteData(&why)) { presetErr_ = L"Remove is off. " + why; return; }
+        FileJob j;
+        j.kind = FileJob::Remove;
+        j.st = store_;
+        j.preset = *cp;
+        StartFileJob(std::move(j));
+        return;
+    }
+    if (id == ID_MEAS_BEFORE || id == ID_MEAS_AFTER) {
+        // From a plan, the "before" says which plan it was taken for.
+        std::wstring forWhat = id == ID_MEAS_AFTER ? std::wstring() : (planReq_.type != PlanReq::None ? plan_.title : std::wstring(L"no plan named"));
+        StartMeasure(id == ID_MEAS_BEFORE ? L"before" : L"after", forWhat);
+        return;
+    }
+    if (id == ID_MEAS_HIDE) { afterHidden_ = true; return; }
     if (id == ID_TI_STOP) {
         PlanReq r;
         r.type = PlanReq::Control;
@@ -1492,8 +1651,8 @@ bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (Console()) { bool handled = false; bool r = OnConsoleInput(msg, w, l, &handled); if (handled) return r; }
     const bool dbl = msg == WM_LBUTTONDBLCLK;   // the second click of a double-click: selects, never toggles again
     PaintCtx c = PCtx();
-    ListView& lv = mode_ == Mode::Plan ? plist_ : list_;
-    RECT lrc = mode_ == Mode::Plan ? rcPlanList_ : rcList_;
+    ListView& lv = ActiveList();
+    RECT lrc = ActiveListRc();
     auto syncSel = [&]() {
         if (mode_ == Mode::List) {
             int k = list_.Selected();
@@ -1509,6 +1668,15 @@ bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         POINT mp{mx, my};
         if (search_.Dragging() && (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP)) {
             search_.OnMouse(hwnd_, msg, mx, my, rcSearch_, c);
+            return true;
+        }
+        if (nameField_.Dragging() && (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP)) {
+            nameField_.OnMouse(hwnd_, msg, mx, my, rcName_, c);
+            return true;
+        }
+        if (mode_ == Mode::Presets && saving_ && msg != WM_MOUSEMOVE && msg != WM_LBUTTONUP && PtInRect(&rcName_, mp)) {
+            focus_ = Focus::Name;
+            nameField_.OnMouse(hwnd_, msg, mx, my, rcName_, c);
             return true;
         }
         if (mode_ == Mode::List && msg != WM_MOUSEMOVE && msg != WM_LBUTTONUP && PtInRect(&rcSearch_, mp)) {
@@ -1536,9 +1704,15 @@ bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
             return true;
         }
         if (focus_ == Focus::Control && w != VK_ESCAPE && !(ctrl && w == 'F')) return false;   // keys don't leak into the list
+        if (focus_ == Focus::Name && mode_ == Mode::Presets && saving_) {   // the preset name field
+            if (w == VK_RETURN) { DoSave(); return true; }   // Save writes a preset file; it changes no service
+            if (w == VK_ESCAPE) { OnClickId(ID_SAVE_CANCEL); return true; }
+            return nameField_.OnKey(w, hwnd_);
+        }
         if (ctrl && w == 'F' && mode_ == Mode::List) { focus_ = Focus::Search; return true; }
         if (w == VK_ESCAPE) {
             if (mode_ == Mode::Plan && !applyW_.Running()) { ClosePlan(); return true; }
+            if (mode_ == Mode::Presets || mode_ == Mode::Measure) { BackFromPage(); return true; }
             if (!search_.Text().empty()) { search_.SetText(L""); Refilter(); return true; }
             if (focus_ != Focus::List) { focus_ = Focus::List; return true; }
             return false;
@@ -1567,15 +1741,20 @@ bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         }
         if (mode_ == Mode::Plan && w == VK_SPACE) { TogglePlanRow(plist_.Selected()); return true; }
         if (mode_ == Mode::Plan && w == VK_RETURN) return false;   // never apply from a key press
+        if (mode_ == Mode::Presets && w == VK_RETURN && focus_ == Focus::List) { OnClickId(ID_PRE_PLAN); return true; }   // opens a plan only
         bool r = lv.OnKey(w, lrc, c);
-        if (r) { syncSel(); detSb_.SetOffset(mode_ == Mode::Plan ? 0 : detSb_.Offset()); }
+        if (r) { syncSel(); detSb_.SetOffset(mode_ != Mode::List ? 0 : detSb_.Offset()); }
         return r;
     }
     if (msg == WM_CHAR) {
         wchar_t ch = (wchar_t)w;
         if (swallowChar_) { swallowChar_ = false; return false; }
+        if (focus_ == Focus::Name && mode_ == Mode::Presets && saving_) {
+            if (ch == 0x0D || ch == 0x1B || ch == 0x09) return false;
+            return nameField_.OnChar(ch);
+        }
         if (focus_ == Focus::Control && ch == L' ') return false;   // typing anything else still goes to the filter
-        if (mode_ == Mode::Plan) return false;
+        if (mode_ != Mode::List) return false;
         if (ch == 0x09 || ch == 0x1B || ch == 0x0D || ch == 0x06) return false;
         if (focus_ != Focus::Search) {
             if (ch < 0x20 || ch == 0x7F) return false;
@@ -1635,6 +1814,9 @@ bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
             int boxW = Sc(48);
             if (r && !dbl && x < lrc.left + boxW && y > lrc.top + Sc(Console() ? 24 : 32)) TogglePlanRow(lv.Selected());
             if (lv.Selected() != before) detSb_.SetOffset(0);
+        } else if (mode_ != Mode::List) {
+            if (lv.Selected() != before) detSb_.SetOffset(0);
+            if (mode_ == Mode::Presets && dbl && r) OnClickId(ID_PRE_PLAN);   // a double-click opens its plan
         } else {
             syncSel();
         }
@@ -1741,6 +1923,16 @@ std::vector<Banner> ServicesModule::Banners() const {
         else v.push_back({t, 1, {}});
     }
     if (tiLeft_) v.push_back({TiLeftText(logs_, items_), 1, {{ID_TI_STOP, L"Stop it"}}});
+    if (!fixture_ && !afterHidden_ && mode_ != Mode::Measure && !bootNow_.empty()) {
+        int b = PendingBefore(measures_, bootNow_);
+        if (b >= 0) {
+            const Measurement& m = measures_[(size_t)b];
+            v.push_back({L"You measured \"before\" on " + m.created.substr(0, 16) + L" UTC (" + m.plan + L"), " + std::to_wstring(m.uptimeMin) +
+                             L" minutes after boot. This PC has restarted since. For a fair \"after\", measure at the same time after boot "
+                             L"with the same apps open.",
+                         0, {{ID_MEAS_AFTER, L"Measure after"}, {ID_MEASURE, L"Compare"}, {ID_MEAS_HIDE, L"Dismiss"}}});
+        }
+    }
     if (haveResult_ && !applyW_.Running()) {
         const ApplyResult& r = result_;
         std::wstring t;
@@ -1863,7 +2055,7 @@ int ServicesModule::PaintBanners(HDC dc, const RECT& rc, int y0) {
             int bw = TextW(dc, it->second, f.caption) + Sc(26);
             RECT ar{ax - bw, y + (h - bh) / 2, ax, y + (h - bh) / 2 + bh};
             bool hot = hoverId_ == it->first;
-            bool primary = it->first != ID_DISMISS && it->first != ID_INT_DISMISS;
+            bool primary = it->first != ID_DISMISS && it->first != ID_INT_DISMISS && it->first != ID_MEAS_HIDE && it->first != ID_MEASURE;
             COLORREF fill = primary ? (hot ? (p.hc ? p.acc : HoverAway(p.acc, p.onAcc, 0.16)) : p.acc) : (hot ? p.chipHot : p.chip);
             RoundFill(dc, ar, Sc(6), fill);
             ui::DrawText(dc, it->second, ar, f.caption, primary ? p.onAcc : (hot ? p.chipHotText : p.chipText),
@@ -2283,6 +2475,8 @@ void ServicesModule::PaintPage(HDC dc, const RECT& rc) {
     bool canApply = CanApply(&dummy);
     right -= Button(dc, right, by, L"Undo last apply", ID_UNDO_LAST, false, undoable_ >= 0 && canApply && mode_ == Mode::List) + Sc(10);
     right -= Button(dc, right, by, L"Refresh", ID_REFRESH, false, !fixture_ && !busy && mode_ == Mode::List) + Sc(10);
+    right -= Button(dc, right, by, L"Measure", ID_MEASURE, false, loaded_ && mode_ == Mode::List) + Sc(10);
+    right -= Button(dc, right, by, L"Custom presets", ID_PRESETS, false, loaded_ && mode_ == Mode::List) + Sc(10);
     int nSvc = 0, nDrv = 0;
     for (auto& s : items_) (IsDriverType(s.type) ? nDrv : nSvc)++;
     std::wstring sub;
@@ -2307,6 +2501,8 @@ void ServicesModule::PaintPage(HDC dc, const RECT& rc) {
     }
     int y = PaintBanners(dc, rc, Sc(con ? 36 : 76));
     if (mode_ == Mode::Plan) PaintPlanMode(dc, rc, y);
+    else if (mode_ == Mode::Presets) PaintPresetsMode(dc, rc, y, rc.bottom - pad);
+    else if (mode_ == Mode::Measure) PaintMeasureMode(dc, rc, y, rc.bottom - pad);
     else PaintListMode(dc, rc, y);
     BuildTabStops(dc);
 }
@@ -2412,6 +2608,7 @@ int ServicesModule::FocusTarget() const {
         case Focus::Detail: return ID_FOCUS_DETAIL;
         case Focus::DetailLeft: return ID_FOCUS_DETAIL_L;
         case Focus::Control: return focusId_;
+        case Focus::Name: return ID_NAME;
     }
     return ID_FOCUS_LIST;
 }
@@ -2421,6 +2618,7 @@ void ServicesModule::FocusTo(int id) {
     else if (id == ID_SEARCH) focus_ = Focus::Search;
     else if (id == ID_FOCUS_DETAIL) focus_ = Focus::Detail;
     else if (id == ID_FOCUS_DETAIL_L) focus_ = Focus::DetailLeft;
+    else if (id == ID_NAME) focus_ = Focus::Name;
     else { focus_ = Focus::Control; focusId_ = id; }
 }
 
@@ -2444,7 +2642,7 @@ void ServicesModule::BuildTabStops(HDC dc) {
     tabStops_.clear();
     for (auto& ck : clicks_)
         if (ck.id != ID_APPLY) tabStops_.push_back(ck);
-    RECT lr = mode_ == Mode::Plan ? rcPlanList_ : rcList_;
+    RECT lr = ActiveListRc();
     if (lr.right > lr.left) tabStops_.push_back({lr, ID_FOCUS_LIST});
     if (Console() && conLeftRc_.right > conLeftRc_.left) tabStops_.push_back({conLeftRc_, ID_FOCUS_DETAIL_L});
     if (rcDetail_.right > rcDetail_.left) tabStops_.push_back({rcDetail_, ID_FOCUS_DETAIL});
@@ -2668,6 +2866,17 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
         y += lh;
     }
     y += Sc(4);
+    if (!ctl && (plan_.kind == PlanKind::Preset || plan_.kind == PlanKind::Single) && !planBusy_) {
+        // A custom preset from these ticks, and a "before" measurement taken for this plan.
+        std::wstring dw;
+        int bx = pad;
+        bx += PageButton(dc, bx, y, L"Save ticks as custom preset\u2026", ID_SAVE_START, n > 0 && !applyW_.Running()) + Sc(6);
+        bx += PageButton(dc, bx, y, L"Measure before", ID_MEAS_BEFORE, CanWriteData(&dw) && !fileW_.Running()) + Sc(10);
+        RECT hr{bx, y, rc.right - pad, y + Sc(26)};
+        ui::DrawText(dc, L"Measure before: RAM, commit and process counts now, to compare after a restart.", hr, f.caption, p.faint,
+                     DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        y += Sc(32);
+    }
     for (auto& note : plan_.notes) {
         if (empty && note == plan_.emptyText) continue;   // said once, in the list (mini-design 9)
         // Up to three lines each; a cut note ends in an ellipsis (the full text is in the plan's detail and log).
@@ -2739,6 +2948,8 @@ enum ConAct {
     CA_SET,                    // + 0 Auto, 1 Auto (delayed), 2 Manual, 3 Disabled
     CA_CTL = CA_SET + 4,       // + 0 start, 1 stop, 2 restart
     CA_BACK = CA_CTL + 3, CA_TICK, CA_CANCEL,
+    // custom presets and measurements
+    CA_PRESETS, CA_MEASURE, CA_SAVEPRESET, CA_MEAS_BEFORE, CA_MEAS_AFTER, CA_PRE_PLAN, CA_EXPORT, CA_IMPORT, CA_REMOVE, CA_SAVE,
 };
 
 // A filled block with text on it (the selection, tags): the ink is core's text-on-fill rule (ui::OnFill: white
@@ -2877,11 +3088,36 @@ int ServicesModule::ConButton(HDC dc, int x, int y, const std::wstring& label, i
 std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
     std::vector<FKey> k;
     bool busy = applyW_.Running() || loadW_.Running();
+    std::wstring dw;
+    const bool canData = CanWriteData(&dw) && !fileW_.Running();
+    if (mode_ == Mode::Presets) {
+        const CustomPreset* cp = SelectedPreset();
+        k.push_back({L"F1", conHelp_ ? L"Close" : L"Keys", L"Keys", CA_HELP, true, conHelp_});
+        if (saving_) k.push_back({L"Enter", L"Save", L"Save", CA_SAVE, canData && !nameField_.Text().empty(), false});
+        else k.push_back({L"F2", L"Open plan", L"Plan", CA_PRE_PLAN, cp != nullptr && loaded_ && !applyW_.Running(), false});
+        k.push_back({L"F3", L"Export", L"Exp", CA_EXPORT, cp != nullptr && !fileW_.Running(), false});
+        k.push_back({L"F4", L"Import", L"Imp", CA_IMPORT, !fileW_.Running() && loaded_, false});
+        k.push_back({L"F5", L"Remove", L"Rem", CA_REMOVE, cp != nullptr && canData, false});
+        k.push_back({L"Esc", L"Back", L"Back", CA_BACK, true, false});
+        return k;
+    }
+    if (mode_ == Mode::Measure) {
+        k.push_back({L"F1", conHelp_ ? L"Close" : L"Keys", L"Keys", CA_HELP, true, conHelp_});
+        k.push_back({L"F2", L"Measure before", L"Before", CA_MEAS_BEFORE, canData, false});
+        k.push_back({L"F3", L"Measure after", L"After", CA_MEAS_AFTER, canData && !bootNow_.empty() && PendingBefore(measures_, bootNow_) >= 0, false});
+        k.push_back({L"Esc", L"Back", L"Back", CA_BACK, true, false});
+        return k;
+    }
     if (mode_ == Mode::Plan) {
         k.push_back({L"F1", conHelp_ ? L"Close" : L"Keys", L"Keys", CA_HELP, true, conHelp_});
         bool ctl = plan_.kind == PlanKind::Control;
         k.push_back({L"Spc", L"Tick", L"Tick", CA_TICK, !ctl && !plan_.rows.empty(), false});
         k.push_back({L"F6", tiOn_ ? L"TI toggle: ON" : L"TI toggle: off", tiOn_ ? L"TI ON" : L"TI off", CA_TI, !applyW_.Running(), tiOn_});
+        if (!ctl) {
+            bool startType = (plan_.kind == PlanKind::Preset || plan_.kind == PlanKind::Single) && !planBusy_;
+            k.push_back({L"F7", L"Save as preset", L"Save", CA_SAVEPRESET, startType && plan_.Included() > 0 && !applyW_.Running(), false});
+            k.push_back({L"F8", L"Measure before", L"Before", CA_MEAS_BEFORE, startType && canData, false});
+        }
         if (applyW_.Running()) k.push_back({L"Esc", L"Stop after this item", L"Stop", CA_CANCEL, !cancelApply_.load(), false});
         else k.push_back({L"Esc", L"Cancel", L"Cancel", CA_CANCEL, true, false});
         return k;
@@ -2931,6 +3167,8 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
     k.push_back({L"F10", L"Stripped", L"Strip", CA_PRESET + 3, canPlan && kbOk_, false});
     k.push_back({L"F11", L"Minimum", L"Min", CA_PRESET + 4, canPlan && kbOk_, false});
     k.push_back({L"^Z", L"Undo last", L"Undo", CA_UNDO, undoable_ >= 0 && canApply, false});
+    k.push_back({L"F12", L"Custom presets", L"Custom", CA_PRESETS, loaded_, false});
+    k.push_back({L"^M", L"Measure", L"Meas", CA_MEASURE, loaded_, false});
     return k;
 }
 
@@ -2941,7 +3179,8 @@ void ServicesModule::PaintFKeyBar(HDC dc, const RECT& r) {
     HLine(dc, r.left, r.right, r.top, p.rule);
     std::vector<FKey> keys = ConsoleKeys();
     const int gap = Sc(4), pad = Sc(8);
-    std::wstring tag = mode_ == Mode::Plan ? L"PLAN" : conItemBar_ ? L"ITEM" : L"LIST";
+    std::wstring tag = mode_ == Mode::Plan ? L"PLAN" : mode_ == Mode::Presets ? L"PRESETS" : mode_ == Mode::Measure ? L"MEASURE"
+                       : conItemBar_ ? L"ITEM" : L"LIST";
     std::wstring hint;
     if (mode_ == Mode::Plan) hint = plan_.rows.empty() && !planBusy_ ? L"Nothing to apply" : L"No key applies: click Apply";
     else if (conItemBar_) {
@@ -3032,7 +3271,8 @@ int ServicesModule::PaintConsoleBanners(HDC dc, const RECT& rc, int y0) {
         for (auto it = b.actions.rbegin(); it != b.actions.rend(); ++it) {
             int bw = TextW(dc, it->second, f.caption) + Sc(14);
             ax -= bw;
-            ConButton(dc, ax, y + (h - Sc(18)) / 2, it->second, it->first, false, true, it->first != ID_DISMISS && it->first != ID_INT_DISMISS);
+            ConButton(dc, ax, y + (h - Sc(18)) / 2, it->second, it->first, false, true,
+                      it->first != ID_DISMISS && it->first != ID_INT_DISMISS && it->first != ID_MEAS_HIDE && it->first != ID_MEASURE);
             ax -= Sc(6);
         }
         y += h + Sc(3);
@@ -3073,6 +3313,8 @@ void ServicesModule::PaintConsole(HDC dc, const RECT& rc) {
     int y = PaintConsoleBanners(dc, rc, Sc(32));
     int bottom = bar.top - Sc(6);
     if (mode_ == Mode::Plan) PaintConsolePlan(dc, rc, y, bottom);
+    else if (mode_ == Mode::Presets) PaintPresetsMode(dc, rc, y, bottom);
+    else if (mode_ == Mode::Measure) PaintMeasureMode(dc, rc, y, bottom);
     else PaintConsoleList(dc, rc, y, bottom);
 }
 
@@ -3465,9 +3707,19 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
         {L"F6", L"TrustedInstaller toggle, this session only"}, {L"F7", L"Plan: Default, as first seen (1st snapshot)"},
         {L"F8", L"Plan: Default, Windows stock (no data for this build yet)"}, {L"F9", L"Plan: Pure bloat removal"},
         {L"F10", L"Plan: Stripped"}, {L"F11", L"Plan: Minimum"}, {L"Ctrl+Z", L"Plan: undo the last apply"},
+        {L"F12", L"Custom presets: save, open, export, import"}, {L"Ctrl+M", L"Measure: before/after, owner-measured"},
         {L"Up Down", L"Move; PgUp PgDn Home End"}};
+    static const KV kPresets[] = {
+        {L"F2 Enter", L"Open the selected preset as a plan (never applies)"}, {L"F3", L"Export it to a new text file (Browse)"},
+        {L"F4", L"Import a preset file (Browse); it only fills a plan"}, {L"F5", L"Remove it from the list (its file stays)"},
+        {L"Enter", L"In the name field: save the plan's ticks"}, {L"Esc", L"Back"}, {L"Up Down", L"Move; PgUp PgDn Home End"},
+        {L"Tab", L"Every control in reading order; Shift+Tab back"}};
+    static const KV kMeasure[] = {
+        {L"F2", L"Measure before: RAM, commit, process counts now"}, {L"F3", L"Measure after: once the PC has restarted"},
+        {L"Esc", L"Back"}, {L"Up Down", L"Move in the recorded list"}, {L"Tab", L"Every control in reading order; Shift+Tab back"}};
     static const KV kPlan[] = {
         {L"Space", L"Tick or untick the row (or click [x])"}, {L"F6", L"TrustedInstaller toggle; rebuilds the plan, keeps your ticks"},
+        {L"F7", L"Save the ticked rows as a custom preset"}, {L"F8", L"Measure before (to compare after a restart)"},
         {L"Esc", L"Cancel the plan"}, {L"Enter", L"Nothing: no key applies"}, {L"Up Down", L"Move; PgUp PgDn Home End"},
         {L"Tab", L"Every control in reading order; Shift+Tab back"}};
     static const KV kCols[] = {
@@ -3482,11 +3734,13 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
     std::wstring stock = StockKnown() ? L"Plan: Default, Windows stock" : L"Plan: Default, Windows stock (no data for this build yet)";
     std::vector<KV> a, b;
     if (mode_ == Mode::Plan) a.assign(std::begin(kPlan), std::end(kPlan));
+    else if (mode_ == Mode::Presets) a.assign(std::begin(kPresets), std::end(kPresets));
+    else if (mode_ == Mode::Measure) a.assign(std::begin(kMeasure), std::end(kMeasure));
     else a.assign(std::begin(kList), std::end(kList));
     for (auto& kv : a) if (wcscmp(kv.first, L"F8") == 0) kv.second = stock.c_str();
     b.assign(std::begin(kCols), std::end(kCols));
     // Tab sits in the right column: the left one is full at 800 px of height
-    if (mode_ != Mode::Plan) {
+    if (mode_ == Mode::List) {
         b.push_back({L"Tab", L"Every control in reading order: banners, tabs, filter, list, detail columns, F-key cells"});
         b.push_back({L"", L"Shift+Tab back; Enter or Space activates the focused control (never Apply)"});
     }
@@ -3698,7 +3952,7 @@ void ServicesModule::OnConsoleAction(int act) {
         case CA_TAB: if (!plan) { conItemBar_ = false; OnClickId(tab_ == TAB_SERVICES ? ID_TAB_DRV : ID_TAB_SVC); } return;
         case CA_FILTER: if (!plan) { conItemBar_ = false; focus_ = Focus::Search; search_.SelectAll(); } return;
         case CA_ITEM: if (!plan && Selected()) conItemBar_ = !conItemBar_; return;
-        case CA_BACK: conItemBar_ = false; return;
+        case CA_BACK: conItemBar_ = false; if (mode_ == Mode::Presets || mode_ == Mode::Measure) BackFromPage(); return;
         case CA_REFRESH: if (!plan && !fixture_ && !applyW_.Running() && !loadW_.Running()) StartLoad(); return;
         case CA_TI: if (!applyW_.Running()) OnClickId(ID_TI); return;
         case CA_UNDO: {
@@ -3707,6 +3961,23 @@ void ServicesModule::OnConsoleAction(int act) {
             return;
         }
         case CA_TICK: if (plan && plan_.kind != PlanKind::Control) TogglePlanRow(plist_.Selected()); return;
+        case CA_PRESETS: if (mode_ == Mode::List) { conItemBar_ = false; OnClickId(ID_PRESETS); } return;
+        case CA_MEASURE: if (mode_ == Mode::List) { conItemBar_ = false; OnClickId(ID_MEASURE); } return;
+        case CA_SAVEPRESET: {
+            for (auto& k : ConsoleKeys()) if (k.act == act && k.enabled) StartSave();
+            return;
+        }
+        case CA_MEAS_BEFORE: case CA_MEAS_AFTER: case CA_PRE_PLAN: case CA_EXPORT: case CA_IMPORT: case CA_REMOVE: case CA_SAVE: {
+            static const std::pair<int, int> kIds[] = {{CA_MEAS_BEFORE, ID_MEAS_BEFORE}, {CA_MEAS_AFTER, ID_MEAS_AFTER},
+                                                       {CA_PRE_PLAN, ID_PRE_PLAN}, {CA_EXPORT, ID_EXPORT}, {CA_IMPORT, ID_IMPORT},
+                                                       {CA_REMOVE, ID_PRE_REMOVE}, {CA_SAVE, ID_SAVE}};
+            for (auto& k : ConsoleKeys()) {   // the bar's own enable rules
+                if (k.act != act || !k.enabled) continue;
+                for (auto& m : kIds) if (m.first == act) OnClickId(m.second);
+                return;
+            }
+            return;
+        }
         case CA_CANCEL:
             // During an apply, Esc stops it after the current item (the banner's Cancel); cancelling is the safe way.
             if (applyW_.Running()) { if (!cancelApply_.load()) OnClickId(ID_CANCEL_APPLY); }
@@ -3736,9 +4007,21 @@ void ServicesModule::OnConsoleAction(int act) {
 
 bool ServicesModule::OnConsoleKey(UINT vk) {
     int act = CA_NONE;
-    if (mode_ == Mode::Plan) {
+    if (mode_ == Mode::Presets) {
+        if (vk == VK_F1) act = CA_HELP;
+        else if (vk == VK_F2) act = CA_PRE_PLAN;
+        else if (vk == VK_F3) act = CA_EXPORT;
+        else if (vk == VK_F4) act = CA_IMPORT;
+        else if (vk == VK_F5) act = CA_REMOVE;
+    } else if (mode_ == Mode::Measure) {
+        if (vk == VK_F1) act = CA_HELP;
+        else if (vk == VK_F2) act = CA_MEAS_BEFORE;
+        else if (vk == VK_F3) act = CA_MEAS_AFTER;
+    } else if (mode_ == Mode::Plan) {
         if (vk == VK_F1) act = CA_HELP;
         else if (vk == VK_F6) act = CA_TI;
+        else if (vk == VK_F7) act = CA_SAVEPRESET;
+        else if (vk == VK_F8) act = CA_MEAS_BEFORE;
     } else if (conItemBar_) {
         // Inside the item bar F1..F7 are the item keys the bar shows (so F1 there is Auto, not help).
         static const int kItem[] = {CA_SET + 0, CA_SET + 1, CA_SET + 2, CA_SET + 3, CA_CTL + 0, CA_CTL + 1, CA_CTL + 2};
@@ -3756,6 +4039,7 @@ bool ServicesModule::OnConsoleKey(UINT vk) {
             case VK_F9: act = CA_PRESET + 2; break;
             case VK_F10: act = CA_PRESET + 3; break;
             case VK_F11: act = CA_PRESET + 4; break;
+            case VK_F12: act = CA_PRESETS; break;
         }
     }
     if (act == CA_NONE) return false;
@@ -3766,9 +4050,12 @@ bool ServicesModule::OnConsoleKey(UINT vk) {
 bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled) {
     *handled = false;
     const bool plan = mode_ == Mode::Plan;
-    ConGrid& g = plan ? conPlan_ : conList_;
-    ListView& lv = plan ? plist_ : list_;
-    const int n = plan ? (int)plan_.rows.size() : (int)V_.size();
+    const bool page = mode_ == Mode::Presets || mode_ == Mode::Measure;   // the custom-preset manager, the measure page
+    ConGrid& g = plan ? conPlan_ : mode_ == Mode::Presets ? conPre_ : mode_ == Mode::Measure ? conMeas_ : conList_;
+    ListView& lv = ActiveList();
+    const int n = plan ? (int)plan_.rows.size() : mode_ == Mode::Presets ? (int)preV_.size() : mode_ == Mode::Measure ? (int)measV_.size()
+                                                                                                  : (int)V_.size();
+    if (focus_ == Focus::Name && msg == WM_KEYDOWN && !(w >= VK_F1 && w <= VK_F12)) return false;   // the name field: shared handler
     auto setSel = [&](int k) {
         if (n <= 0) return false;
         k = std::clamp(k, 0, n - 1);
@@ -3778,7 +4065,7 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
         lv.Select(k);
         detSb_.SetOffset(0);
         conLeftSb_.SetOffset(0);
-        if (!plan) { selName_ = items_[V_[k]].name; ConsoleStatus(); }
+        if (!plan && !page) { selName_ = items_[V_[k]].name; ConsoleStatus(); }
         return true;
     };
 
@@ -3790,9 +4077,12 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
         }
         if (w == VK_ESCAPE && (conItemBar_ || conHelp_)) { conItemBar_ = conHelp_ = false; *handled = true; return true; }
         if (w == VK_ESCAPE && applyW_.Running()) { *handled = true; OnConsoleAction(CA_CANCEL); return true; }
-        if (ctrl && w == 'Z' && !plan && focus_ != Focus::Search) { *handled = true; OnConsoleAction(CA_UNDO); return true; }
+        if (ctrl && w == 'Z' && !plan && !page && focus_ != Focus::Search) { *handled = true; OnConsoleAction(CA_UNDO); return true; }
+        if (ctrl && w == 'M' && !plan && !page && focus_ != Focus::Search) { *handled = true; OnConsoleAction(CA_MEASURE); return true; }
+        if (w == VK_ESCAPE && page && focus_ != Focus::Name) { *handled = true; BackFromPage(); return true; }
+        if (w == VK_RETURN && mode_ == Mode::Presets && focus_ == Focus::List) { *handled = true; OnConsoleAction(CA_PRE_PLAN); return true; }
         bool nav = w == VK_UP || w == VK_DOWN || w == VK_PRIOR || w == VK_NEXT || w == VK_HOME || w == VK_END;
-        bool fromSearch = focus_ == Focus::Search && !plan && w != VK_HOME && w != VK_END;
+        bool fromSearch = focus_ == Focus::Search && !plan && !page && w != VK_HOME && w != VK_END;
         if (nav && (focus_ == Focus::List || fromSearch)) {
             *handled = true;
             int sel = lv.Selected(), page = std::max(1, g.Rows() - 1);
@@ -3873,7 +4163,15 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
             for (size_t i = 0; i < g.colL.size(); i++) {
                 if (x < g.colL[i] || x >= g.colR[i]) continue;
                 if (plan) ConsoleSortPlan((int)i);
-                else if (list_.onSortChanged) {
+                else if (mode_ == Mode::Presets) {
+                    conPreAsc_ = conPreSort_ == (int)i ? !conPreAsc_ : true;
+                    conPreSort_ = (int)i;
+                    if (prelist_.onSortChanged) prelist_.onSortChanged((int)i, conPreAsc_);
+                } else if (mode_ == Mode::Measure) {
+                    conMeasAsc_ = conMeasSort_ == (int)i ? !conMeasAsc_ : true;
+                    conMeasSort_ = (int)i;
+                    RefreshMeasureList();
+                } else if (list_.onSortChanged) {
                     bool asc = true;
                     bool same = i < colKeys_.size() && SortKeyShown(&asc) == colKeys_[i];
                     list_.onSortChanged((int)i, same ? !asc : true);
@@ -3888,6 +4186,7 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
         if (k < 0 || k >= n) return true;
         setSel(k);
         if (plan && !g.colR.empty() && x < g.colR[0] && msg == WM_LBUTTONDOWN) TogglePlanRow(k);
+        if (mode_ == Mode::Presets && msg == WM_LBUTTONDBLCLK) OnClickId(ID_PRE_PLAN);
         return true;
     }
     if (PtInRect(&conLeftRc_, pt)) { *handled = true; focus_ = Focus::DetailLeft; return true; }
@@ -3914,6 +4213,761 @@ void ServicesModule::ReplayKeys(const std::wstring& keys) {
         else if (u.rfind(L"text:", 0) == 0) { for (wchar_t ch : k.substr(5)) OnInput(WM_CHAR, ch, 0); continue; }
         if (vk) OnInput(WM_KEYDOWN, vk, 0);
     }
+}
+
+// ============================================================================================
+// Custom presets and measured before/after (docs/design/services.md "Custom presets", "Measure")
+//
+// Both pages are drawn by one function each for both layouts: Console gets its grid, ConButtons and mono font,
+// Baseline core's ListView and rounded buttons. Nothing here changes a service: a custom preset only opens a plan
+// (Apply on that plan is the only write path, unchanged), and the file work runs on fileW_.
+
+bool ServicesModule::CanWriteData(std::wstring* why) const {
+    if (fixture_) { *why = L"This is fixture data."; return false; }
+    if (!elevated_) { *why = L"Hadron is not running as administrator, so it is read-only."; return false; }
+    if (readOnly_) { *why = L"Read-only mode (--readonly)."; return false; }
+    if (!store_.Valid()) { *why = L"There is no data folder."; return false; }
+    if (storeRefused_) { *why = L"The data folder can't be used (see the banner)."; return false; }
+    return true;
+}
+
+bool ServicesModule::StartFileJob(FileJob j) {
+    if (fileW_.Running()) { Status(L"Services: the previous file action is still running; try again in a moment."); return false; }
+    fileJob_ = std::move(j);
+    FileJob* job = &fileJob_;
+    bool ok = fileW_.Start(hwnd_, WM_SVC_FILE, [job]() {
+        FileJob& f = *job;
+        std::wstring e;
+        // Every write into the data folder checks it again first (EnsureRoot, A1): owner, DACL, no reparse point, and
+        // every folder above it. User files (export, import) are the user's pick and are not in the data folder.
+        auto ensure = [&]() {
+            if (f.st.EnsureRoot(true, &e)) return true;
+            f.err = L"The data folder can't be used, so nothing was written: " + e;
+            return false;
+        };
+        switch (f.kind) {
+            case FileJob::Save: if (ensure()) f.ok = SaveCustomPreset(f.st, &f.preset, f.existing, &f.err); break;
+            case FileJob::Remove: if (ensure()) f.ok = RemoveCustomPreset(f.st, f.preset, &f.err); break;
+            case FileJob::Export: f.ok = ExportPresetFile(f.path, f.preset, &f.exists, &f.err); break;
+            case FileJob::Import: f.ok = ImportPresetFile(f.path, &f.preset, &f.err); break;
+            case FileJob::Measure:
+                if (ensure())
+                    f.ok = TakeMeasurement(f.phase, f.build, f.machine, f.plan, &f.measure, &f.err) && SaveMeasurement(f.st, &f.measure, &f.err);
+                break;
+        }
+    });
+    if (!ok) { Status(L"Services: could not start the worker thread: " + sys::ErrorText(GetLastError())); return false; }
+    Invalidate();
+    return true;
+}
+
+void ServicesModule::OnFileDone() {
+    fileW_.Join();
+    FileJob& j = fileJob_;
+    switch (j.kind) {
+        case FileJob::Save:
+            if (!j.ok) { presetErr_ = j.err; break; }
+            presets_.push_back(j.preset);
+            saving_ = false;
+            presetErr_.clear();
+            presetMsg_ = L"Saved \"" + j.preset.name + L"\" (" + std::to_wstring(j.preset.items.size()) + L" items) as presets\\" + j.preset.file +
+                         L" in the data folder.";
+            RefreshPresetList();
+            for (int k = 0; k < (int)preV_.size(); k++) if (presets_[(size_t)preV_[k]].file == j.preset.file) { prelist_.Select(k); conPre_.lastSel = -2; }
+            focus_ = Focus::List;
+            Status(L"Services: " + presetMsg_);
+            break;
+        case FileJob::Remove:
+            if (!j.ok) { presetErr_ = L"Not removed: " + j.err; break; }
+            presets_.erase(std::remove_if(presets_.begin(), presets_.end(), [&](const CustomPreset& c) { return c.file == j.preset.file; }),
+                           presets_.end());
+            RefreshPresetList();
+            presetErr_.clear();
+            presetMsg_ = L"Removed \"" + j.preset.name + L"\" from the list. Its file stays in the data folder (presets\\" + j.preset.file +
+                         L"); nothing was deleted.";
+            break;
+        case FileJob::Export:
+            if (!j.ok) { presetErr_ = L"Not exported: " + j.err; break; }
+            presetErr_.clear();
+            presetMsg_ = L"Exported \"" + j.preset.name + L"\" to " + j.path + L".";
+            Status(L"Services: " + presetMsg_);
+            break;
+        case FileJob::Import:
+            ImportDone(j.ok ? &j.preset : nullptr, j.path, j.err);
+            break;
+        case FileJob::Measure:
+            if (!j.ok) { notices_.push_back(L"The measurement was not recorded: " + j.err); break; }
+            measures_.push_back(j.measure);
+            std::stable_sort(measures_.begin(), measures_.end(), [](const Measurement& a, const Measurement& b) { return a.created < b.created; });
+            RefreshMeasureList();
+            notices_.push_back(L"Recorded a \"" + j.measure.phase + L"\" measurement (measure\\" + j.measure.file + L"), " +
+                               std::to_wstring(j.measure.uptimeMin) + L" minutes after boot. Measure shows it next to its pair.");
+            Status(L"Services: measurement recorded.");
+            break;
+    }
+}
+
+void ServicesModule::OpenPresets() {
+    mode_ = Mode::Presets;
+    focus_ = Focus::List;
+    fromPlan_ = false;
+    saving_ = false;
+    presetMsg_.clear();
+    conHelp_ = false;
+    detSb_.SetOffset(0);
+    conPre_.lastSel = -2;
+}
+
+void ServicesModule::BackFromPage() {
+    saving_ = false;
+    conHelp_ = false;
+    fromPlan_ = false;
+    mode_ = planReq_.type != PlanReq::None ? Mode::Plan : Mode::List;   // a plan the page was opened from is still there
+    focus_ = Focus::List;
+    detSb_.SetOffset(0);
+}
+
+void ServicesModule::StartSave() {
+    if (mode_ != Mode::Plan || planBusy_ || (plan_.kind != PlanKind::Preset && plan_.kind != PlanKind::Single)) return;
+    pendingSave_ = PresetFromPlan(plan_, L"", build_);
+    if (pendingSave_.items.empty()) { Status(L"Services: tick at least one row to save it as a custom preset."); return; }
+    pendingFrom_ = plan_.title;
+    // A free default name: the plan's own (a custom preset's name, or "Stripped (Services)"), then " 2", " 3", ...
+    std::wstring base = planReq_.type == PlanReq::Custom ? planReq_.preset.name : plan_.title;
+    if (base.size() > kPresetMaxName - 4) base = base.substr(0, kPresetMaxName - 4);
+    std::wstring name = base;
+    auto taken = [&](const std::wstring& n) {
+        for (auto& c : presets_) if (IEq(c.name, n)) return true;
+        return false;
+    };
+    for (int k = 2; taken(name) && k < 1000; k++) name = base + L" " + std::to_wstring(k);
+    nameField_.SetText(name);
+    nameField_.SelectAll();
+    saving_ = true;
+    fromPlan_ = true;
+    presetErr_.clear();
+    presetMsg_.clear();
+    mode_ = Mode::Presets;
+    focus_ = Focus::Name;
+    conHelp_ = false;
+}
+
+void ServicesModule::DoSave() {
+    if (!saving_) return;
+    std::wstring why;
+    if (!CanWriteData(&why)) { presetErr_ = L"Save is off. " + why; return; }
+    std::wstring name = nameField_.Text();
+    if (std::wstring pr = PresetNameProblem(name); !pr.empty()) { presetErr_ = L"Not saved: " + pr + L"."; return; }
+    FileJob j;
+    j.kind = FileJob::Save;
+    j.st = store_;
+    j.preset = pendingSave_;
+    j.preset.name = name;
+    j.existing = presets_;
+    StartFileJob(std::move(j));
+}
+
+namespace {
+// A file name for the export dialog's default: the preset's name without the characters Windows refuses.
+std::wstring SafeFileName(const std::wstring& n) {
+    std::wstring o;
+    for (wchar_t c : n) o += (c < 0x20 || wcschr(L"\\/:*?\"<>|", c)) ? L'_' : c;
+    while (!o.empty() && (o.back() == L'.' || o.back() == L' ')) o.pop_back();
+    return o.empty() ? std::wstring(L"preset") : o;
+}
+}  // namespace
+
+// Browse buttons, never drag-and-drop: an elevated window gets no drops from Explorer (UIPI, hard rule 4). The dialogs
+// open on the UI thread; the worker only writes or reads the file picked.
+void ServicesModule::DoExport() {
+    const CustomPreset* cp = SelectedPreset();
+    if (!cp || fileW_.Running()) return;
+    std::vector<wchar_t> file(32768, 0);
+    std::wstring def = SafeFileName(cp->name) + L".txt";
+    std::copy(def.begin(), def.end(), file.begin());
+    std::wstring initDir = host_->Prefs().GetStr(L"presetDir");
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = host_->Frame();
+    ofn.lpstrFilter = L"Hadron preset (*.txt)\0*.txt\0All files\0*.*\0";
+    ofn.lpstrFile = file.data();
+    ofn.nMaxFile = (DWORD)file.size();
+    ofn.lpstrInitialDir = initDir.empty() ? nullptr : initDir.c_str();
+    ofn.lpstrDefExt = L"txt";
+    ofn.lpstrTitle = L"Export the custom preset (a new file: Hadron never replaces one)";
+    // No OFN_OVERWRITEPROMPT: the file is created with CREATE_NEW, so an existing one is never replaced, and the page
+    // says so instead of a "replace?" question whose yes would still be refused.
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    if (!GetSaveFileNameW(&ofn)) {
+        DWORD e = CommDlgExtendedError();
+        if (e) presetErr_ = L"The save dialog failed (error " + std::to_wstring(e) + L").";
+        return;
+    }
+    std::wstring path = file.data();
+    host_->Prefs().SetStr(L"presetDir", path.substr(0, path.find_last_of(L"\\/")));
+    FileJob j;
+    j.kind = FileJob::Export;
+    j.path = path;
+    j.preset = *cp;
+    StartFileJob(std::move(j));
+}
+
+void ServicesModule::DoImport() {
+    if (fileW_.Running()) return;
+    std::vector<wchar_t> file(32768, 0);
+    std::wstring initDir = host_->Prefs().GetStr(L"presetDir");
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = host_->Frame();
+    ofn.lpstrFilter = L"Hadron preset (*.txt)\0*.txt\0All files\0*.*\0";
+    ofn.lpstrFile = file.data();
+    ofn.nMaxFile = (DWORD)file.size();
+    ofn.lpstrInitialDir = initDir.empty() ? nullptr : initDir.c_str();
+    ofn.lpstrTitle = L"Import a custom preset (it only fills a plan; nothing is applied)";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    if (!GetOpenFileNameW(&ofn)) {
+        DWORD e = CommDlgExtendedError();
+        if (e) presetErr_ = L"The open dialog failed (error " + std::to_wstring(e) + L").";
+        return;
+    }
+    std::wstring path = file.data();
+    host_->Prefs().SetStr(L"presetDir", path.substr(0, path.find_last_of(L"\\/")));
+    FileJob j;
+    j.kind = FileJob::Import;
+    j.path = path;
+    StartFileJob(std::move(j));
+}
+
+void ServicesModule::ImportDone(const CustomPreset* p, const std::wstring& path, const std::wstring& err) {
+    if (!p) {
+        if (mode_ != Mode::Presets) OpenPresets();
+        presetMsg_.clear();
+        presetErr_ = L"Import refused: " + sys::ToShell(path) + L": " + err + L". Nothing was changed.";
+        Status(L"Services: " + presetErr_);
+        return;
+    }
+    presetErr_.clear();
+    presetMsg_.clear();
+    OpenCustomPlan(*p);
+    Status(L"Services: imported \"" + p->name + L"\" from " + sys::ToShell(path) +
+           L". It only filled this plan: nothing changes until you press Apply. Save as preset keeps it.");
+}
+
+void ServicesModule::OpenCustomPlan(const CustomPreset& p) {
+    if (!loaded_ || applyW_.Running() || items_.empty()) return;
+    PlanReq r;
+    r.type = PlanReq::Custom;
+    r.tab = p.tab;
+    r.preset = p;
+    saving_ = false;
+    fromPlan_ = false;
+    OpenPlan(r);
+}
+
+void ServicesModule::StartMeasure(const std::wstring& phase, const std::wstring& forWhat) {
+    std::wstring why;
+    if (!CanWriteData(&why)) { Status(L"Services: Measure is off. " + why); return; }
+    if (phase == L"after" && (bootNow_.empty() || PendingBefore(measures_, bootNow_) < 0)) {
+        Status(L"Services: Measure after needs a \"before\" from an earlier boot: measure before, apply, restart, then measure after.");
+        return;
+    }
+    FileJob j;
+    j.kind = FileJob::Measure;
+    j.st = store_;
+    j.phase = phase;
+    j.build = build_;
+    j.machine = machine_;
+    j.plan = phase == L"after" ? std::wstring(L"after a restart") : L"before " + forWhat;
+    StartFileJob(std::move(j));
+}
+
+const CustomPreset* ServicesModule::SelectedPreset() const {
+    int k = prelist_.Selected();
+    return k >= 0 && k < (int)preV_.size() ? &presets_[(size_t)preV_[k]] : nullptr;
+}
+
+void ServicesModule::RefreshPresetList() {
+    std::wstring keep;
+    if (const CustomPreset* cp = SelectedPreset()) keep = cp->file;
+    preV_.clear();
+    for (int i = 0; i < (int)presets_.size(); i++) preV_.push_back(i);
+    auto key = [&](const CustomPreset& c) -> std::wstring {
+        if (preSortKey_ == L"tab") return c.tab == TAB_DRIVERS ? L"drivers" : L"services";
+        if (preSortKey_ == L"items") { wchar_t b[16]; swprintf(b, 16, L"%08zu", c.items.size()); return b; }
+        if (preSortKey_ == L"build") return c.build;
+        if (preSortKey_ == L"saved") return c.saved;
+        return Lower(c.name);
+    };
+    std::stable_sort(preV_.begin(), preV_.end(), [&](int a, int b) {
+        std::wstring ka = key(presets_[(size_t)a]), kb = key(presets_[(size_t)b]);
+        if (ka == kb) return Lower(presets_[(size_t)a].name) < Lower(presets_[(size_t)b].name);
+        return preSortAsc_ ? ka < kb : kb < ka;
+    });
+    std::vector<std::vector<std::wstring>> rows;
+    for (int i : preV_) {
+        const CustomPreset& c = presets_[(size_t)i];
+        rows.push_back({c.name, c.tab == TAB_DRIVERS ? L"Drivers" : L"Services", std::to_wstring(c.items.size()), c.build, c.saved});
+    }
+    prelist_.SetRows(std::move(rows));
+    int sel = preV_.empty() ? -1 : 0;
+    for (int k = 0; k < (int)preV_.size(); k++) if (!keep.empty() && presets_[(size_t)preV_[k]].file == keep) sel = k;
+    prelist_.Select(sel);
+}
+
+void ServicesModule::RefreshMeasureList() {
+    static const wchar_t* const kKeys[] = {L"created", L"phase", L"uptime", L"ram", L"processes", L"plan"};
+    int col = Console() ? conMeasSort_ : mlist_.SortColumn();
+    bool asc = Console() ? conMeasAsc_ : mlist_.SortAscending();
+    std::wstring k = col >= 0 && col < 6 ? kKeys[col] : L"";
+    if (k.empty()) { k = L"created"; asc = false; }   // newest first until a header is clicked
+    auto num = [](uint64_t v) { wchar_t b[24]; swprintf(b, 24, L"%020llu", (unsigned long long)v); return std::wstring(b); };
+    auto key = [&](const Measurement& m) -> std::wstring {
+        if (k == L"phase") return m.phase;
+        if (k == L"uptime") return num((uint64_t)m.uptimeMin);
+        if (k == L"ram") return num(m.ramUsed);
+        if (k == L"processes") return num((uint64_t)m.processes);
+        if (k == L"plan") return Lower(m.plan);
+        return m.created;
+    };
+    measV_.clear();
+    for (int i = 0; i < (int)measures_.size(); i++) measV_.push_back(i);
+    std::stable_sort(measV_.begin(), measV_.end(), [&](int a, int b) {
+        std::wstring ka = key(measures_[(size_t)a]), kb = key(measures_[(size_t)b]);
+        if (ka == kb) return measures_[(size_t)a].created < measures_[(size_t)b].created;
+        return asc ? ka < kb : kb < ka;
+    });
+    std::vector<std::vector<std::wstring>> rows;
+    for (int i : measV_) {
+        const Measurement& m = measures_[(size_t)i];
+        rows.push_back({m.created.substr(0, 16), m.phase, std::to_wstring(m.uptimeMin) + L" min", MiB(m.ramUsed), std::to_wstring(m.processes), m.plan});
+    }
+    mlist_.SetRows(std::move(rows));
+    if (!measV_.empty() && (mlist_.Selected() < 0 || mlist_.Selected() >= (int)measV_.size())) mlist_.Select(0);
+}
+
+int ServicesModule::PageButton(HDC dc, int x, int y, const std::wstring& label, int id, bool enabled, bool primary) {
+    if (Console()) return ConButton(dc, x, y, label, id, false, enabled, primary);
+    if (!primary) return ButtonL(dc, x, y, label, id, false, enabled);
+    int w = TextW(dc, label, host_->Fonts().caption) + Sc(26);
+    return Button(dc, x + w, y - Sc(2), label, id, true, enabled);
+}
+
+int ServicesModule::PageButtonR(HDC dc, int right, int y, const std::wstring& label, int id, bool enabled, bool primary) {
+    if (Console()) {
+        int w = TextW(dc, label, host_->Fonts().caption) + Sc(14);
+        ConButton(dc, right - w, y, label, id, false, enabled, primary);
+        return w;
+    }
+    return Button(dc, right, y, label, id, primary, enabled);
+}
+
+int ServicesModule::PaintTextLines(HDC dc, const std::wstring& text, int x, int y, int right, COLORREF col, int maxLines) {
+    const Fonts& f = host_->Fonts();
+    int lh = 0;
+    std::vector<std::wstring> lines = WrapLines(dc, f.caption, text, std::max(1, right - x), &lh);
+    if (maxLines > 0 && (int)lines.size() > maxLines) { lines.resize((size_t)maxLines); lines.back() += L"…"; }
+    for (auto& ln : lines) {
+        RECT r{x, y, right, y + lh};
+        ui::DrawText(dc, ln, r, f.caption, col, DT_SINGLELINE | DT_NOCLIP);
+        y += lh;
+    }
+    return y;
+}
+
+std::vector<Para> ServicesModule::PresetDoc(const CustomPreset& c) const {
+    Pal p(host_->Theme());
+    std::vector<Para> d;
+    d.push_back({P_TITLE, L"", c.name, kNoColor});
+    d.push_back({P_SUB, L"", (c.tab == TAB_DRIVERS ? std::wstring(L"Drivers") : std::wstring(L"Services")) + L"  ·  " +
+                                 std::to_wstring(c.items.size()) + L" items  ·  made on Windows build " + c.build + L" with Hadron " + c.hadron,
+                 kNoColor});
+    d.push_back({P_HEAD, L"", L"Start types it sets", kNoColor, SIDE_LEFT});
+    for (auto& i : c.items) d.push_back({P_KV, i.name, StartLabel(i.target, false), kNoColor});
+    d.push_back({P_HEAD, L"", L"When you open it", kNoColor, SIDE_RIGHT});
+    d.push_back({P_TEXT, L"",
+                 L"It fills a plan against this PC's live state. Nothing changes until you press Apply on that plan; the apply "
+                 L"is snapshotted, logged and undoable like every other. What every preset leaves alone is dropped with a "
+                 L"note: protected items, items Hadron's KB doesn't know (third-party), and drivers it doesn't list as safe "
+                 L"to change.",
+                 kNoColor});
+    if (!c.build.empty() && BuildNumber(c.build) != BuildNumber(build_))
+        d.push_back({P_TEXT, L"", L"Made on Windows build " + c.build + L"; this PC runs build " + build_ + L": check each row.", p.warnT});
+    d.push_back({P_HEAD, L"", L"File", kNoColor});
+    d.push_back({P_KV, L"Saved", c.saved.empty() ? std::wstring(L"not saved (imported)") : c.saved, kNoColor});
+    if (!c.file.empty()) d.push_back({P_KV, L"In the data folder", L"presets\\" + c.file, kNoColor});
+    d.push_back({P_TEXT, L"", L"Export writes the same plain text: a header, then one name<TAB>start-type line per item.", p.faint});
+    return d;
+}
+
+std::vector<Para> ServicesModule::MeasureDoc() const {
+    Pal p(host_->Theme());
+    std::vector<Para> d;
+    MeasurePair pr = LatestPair(measures_);
+    d.push_back({P_HEAD, L"", L"Basis: owner-measured", kNoColor, SIDE_LEFT});
+    d.push_back({P_TEXT, L"",
+                 L"Measured on this PC by Hadron, one sample each, with the conditions below. Hadron never predicts what a "
+                 L"change saves: these recorded values are the only numbers it shows about one.",
+                 kNoColor});
+    auto conditions = [&](const wchar_t* head, const Measurement& m) {
+        d.push_back({P_HEAD, L"", head, kNoColor});
+        d.push_back({P_KV, L"Recorded", m.created + L" UTC", kNoColor});
+        d.push_back({P_KV, L"Windows build", m.build, kNoColor});
+        d.push_back({P_KV, L"After boot", std::to_wstring(m.uptimeMin) + L" minutes (booted " + m.boot.substr(0, 16) + L" UTC)", kNoColor});
+        d.push_back({P_KV, L"Taken", m.plan, kNoColor});
+    };
+    if (pr.before >= 0) {
+        const Measurement& b = measures_[(size_t)pr.before];
+        const Measurement& a = measures_[(size_t)pr.after];
+        conditions(L"Before", b);
+        conditions(L"After", a);
+        if (b.uptimeMin != a.uptimeMin)
+            d.push_back({P_TEXT, L"", L"Not quite fair: the before was taken " + std::to_wstring(b.uptimeMin) + L" minutes after boot and the after " +
+                                          std::to_wstring(a.uptimeMin) + L". Services start late or on triggers, so the time after boot matters.",
+                         p.warnT});
+        if (BuildNumber(b.build) != BuildNumber(a.build))
+            d.push_back({P_TEXT, L"", L"Windows was updated between them (build " + b.build + L", then " + a.build + L"): the update changes the numbers too.", p.warnT});
+        if (b.ramTotal != a.ramTotal)
+            d.push_back({P_TEXT, L"", L"The installed memory Windows reports differs between them.", p.warnT});
+    }
+    d.push_back({P_HEAD, L"", L"Test it: a fair comparison", kNoColor, SIDE_RIGHT});
+    d.push_back({P_TEXT, L"",
+                 L"Before: restart, open only the apps you always run, wait, then open the plan and press Measure before. "
+                 L"Note how long after boot it was (it is recorded).",
+                 kNoColor});
+    d.push_back({P_TEXT, L"",
+                 L"After: apply the plan and restart. Open the same apps, wait the same number of minutes after boot, then "
+                 L"press Measure after.",
+                 kNoColor});
+    d.push_back({P_TEXT, L"",
+                 L"One pair is one sample: Windows starts and stops services on its own (updates, indexing, triggers). Repeat "
+                 L"the pair, and trust a difference only when it shows up every time.",
+                 kNoColor});
+    d.push_back({P_TEXT, L"",
+                 L"Memory and process counts say nothing about frame rates or input latency. Test those in the game itself, "
+                 L"with its own frame-time capture, before and after.",
+                 kNoColor});
+    d.push_back({P_HEAD, L"", L"What is measured", kNoColor});
+    d.push_back({P_KV, L"RAM in use", L"installed memory minus available memory (GlobalMemoryStatusEx)", kNoColor});
+    d.push_back({P_KV, L"Committed", L"the commit charge: memory Windows has promised to processes, in RAM or the page file", kNoColor});
+    d.push_back({P_KV, L"Processes", L"every process in a snapshot of the process list", kNoColor});
+    d.push_back({P_KV, L"svchost.exe", L"processes named svchost.exe: the shared service hosts", kNoColor});
+    d.push_back({P_TEXT, L"", L"MiB: mebibytes, as Task Manager counts them.", p.faint});
+    return d;
+}
+
+int ServicesModule::PaintCompare(HDC dc, const RECT& r, bool draw) {
+    Pal p(host_->Theme());
+    CPal cp(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    const bool con = Console();
+    HFONT font = con ? f.mono : f.caption;
+    int lh = 0;
+    {
+        TEXTMETRICW tm{};
+        HGDIOBJ o = SelectObject(dc, font);
+        GetTextMetricsW(dc, &tm);
+        SelectObject(dc, o);
+        lh = tm.tmHeight + Sc(con ? 3 : 6);
+    }
+    MeasurePair pr = LatestPair(measures_);
+    const Measurement* b = pr.before >= 0 ? &measures_[(size_t)pr.before] : nullptr;
+    const Measurement* a = pr.after >= 0 ? &measures_[(size_t)pr.after] : nullptr;
+    if (!b) {   // no pair yet: the newest "before" alone, waiting for its after
+        for (int i = (int)measures_.size() - 1; i >= 0; i--) if (measures_[(size_t)i].phase == L"before") { b = &measures_[(size_t)i]; break; }
+    }
+    const int pad = Sc(con ? 8 : 14);
+    const int W = r.right - r.left - 2 * pad;
+    int y = r.top + pad;
+    if (draw) {
+        if (con) { FillSolid(dc, r, cp.panel); FrameRectC(dc, r, cp.rule); }
+        else RoundFill(dc, r, Sc(8), p.panel, p.border);
+    }
+    const COLORREF head = con ? cp.accInk : p.accT;
+    if (!b) {
+        std::wstring t = L"No measurements yet. On a plan's screen press Measure before; apply, restart, wait as long after boot, "
+                         L"then press Measure after. The two show here side by side.";
+        int lines = 0;
+        std::vector<std::wstring> wl = WrapLines(dc, font, t, std::max(1, W), &lines);
+        if (draw)
+            for (auto& ln : wl) {
+                RECT tr{r.left + pad, y, r.right - pad, y + lines};
+                ui::DrawText(dc, ln, tr, font, p.mute, DT_SINGLELINE | DT_NOCLIP);
+                y += lines;
+            }
+        else y += (int)wl.size() * lines;
+        return y - r.top + pad;
+    }
+    const int c0 = r.left + pad, c1 = c0 + W * 34 / 100, c2 = c0 + W * 56 / 100, c3 = c0 + W * 78 / 100;
+    auto cell = [&](int x0, int x1, const std::wstring& t, COLORREF col, bool bold) {
+        if (!draw) return;
+        RECT tr{x0, y, x1 - Sc(6), y + lh};
+        ui::DrawText(dc, t, tr, bold ? (con ? f.semi : f.semi) : font, col, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    };
+    auto signedNum = [](long long v, const std::wstring& unit) {
+        std::wstring s = std::to_wstring(v < 0 ? -v : v);
+        for (int i = (int)s.size() - 3; i > 0; i -= 3) s.insert((size_t)i, L",");
+        return (v > 0 ? L"+" : v < 0 ? L"−" : L"") + s + unit;
+    };
+    cell(c0, c1, L"owner-measured", head, true);
+    cell(c1, c2, L"Before", p.text, true);
+    cell(c2, c3, L"After", p.text, true);
+    cell(c3, r.right - pad, L"After − before", p.text, true);
+    y += lh;
+    if (draw) HLine(dc, c0, r.right - pad, y - Sc(2), con ? cp.rule : p.border);
+    struct Row { const wchar_t* label; std::wstring bv, av, dv; };
+    auto mib = [](uint64_t v) { return (long long)(v / (1024ull * 1024ull)); };
+    std::vector<Row> rows;
+    const std::wstring none = L"not measured yet";
+    rows.push_back({L"Minutes after boot", std::to_wstring(b->uptimeMin), a ? std::to_wstring(a->uptimeMin) : none, L""});
+    rows.push_back({L"RAM in use", MiB(b->ramUsed), a ? MiB(a->ramUsed) : none, a ? signedNum(mib(a->ramUsed) - mib(b->ramUsed), L" MiB") : L""});
+    rows.push_back({L"Committed memory", MiB(b->commit), a ? MiB(a->commit) : none, a ? signedNum(mib(a->commit) - mib(b->commit), L" MiB") : L""});
+    rows.push_back({L"Processes", std::to_wstring(b->processes), a ? std::to_wstring(a->processes) : none,
+                    a ? signedNum((long long)a->processes - b->processes, L"") : L""});
+    rows.push_back({L"svchost.exe processes", std::to_wstring(b->svchost), a ? std::to_wstring(a->svchost) : none,
+                    a ? signedNum((long long)a->svchost - b->svchost, L"") : L""});
+    for (auto& row : rows) {
+        cell(c0, c1, row.label, p.mute, false);
+        cell(c1, c2, row.bv, p.text, false);
+        cell(c2, c3, row.av, a ? p.text : p.mute, false);
+        cell(c3, r.right - pad, row.dv, p.text, false);
+        y += lh;
+    }
+    // The conditions in one line under the table (the detail pane has them in full).
+    std::wstring cond = L"Before: " + b->created.substr(0, 16) + L" UTC, build " + b->build + L", " + b->plan +
+                        (a ? L".  After: " + a->created.substr(0, 16) + L" UTC, build " + a->build + L"." : std::wstring(L".  After: restart first."));
+    int clh = 0;
+    std::vector<std::wstring> wl = WrapLines(dc, f.caption, cond, std::max(1, W), &clh);
+    y += Sc(2);
+    for (auto& ln : wl) {
+        if (draw) { RECT tr{c0, y, r.right - pad, y + clh}; ui::DrawText(dc, ln, tr, f.caption, p.faint, DT_SINGLELINE | DT_NOCLIP); }
+        y += clh;
+    }
+    return y - r.top + pad;
+}
+
+void ServicesModule::PaintPresetsMode(HDC dc, const RECT& rc, int y, int bottom) {
+    Pal p(host_->Theme());
+    CPal cp(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    PaintCtx c = PCtx();
+    const bool con = Console();
+    const int pad = Sc(con ? 8 : 20);
+    const int btnH = Sc(con ? 18 : 26), rowGap = Sc(con ? 6 : 10);
+    std::wstring dw;
+    const bool canData = CanWriteData(&dw);
+    const bool busy = fileW_.Running();
+
+    // Title, with Back and Import on the right.
+    int right = rc.right - pad;
+    right -= PageButtonR(dc, right, y, fromPlan_ ? L"Back to the plan" : L"Back", ID_BACK, true) + Sc(8);
+    right -= PageButtonR(dc, right, y, L"Import…", ID_IMPORT, !busy && loaded_) + Sc(8);
+    RECT tr{pad, y, right - Sc(10), y + btnH};
+    TextLeft(dc, L"Custom presets", tr, f.semi, p.text);
+    y += btnH + Sc(6);
+    y = PaintTextLines(dc,
+                       L"Your own start-type lists. Opening one only fills a plan: nothing changes until you press Apply there, and "
+                       L"that apply is snapshotted and undoable. What every preset leaves alone (protected and third-party items) is "
+                       L"dropped from it. "
+                       L"Export and Import use plain text files; Import is a Browse button (an administrator window takes no "
+                       L"files dragged from Explorer).",
+                       pad, y, rc.right - pad, p.mute, 3) + Sc(6);
+    if (!presetErr_.empty()) {
+        int lh = 0;
+        int dwid = TextW(dc, L"Dismiss", f.caption) + Sc(con ? 14 : 20);
+        std::vector<std::wstring> wl = WrapLines(dc, f.caption, presetErr_, std::max(1, (int)(rc.right - 2 * pad - Sc(24) - dwid)), &lh);
+        if (wl.size() > 4) { wl.resize(4); wl.back() += L"…"; }
+        int h = std::max(btnH + Sc(8), (int)wl.size() * lh + Sc(10));
+        RECT er{pad, y, rc.right - pad, y + h};
+        if (p.hc) RoundFill(dc, er, Sc(con ? 0 : 8), p.panel, p.border);
+        else if (con) FillSolid(dc, er, Mix(p.panel, p.bad, 0.12));
+        else RoundFill(dc, er, Sc(8), Mix(p.panel, p.bad, 0.16));
+        RECT bar{er.left, er.top, er.left + Sc(4), er.bottom};
+        FillSolid(dc, bar, p.bad);
+        int ty = y + (h - (int)wl.size() * lh) / 2;
+        for (auto& ln : wl) {
+            RECT lr{pad + Sc(14), ty, er.right - dwid - Sc(12), ty + lh};
+            ui::DrawText(dc, ln, lr, f.caption, p.text, DT_SINGLELINE | DT_NOCLIP);
+            ty += lh;
+        }
+        PageButtonR(dc, er.right - Sc(8), y + (h - btnH) / 2, L"Dismiss", ID_PRE_ERR_HIDE, true);
+        y += h + Sc(6);
+    } else if (!presetMsg_.empty()) {
+        y = PaintTextLines(dc, presetMsg_, pad, y, rc.right - pad, con ? cp.goodInk : p.goodT, 2) + Sc(6);
+    }
+
+    // The save form: the name and Save, for the plan's ticked rows.
+    if (saving_) {
+        RECT lr{pad, y, rc.right - pad, y + btnH};
+        std::wstring lead = L"Save the " + std::to_wstring(pendingSave_.items.size()) + L" ticked row(s) of " + pendingFrom_ + L" as:";
+        int lw = std::min(TextW(dc, lead, f.caption) + Sc(10), (int)(rc.right - rc.left) / 2);
+        lr.right = lr.left + lw;
+        ui::DrawText(dc, lead, lr, f.caption, p.text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        int x = pad + lw;
+        int saveW = TextW(dc, L"Save", f.caption) + Sc(26), cancelW = TextW(dc, L"Cancel", f.caption) + Sc(26);
+        int fw = std::clamp((int)rc.right - pad - x - saveW - cancelW - Sc(24), Sc(120), Sc(360));
+        rcName_ = RECT{x, y, x + fw, y + btnH};
+        nameField_.Paint(dc, rcName_, c, focus_ == Focus::Name && HasFocus());
+        if (con && focus_ == Focus::Name) FrameRectC(dc, rcName_, cp.accInk);
+        AddClick(rcName_, ID_NAME);
+        x += fw + Sc(8);
+        std::wstring problem = PresetNameProblem(nameField_.Text());
+        for (auto& e : presets_) if (problem.empty() && IEq(e.name, nameField_.Text())) problem = L"a custom preset with this name exists";
+        x += PageButton(dc, x, y, L"Save", ID_SAVE, canData && !busy && problem.empty(), true) + Sc(8);
+        PageButton(dc, x, y, L"Cancel", ID_SAVE_CANCEL, !busy);
+        y += btnH + Sc(4);
+        std::wstring note = !canData ? L"Save is off. " + dw : !problem.empty() ? L"Not yet: " + problem + L"." : L"Saved as a new file in the data folder; nothing is overwritten.";
+        y = PaintTextLines(dc, note, pad, y, rc.right - pad, !canData || !problem.empty() ? (con ? cp.warnInk : p.warnT) : p.faint, 2) + Sc(6);
+    } else {
+        rcName_ = RECT{};
+    }
+
+    // Actions for the selected preset.
+    const CustomPreset* sel = SelectedPreset();
+    {
+        int x = pad;
+        x += PageButton(dc, x, y, L"Open plan", ID_PRE_PLAN, sel && loaded_ && !applyW_.Running() && !items_.empty()) + Sc(6);
+        x += PageButton(dc, x, y, L"Export…", ID_EXPORT, sel && !busy) + Sc(6);
+        x += PageButton(dc, x, y, L"Remove", ID_PRE_REMOVE, sel && canData && !busy) + Sc(10);
+        std::wstring hint = !canData ? L"Remove and Save are off. " + dw : L"Remove hides it; its file stays in the data folder.";
+        RECT hr{x, y, rc.right - pad, y + btnH};
+        ui::DrawText(dc, hint, hr, f.caption, p.faint, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        y += btnH + rowGap;
+    }
+
+    // The list (left) and the selected preset's items (right); Console stacks them.
+    int total = rc.right - 2 * pad;
+    RECT lst, det;
+    if (con) {
+        int avail = bottom - y;
+        int detH = std::max(Sc(110), avail * 45 / 100);
+        if (avail - detH < Sc(90)) detH = std::max(Sc(60), avail - Sc(90));
+        lst = RECT{pad, y, rc.right - pad, bottom - detH - Sc(6)};
+        det = RECT{pad, lst.bottom + Sc(6), rc.right - pad, bottom};
+    } else {
+        int listW = total * 55 / 100;
+        lst = RECT{pad, y, pad + listW, bottom};
+        det = RECT{pad + listW + Sc(12), y, rc.right - pad, bottom};
+    }
+    rcPreList_ = lst;
+    if (con) {
+        const int cw = TextW(dc, L"0", f.mono);
+        int W = lst.right - lst.left - Sc(17);
+        std::vector<ConCol> cols = {{L"name", L"Name", std::max(16 * cw, W - 44 * cw), false}, {L"tab", L"Tab", 10 * cw, false},
+                                    {L"items", L"Items", 7 * cw, false}, {L"build", L"Build", 8 * cw, false}, {L"saved", L"Saved (UTC)", 19 * cw, false}};
+        PaintConsoleGrid(dc, conPre_, lst, cols, (int)preV_.size(), prelist_.Selected(), conPreSort_, conPreAsc_,
+                         [&](int row, std::vector<ConCell>& out) {
+                             const CustomPreset& x = presets_[(size_t)preV_[(size_t)row]];
+                             out.push_back({x.name, cp.text});
+                             out.push_back({x.tab == TAB_DRIVERS ? L"drivers" : L"services", cp.mute});
+                             out.push_back({std::to_wstring(x.items.size()), cp.text});
+                             out.push_back({x.build, cp.mute});
+                             out.push_back({x.saved, cp.mute});
+                         });
+    } else {
+        int W = MulDiv(lst.right - lst.left, 96, (int)host_->Dpi()) - 12;
+        int nameW = std::max(120, W - 76 - 64 - 64 - 150);
+        prelist_.SetColumns({{L"Name", nameW}, {L"Tab", 76}, {L"Items", 64, true}, {L"Build", 64}, {L"Saved (UTC)", 150}});
+        prelist_.Paint(dc, lst, c, focus_ == Focus::List && HasFocus());
+    }
+    if (preV_.empty()) {
+        RECT er{lst.left + Sc(12), lst.top + Sc(con ? 30 : 44), lst.right - Sc(12), lst.bottom - Sc(8)};
+        ui::DrawText(dc, L"No custom presets yet. Open a plan (a preset, Default, or a single change), set its ticks, then press "
+                         L"Save ticks as custom preset. Or Import a file.",
+                     er, con ? f.mono : f.caption, p.mute, DT_WORDBREAK);
+    }
+    if (conHelp_ && con) { PaintConsoleHelp(dc, det); return; }
+    if (sel) {
+        if (con) PaintConsoleDetail(dc, det, sel->name, (sel->tab == TAB_DRIVERS ? L"drivers" : L"services") + std::wstring(L"  ·  ") +
+                                                       std::to_wstring(sel->items.size()) + L" items", PresetDoc(*sel), false);
+        else { RoundFill(dc, det, Sc(8), p.panel, p.border); PaintDetailPanel(dc, det, PresetDoc(*sel)); }
+    } else {
+        if (con) { FillSolid(dc, det, cp.panel); FrameRectC(dc, det, cp.rule); }
+        else RoundFill(dc, det, Sc(8), p.panel, p.border);
+        rcDetail_ = det;
+        conLeftRc_ = RECT{};
+    }
+}
+
+void ServicesModule::PaintMeasureMode(HDC dc, const RECT& rc, int y, int bottom) {
+    Pal p(host_->Theme());
+    CPal cp(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    PaintCtx c = PCtx();
+    const bool con = Console();
+    const int pad = Sc(con ? 8 : 20);
+    const int btnH = Sc(con ? 18 : 26);
+    std::wstring dw;
+    const bool canData = CanWriteData(&dw) && !fileW_.Running();
+    // "after" only in a boot that started after the newest "before" (and before its after is taken): the pair compares
+    // two boots, never two moments of one.
+    const bool canAfter = canData && !bootNow_.empty() && PendingBefore(measures_, bootNow_) >= 0;
+
+    int right = rc.right - pad;
+    right -= PageButtonR(dc, right, y, planReq_.type != PlanReq::None ? L"Back to the plan" : L"Back", ID_BACK, true) + Sc(8);
+    right -= PageButtonR(dc, right, y, L"Measure after", ID_MEAS_AFTER, canAfter) + Sc(8);
+    right -= PageButtonR(dc, right, y, L"Measure before", ID_MEAS_BEFORE, canData) + Sc(8);
+    RECT tr{pad, y, right - Sc(10), y + btnH};
+    TextLeft(dc, L"Measured before/after", tr, f.semi, p.text);
+    y += btnH + Sc(6);
+    std::wstring lead = L"Basis: owner-measured. RAM, commit and process counts recorded on this PC, with when and how long after "
+                        L"boot. Use Measure after once the PC has restarted.";
+    if (!canData && !fileW_.Running()) lead += L" Measuring is off. " + dw;
+    y = PaintTextLines(dc, lead, pad, y, rc.right - pad, p.mute, 2) + Sc(6);
+
+    int total = rc.right - 2 * pad;
+    RECT left, det;
+    if (con) {
+        int detH = std::max(Sc(120), (bottom - y) * 42 / 100);
+        left = RECT{pad, y, rc.right - pad, bottom - detH - Sc(6)};
+        det = RECT{pad, left.bottom + Sc(6), rc.right - pad, bottom};
+    } else {
+        int listW = total * 58 / 100;
+        left = RECT{pad, y, pad + listW, bottom};
+        det = RECT{pad + listW + Sc(12), y, rc.right - pad, bottom};
+    }
+    int ch = PaintCompare(dc, RECT{left.left, left.top, left.right, left.top + Sc(10)}, false);
+    ch = std::min(ch, std::max(Sc(60), (int)(left.bottom - left.top) - Sc(90)));
+    RECT cmp{left.left, left.top, left.right, left.top + ch};
+    {
+        const int saved = SaveDC(dc);
+        IntersectClipRect(dc, cmp.left, cmp.top, cmp.right, cmp.bottom);
+        PaintCompare(dc, cmp, true);
+        RestoreDC(dc, saved);
+    }
+    RECT lst{left.left, cmp.bottom + Sc(8), left.right, left.bottom};
+    rcMeasList_ = lst;
+    if (con) {
+        const int cw = TextW(dc, L"0", f.mono);
+        int W = lst.right - lst.left - Sc(17);
+        std::vector<ConCol> cols = {{L"created", L"Recorded (UTC)", 18 * cw, false}, {L"phase", L"Phase", 8 * cw, false},
+                                    {L"uptime", L"Boot+", 9 * cw, false}, {L"ram", L"RAM in use", 13 * cw, false},
+                                    {L"processes", L"Procs", 7 * cw, false}};
+        int used = 0;
+        for (auto& k : cols) used += k.w;
+        cols.push_back({L"plan", L"Taken", std::max(12 * cw, W - used), false});
+        PaintConsoleGrid(dc, conMeas_, lst, cols, (int)measV_.size(), mlist_.Selected(), conMeasSort_, conMeasAsc_,
+                         [&](int row, std::vector<ConCell>& out) {
+                             const Measurement& m = measures_[(size_t)measV_[(size_t)row]];
+                             out.push_back({m.created.substr(0, 16), cp.text});
+                             out.push_back({m.phase, cp.accInk});
+                             out.push_back({std::to_wstring(m.uptimeMin) + L" min", cp.mute});
+                             out.push_back({MiB(m.ramUsed), cp.text});
+                             out.push_back({std::to_wstring(m.processes), cp.text});
+                             out.push_back({m.plan, cp.mute});
+                         });
+    } else {
+        int W = MulDiv(lst.right - lst.left, 96, (int)host_->Dpi()) - 12;
+        mlist_.SetColumns({{L"Recorded (UTC)", 150}, {L"Phase", 70}, {L"After boot", 100}, {L"RAM in use", 110, true}, {L"Processes", 96, true},
+                           {L"Taken", std::max(90, W - 150 - 70 - 100 - 110 - 96)}});
+        mlist_.Paint(dc, lst, c, focus_ == Focus::List && HasFocus());
+    }
+    if (measV_.empty()) {
+        RECT er{lst.left + Sc(12), lst.top + Sc(con ? 30 : 44), lst.right - Sc(12), lst.bottom - Sc(8)};
+        ui::DrawText(dc, L"Nothing recorded yet.", er, con ? f.mono : f.caption, p.mute, DT_WORDBREAK);
+    }
+    if (conHelp_ && con) { PaintConsoleHelp(dc, det); return; }
+    if (con) PaintConsoleDetail(dc, det, L"Measure", L"owner-measured  ·  test it", MeasureDoc(), false);
+    else { RoundFill(dc, det, Sc(8), p.panel, p.border); PaintDetailPanel(dc, det, MeasureDoc()); }
 }
 
 // ============================================================================================
@@ -4336,6 +5390,117 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         m->applyW_.Join();
         check(!flipped && !f6 && !target,
               L"ui R10: during an apply the TI toggle doesn't flip (click or F6), F6 is greyed and the switch has no click target");
+    }
+
+    // ---- custom presets and measured before/after (fix/svcdrv-presets) ----------------------------------------
+    {   // The plan's "Save ticks as custom preset": the manager with the name form; fixture mode writes nothing.
+        auto m = fresh(h, fixture);
+        m->OnClickId(ID_PRESET + 3);   // Stripped
+        int ticked = m->plan_.Included();
+        m->OnClickId(ID_SAVE_START);
+        bool form = m->mode_ == Mode::Presets && m->saving_ && m->fromPlan_ && m->focus_ == Focus::Name &&
+                    m->nameField_.Text() == L"Stripped (Services)" && (int)m->pendingSave_.items.size() == ticked;
+        m->OnInput(WM_CHAR, L'!', 0);   // typing replaces the selected default name
+        bool typed = m->nameField_.Text() == L"!";
+        m->OnClickId(ID_SAVE);
+        bool refused = m->presetErr_ == L"Save is off. This is fixture data." && !m->fileW_.Running() && m->presets_.size() == 2;
+        m->OnInput(WM_KEYDOWN, VK_ESCAPE, 0);   // Esc in the name field: cancel the form, back to the plan
+        check(form && typed && refused && m->mode_ == Mode::Plan && !m->saving_ && m->planReq_.type == PlanReq::Preset,
+              L"ui presets: Save ticks opens the name form (default \"Stripped (Services)\", " + std::to_wstring(ticked) +
+                  L" rows), fixture mode refuses the write with the reason, Esc returns to the same plan");
+        // What a finished save does (the worker's result, as OnFileDone gets it): listed and selected, the form closed.
+        m->StartSave();
+        m->fileJob_ = FileJob{};
+        m->fileJob_.kind = FileJob::Save;
+        m->fileJob_.ok = true;
+        m->fileJob_.preset = m->pendingSave_;
+        m->fileJob_.preset.name = L"Aaa first";
+        m->fileJob_.preset.file = L"20261111-130000.txt";
+        m->OnFileDone();
+        const CustomPreset* sel = m->SelectedPreset();
+        check(m->presets_.size() == 3 && sel && sel->name == L"Aaa first" && !m->saving_ && m->presetMsg_.find(L"Saved") == 0,
+              L"ui presets: a finished save lists the new preset, selects it and closes the form");
+        m->BackFromPage();
+        check(m->mode_ == Mode::Plan, L"ui presets: Back from a manager opened by a plan returns to that plan");
+    }
+    {   // Import: refused -> the manager says which line; accepted -> only a plan, never an apply.
+        auto m = fresh(h, fixture);
+        CustomPreset cp;
+        std::wstring e;
+        bool okBad = ImportPresetFile(fixture + L"\\import\\bad-start.txt", &cp, &e);
+        m->ImportDone(okBad ? &cp : nullptr, fixture + L"\\import\\bad-start.txt", e);
+        bool refused = !okBad && m->mode_ == Mode::Presets && m->presetErr_.find(L"line 8: start type 'off'") != std::wstring::npos &&
+                       m->presetErr_.find(L"Nothing was changed") != std::wstring::npos;
+        bool okGood = ImportPresetFile(fixture + L"\\presets\\20261111-090000.txt", &cp, &e);
+        m->ImportDone(okGood ? &cp : nullptr, fixture + L"\\presets\\20261111-090000.txt", e);
+        check(refused && okGood && m->mode_ == Mode::Plan && m->planReq_.type == PlanReq::Custom && m->plan_.source == L"custom:services:Gaming rig" &&
+                  m->presetErr_.empty() && !m->applyW_.Running() && !m->haveResult_,
+              L"ui presets: a refused import names line 8 and changes nothing; an accepted one only opens its plan");
+    }
+    {   // Console: F12 opens the manager, F2 opens the selected preset's plan, Esc goes back; Measure has its keys.
+        h.Use(ui::Layout::Console, 96);
+        auto m = fresh(h, fixture);
+        m->OnConsoleKey(VK_F12);
+        bool opened = m->mode_ == Mode::Presets;
+        bool keys = false;
+        for (auto& k : m->ConsoleKeys()) if (k.cap == L"F4" && k.label == L"Import") keys = true;
+        m->OnConsoleKey(VK_F2);
+        bool plan = m->mode_ == Mode::Plan && m->planReq_.type == PlanReq::Custom;
+        m->ClosePlan();
+        m->OnClickId(ID_MEASURE);
+        bool meas = m->mode_ == Mode::Measure;
+        bool before = false, after = false;
+        for (auto& k : m->ConsoleKeys()) {
+            if (k.cap == L"F2") before = k.enabled;
+            if (k.cap == L"F3") after = k.enabled;
+        }
+        bool handled = false;
+        m->OnConsoleInput(WM_KEYDOWN, VK_ESCAPE, 0, &handled);
+        check(opened && keys && plan && meas && !before && !after && handled && m->mode_ == Mode::List,
+              L"ui Console: F12 opens custom presets, F2 its plan; Measure's F2/F3 are off in fixture mode; Esc goes back to the list");
+        h.Use(ui::Layout::Baseline, 96);
+    }
+    // At the minimum content size (800x560), in both layouts: the manager (with the name form and an import error) and
+    // the measure page keep every click target inside the page and none overlapping (as R24 for the list and plans).
+    for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::Console}) {
+        for (int page = 0; page < 3; page++) {
+            h.Use(ly, 96);
+            auto m = fresh(h, fixture);
+            if (page == 0) { m->OnClickId(ID_PRESETS); m->presetErr_ = L"Import refused: x.txt: line 8: start type 'off' is not one of auto, auto-delayed, manual, disabled. Nothing was changed."; }
+            if (page == 1) { m->OnClickId(ID_PRESET + 3); m->OnClickId(ID_SAVE_START); }
+            if (page == 2) m->OnClickId(ID_MEASURE);
+            const RECT minRc{0, 0, 800, 560};
+            Canvas c2(800, 560);
+            if (!c2.ok()) continue;
+            m->Paint(c2.dc, minRc);
+            std::wstring bad;
+            for (size_t i = 0; i < m->clicks_.size(); i++) {
+                const RECT& a = m->clicks_[i].rc;
+                if (a.left < 0 || a.top < 0 || a.right > minRc.right || a.bottom > minRc.bottom) bad += L" " + std::to_wstring(m->clicks_[i].id) + L" outside;";
+                for (size_t j = i + 1; j < m->clicks_.size(); j++)
+                    if (Overlap(a, m->clicks_[j].rc)) bad += L" " + std::to_wstring(m->clicks_[i].id) + L"/" + std::to_wstring(m->clicks_[j].id) + L" overlap;";
+            }
+            RECT lr = m->ActiveListRc();
+            bool listShown = lr.bottom - lr.top >= m->Sc(60);
+            static const wchar_t* const kPage[] = {L"manager with an import error", L"save form", L"measure page"};
+            check(bad.empty() && listShown, std::wstring(L"ui ") + (ly == ui::Layout::Console ? L"Console " : L"Baseline ") + kPage[page] +
+                                                L" at 800x560: click targets inside the page, none overlapping, the list shown" + bad);
+        }
+    }
+    h.Use(ui::Layout::Baseline, 96);
+    {   // The pages' lists sort by a header click and keep their selection; Measure's own compare is labelled.
+        auto m = fresh(h, fixture);
+        m->OnClickId(ID_PRESETS);
+        m->prelist_.Select(1);   // "Quiet drivers"
+        m->preSortKey_ = L"name";   // what the header click's onSortChanged sets (wired in Create, which the test skips)
+        m->preSortAsc_ = false;
+        m->RefreshPresetList();
+        const CustomPreset* sel = m->SelectedPreset();
+        bool sorted = m->preV_.size() == 2 && m->presets_[(size_t)m->preV_[0]].name == L"Quiet drivers" && sel && sel->name == L"Quiet drivers";
+        bool labelled = false;
+        for (auto& para : m->MeasureDoc()) if (para.text.find(L"owner-measured") != std::wstring::npos) labelled = true;
+        check(sorted && labelled && m->measV_.size() == 2, L"ui presets: the list sorts by Name (descending) and keeps its selection; "
+                                                            L"the measure page is labelled owner-measured and lists both records");
     }
 }
 
