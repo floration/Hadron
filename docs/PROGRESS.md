@@ -11,9 +11,22 @@
 | `bios` guarded writes (rule 2 changed) | review passed (4 rounds, 1 waived); owner's first real write worked (build f) | module-builder-careful | module/bios-write | #5 |
 | `core/fs` header + design note | not started | lead | - | - |
 | `runas` module | merged; owner's-PC launch checks pending | module-builder | module/runas | #2 |
+| `services` module (pipeline `svcdrv`, full run) | in Push: PR open, first Windows CI run pending; read-only owner's-PC checks pending | pipeline | module/services-svcdrv | (PR) |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)
+
+### 2026-11-11 (Push thread) — svcdrv
+- `services` module (idea `svcdrv`) reached Push after all eight stages; every category 1-4 finding closed
+  (Review R1-R25 and the Finalize mini passes). Main (e085b61, #6) merged into the branch; the one conflict
+  (`core/host/cmdline.h`) kept both new fields. MinGW release build of the merge passes.
+- Docs: `docs/modules/services.md` (new), README and MODULES rows, an ARCHITECTURE fix (`hx::ui::Confirm()` never
+  existed), and six DECISIONS rows from Finalize.
+- First windows-latest run is the first MSVC compile, `--live-test`, real-cmd `restore-dryrun.cmd` and real
+  folder-owner check for this module.
+- Still wanted on the owner's PC, read-only and never applying a preset: class filters, boot path, VBS, DPI, high
+  contrast, keyboard, the minimum-size clamp at 1366x768 125% (list in docs/pipeline/svcdrv/7-finalize.md).
+- Ten follow-up ideas from Finalize sent to the Ideas thread.
 
 ### 2026-11-11 (lead, Opus) — update 5
 - Owner chose guarded BIOS writes; hard rule 2 rewritten, CI allows the write API only in `modules/bios/fwwrite.cpp`.

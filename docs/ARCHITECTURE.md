@@ -78,7 +78,8 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
 - **Focus and input.** The host saves `GetFocus()` on deactivate and restores it on activate, and forwards
   `WM_MOUSEWHEEL` to the active module. It owns Ctrl+Tab, Ctrl+1..9, and Ctrl+Shift+L / Ctrl+Shift+T
   (layout and theme switch), which it takes before `PreTranslateMessage`.
-- **Dialogs.** Every dialog is owned by `IHost::Frame()` and disables the whole suite. Use `hx::ui::Confirm()`.
+- **Dialogs.** Every dialog is owned by `IHost::Frame()` and disables the whole suite. There is no shared
+  confirm dialog: a module shows its plan and its Apply button in its own view (see `core/ui` above).
 - **DPI.** The host handles `WM_DPICHANGED` using the suggested rect, then calls `OnDpiChanged`. Every metric
   goes through `S(px)` with the current DPI. All legacy tools are system-DPI only, so this is real port work.
 - **Worker.** `core/sys` `Worker`: an atomic progress counter, read by the module on a timer, plus cancel and join.
