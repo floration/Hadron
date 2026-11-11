@@ -18,17 +18,21 @@ struct RestoreRow {
     std::wstring name;
     StartCfg cfg;               // the value to restore
     bool writeDelayed = false;  // also restore DelayedAutostart (it was changed, or was recorded)
+    bool ti = false;            // Hadron needed TrustedInstaller for it: the scripts may fail on it (README E)
 };
 
-// True when a name can go into the ASCII batch file as-is (no cmd metacharacters, ASCII only).
+// True when a name can go into the ASCII batch file as-is: an allow-list of ASCII letters, digits, space and
+// _ - . { } # $ @ + ~. Anything else, ( ) included, goes to the .reg files and README section C.
 bool CmdSafeName(const std::wstring& name);
 
 // folder: the recovery folder as it will look from WinRE without the drive, e.g.
 // "\ProgramData\Hadron\services\recovery\20261111-101500". CRLF, ASCII only.
 std::string RestoreCmd(const std::wstring& stamp, const std::wstring& title, const std::vector<RestoreRow>& rows);
 std::string RestoreOnlineCmd(const std::wstring& stamp, const std::vector<RestoreRow>& rows);   // Safe Mode variant
+// notRestored: names deliberately left out of the scripts (README section F), e.g. the first-run recovery's
+// Boot/System-start, storage and never-touch items.
 std::string ReadmeTxt(const std::wstring& stamp, const std::wstring& folder, const std::wstring& title,
-                      const std::vector<RestoreRow>& rows);
+                      const std::vector<RestoreRow>& rows, const std::vector<std::wstring>& notRestored = {});
 // UTF-16LE .reg (with BOM) for names restore.cmd can't carry; imported by hand (README says how).
 std::string UnicodeReg(const std::vector<RestoreRow>& rows, int controlSet);
 
@@ -39,6 +43,6 @@ bool ParseZip(const std::string& zip, std::vector<ZipEntry>* out, std::wstring* 
 // Writes recovery\<stamp>\{restore.cmd, restore-online.cmd, README.txt[, restore-unicode-*.reg]} and
 // recovery-<stamp>.zip into the store, each CREATE_NEW and flushed. *dir and *zip get the paths.
 bool WriteRecovery(Store& store, const std::wstring& stamp, const std::wstring& title, const std::vector<RestoreRow>& rows,
-                   std::wstring* dir, std::wstring* zip, std::wstring* err);
+                   std::wstring* dir, std::wstring* zip, std::wstring* err, const std::vector<std::wstring>& notRestored = {});
 
 }  // namespace hx::services

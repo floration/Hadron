@@ -26,13 +26,49 @@ std::string StartNameA(int s) { return A(StartName(s)); }
 }  // namespace
 
 bool CmdSafeName(const std::wstring& name) {
-    if (name.empty()) return false;
+    // An allow-list, not a deny-list: letters, digits, space and a few marks cmd gives no meaning to inside a
+    // quoted argument. Everything else, ( and ) included (they end an IF block on real cmd.exe), goes to the
+    // .reg files and README section C.
+    if (name.empty() || name.front() == L' ' || name.back() == L' ') return false;
     for (wchar_t c : name) {
-        if (c >= 0x80 || c < 0x20) return false;
-        if (wcschr(L"%!^&|<>\"=;,", c)) return false;
+        bool ok = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || wcschr(L" _-.{}#$@+~", c);
+        if (!ok || c == 0) return false;
     }
     return true;
 }
+
+namespace {
+// The :put subroutine shared by both scripts. No ( ) blocks anywhere near %~1: the name goes into N on a plain
+// line, and every branch is a goto, so a name can never end a block early (real cmd.exe parses a whole block
+// before expanding it). Every reg add is checked.
+void PutSub(std::string& o) {
+    L(o, ":put");
+    L(o, "set \"N=%~1\"");
+    L(o, "reg query \"%K%\\%N%\" >nul 2>&1");
+    L(o, "if errorlevel 1 goto :miss");
+    L(o, "reg add \"%K%\\%N%\" /v Start /t REG_DWORD /d %~2 /f >nul");
+    L(o, "if errorlevel 1 goto :bad");
+    L(o, "if \"%~3\"==\"-\" goto :putok");
+    L(o, "reg add \"%K%\\%N%\" /v DelayedAutostart /t REG_DWORD /d %~3 /f >nul");
+    L(o, "if errorlevel 1 goto :baddelay");
+    L(o, ":putok");
+    L(o, "echo restored \"%N%\" Start=%~2");
+    L(o, "set /a OK+=1");
+    L(o, "exit /b 0");
+    L(o, ":miss");
+    L(o, "echo skip \"%N%\": no such key");
+    L(o, "set /a MISS+=1");
+    L(o, "exit /b 0");
+    L(o, ":bad");
+    L(o, "echo FAILED \"%N%\": Start was not written");
+    L(o, "set /a BAD+=1");
+    L(o, "exit /b 0");
+    L(o, ":baddelay");
+    L(o, "echo FAILED \"%N%\": Start was written, DelayedAutostart was not");
+    L(o, "set /a BAD+=1");
+    L(o, "exit /b 0");
+}
+}  // namespace
 
 std::string RestoreCmd(const std::wstring& stamp, const std::wstring& title, const std::vector<RestoreRow>& rows) {
     std::string o;
@@ -65,28 +101,23 @@ std::string RestoreCmd(const std::wstring& stamp, const std::wstring& title, con
                  "   & rem " + StartNameA(r.cfg.start) + (r.cfg.Delayed() ? " (delayed)" : ""));
     }
     if (skipped)
-        L(o, "echo " + std::to_string(skipped) + " name(s) can't be typed in this script: see README.txt, section C.");
+        L(o, "echo " + std::to_string(skipped) + " names can't be typed in this script: see README.txt, section C.");
     L(o, "reg unload HKLM\\HXOFF");
+    L(o, "if errorlevel 1 echo WARNING: reg unload HKLM\\HXOFF failed. Close regedit, then run: reg unload HKLM\\HXOFF");
     L(o, "echo Done: %OK% restored, %MISS% not on this Windows, %BAD% failed.");
+    L(o, "if not \"%BAD%\"==\"0\" echo Failed rows: see README.txt, section E.");
     L(o, "echo Close this window and choose Continue to start Windows.");
     L(o, "exit /b 0");
     L(o, "");
-    L(o, ":put");
-    L(o, "reg query \"%K%\\%~1\" >nul 2>&1");
-    L(o, "if errorlevel 1 (echo skip %~1: no such key & set /a MISS+=1 & exit /b 0)");
-    L(o, "reg add \"%K%\\%~1\" /v Start /t REG_DWORD /d %~2 /f >nul");
-    L(o, "if errorlevel 1 (echo FAILED %~1 & set /a BAD+=1 & exit /b 0)");
-    L(o, "if not \"%~3\"==\"-\" reg add \"%K%\\%~1\" /v DelayedAutostart /t REG_DWORD /d %~3 /f >nul");
-    L(o, "echo restored %~1 Start=%~2");
-    L(o, "set /a OK+=1");
-    L(o, "exit /b 0");
+    PutSub(o);
     L(o, "");
     L(o, ":nowin");
     L(o, "echo No Windows installation at %T% (no %T%\\Windows\\System32\\config\\SYSTEM).");
     L(o, "echo Run it with the drive that holds Windows, for example: restore.cmd D:");
     L(o, "exit /b 1");
     L(o, ":noload");
-    L(o, "echo reg load failed: is the drive BitLocker-locked? See README.txt, section A.");
+    L(o, "echo reg load failed. Either the drive is BitLocker-locked, see README.txt section A,");
+    L(o, "echo or HKLM\\HXOFF is still loaded from an earlier run: run  reg unload HKLM\\HXOFF  and try again.");
     L(o, "exit /b 1");
     L(o, ":nosel");
     L(o, "echo Could not read Select\\Current from the offline hive. Nothing was changed.");
@@ -102,7 +133,7 @@ std::string RestoreOnlineCmd(const std::wstring& stamp, const std::vector<Restor
     L(o, "rem Admin check with fltmc (Hadron rule 4). Writes Start for existing keys; takes effect at the next restart.");
     L(o, "setlocal EnableExtensions");
     L(o, "fltmc >nul 2>&1");
-    L(o, "if errorlevel 1 (echo Run this from an administrator Command Prompt. & exit /b 1)");
+    L(o, "if errorlevel 1 goto :noadmin");
     L(o, "set \"K=HKLM\\SYSTEM\\CurrentControlSet\\Services\"");
     L(o, "set /a OK=0");
     L(o, "set /a MISS=0");
@@ -113,22 +144,19 @@ std::string RestoreOnlineCmd(const std::wstring& stamp, const std::vector<Restor
         L(o, "call :put \"" + A(r.name) + "\" " + std::to_string(r.cfg.start) + " " + d);
     }
     L(o, "echo Done: %OK% restored, %MISS% not found, %BAD% failed. Restart Windows normally.");
+    L(o, "if not \"%BAD%\"==\"0\" echo Failed rows: see README.txt, section E.");
     L(o, "exit /b 0");
     L(o, "");
-    L(o, ":put");
-    L(o, "reg query \"%K%\\%~1\" >nul 2>&1");
-    L(o, "if errorlevel 1 (echo skip %~1: no such key & set /a MISS+=1 & exit /b 0)");
-    L(o, "reg add \"%K%\\%~1\" /v Start /t REG_DWORD /d %~2 /f >nul");
-    L(o, "if errorlevel 1 (echo FAILED %~1 & set /a BAD+=1 & exit /b 0)");
-    L(o, "if not \"%~3\"==\"-\" reg add \"%K%\\%~1\" /v DelayedAutostart /t REG_DWORD /d %~3 /f >nul");
-    L(o, "echo restored %~1 Start=%~2");
-    L(o, "set /a OK+=1");
-    L(o, "exit /b 0");
+    PutSub(o);
+    L(o, "");
+    L(o, ":noadmin");
+    L(o, "echo Run this from an administrator Command Prompt.");
+    L(o, "exit /b 1");
     return o;
 }
 
 std::string ReadmeTxt(const std::wstring& stamp, const std::wstring& folder, const std::wstring& title,
-                      const std::vector<RestoreRow>& rows) {
+                      const std::vector<RestoreRow>& rows, const std::vector<std::wstring>& notRestored) {
     std::string o;
     std::string f = A(folder);
     L(o, "Hadron services recovery " + A(stamp));
@@ -178,7 +206,27 @@ std::string ReadmeTxt(const std::wstring& stamp, const std::wstring& folder, con
     for (auto& r : rows) {
         std::string n = CmdSafeName(r.name) ? A(r.name) : "(see C) " + ToUtf8(r.name);
         L(o, "  " + n + "  Start=" + std::to_string(r.cfg.start) + " (" + StartNameA(r.cfg.start) + ")" +
-                 (r.writeDelayed ? "  DelayedAutostart=" + std::to_string(r.cfg.delayed < 0 ? 0 : r.cfg.delayed) : ""));
+                 (r.writeDelayed ? "  DelayedAutostart=" + std::to_string(r.cfg.delayed < 0 ? 0 : r.cfg.delayed) : "") +
+                 (r.ti ? "  (needed TrustedInstaller: see E)" : ""));
+    }
+    L(o, "");
+    L(o, "E. Rows that may print FAILED");
+    L(o, "Some service keys accept writes only from TrustedInstaller, not from administrators or SYSTEM.");
+    L(o, "Hadron changed those while impersonating TrustedInstaller. In WinRE and in Safe Mode the scripts");
+    L(o, "run as SYSTEM or as an administrator, so the reg add for such a key may fail and print FAILED.");
+    L(o, "That changes nothing else. Restore those rows with Hadron's Undo, with the TrustedInstaller");
+    L(o, "toggle on, once Windows starts.");
+    int ti = 0;
+    for (auto& r : rows) if (r.ti) ti++;
+    L(o, ti ? "Rows here that needed TrustedInstaller: " + std::to_string(ti) + " (marked in D)." : "No row here needed TrustedInstaller.");
+    if (!notRestored.empty()) {
+        L(o, "");
+        L(o, "F. Not in these scripts (" + std::to_string(notRestored.size()) + " items)");
+        L(o, "Hadron never changes these, so the scripts never write them either: Boot- and System-start");
+        L(o, "values, the storage and boot path, never-touch items and launch-protected services. Windows sets");
+        L(o, "those per PC, and writing an old value back after a disk or controller change can stop Windows");
+        L(o, "from starting.");
+        for (auto& n : notRestored) L(o, "  " + (CmdSafeName(n) ? A(n) : ToUtf8(n)));
     }
     return o;
 }
@@ -268,16 +316,19 @@ bool ParseZip(const std::string& z, std::vector<ZipEntry>* out, std::wstring* er
 }
 
 bool WriteRecovery(Store& store, const std::wstring& stamp, const std::wstring& title, const std::vector<RestoreRow>& rows,
-                   std::wstring* dir, std::wstring* zip, std::wstring* err) {
+                   std::wstring* dir, std::wstring* zip, std::wstring* err, const std::vector<std::wstring>& notRestored) {
     // The folder as seen from WinRE: the data dir without its drive letter.
     std::wstring rel = L"recovery\\" + stamp;
     std::wstring full = store.Path(rel);
-    std::wstring folder = full.size() > 2 && full[1] == L':' ? full.substr(2) : full;
+    std::wstring folder = full;
+    if (folder.rfind(L"\\\\?\\UNC\\", 0) == 0) folder = L"\\\\" + folder.substr(8);
+    else if (folder.rfind(L"\\\\?\\", 0) == 0) folder = folder.substr(4);
+    if (folder.size() > 2 && folder[1] == L':') folder = folder.substr(2);
     if (!store.MakeDir(L"recovery", err) || !store.MakeDir(rel, err)) return false;
     std::vector<ZipEntry> files;
     files.push_back({"restore.cmd", RestoreCmd(stamp, title, rows)});
     files.push_back({"restore-online.cmd", RestoreOnlineCmd(stamp, rows)});
-    files.push_back({"README.txt", ReadmeTxt(stamp, folder, title, rows)});
+    files.push_back({"README.txt", ReadmeTxt(stamp, folder, title, rows, notRestored)});
     bool unicode = false;
     for (auto& r : rows) if (!CmdSafeName(r.name)) unicode = true;
     if (unicode)

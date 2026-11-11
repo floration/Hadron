@@ -1,0 +1,16 @@
+Plan: Default: restore first snapshot (Services)
+Source: default-first:services
+Rows: 4 ticked, 0 unticked, 0 kept or protected; already set: 105
+Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
+[x] DiagTrack  Disabled -> Auto  (4/- -> 2/-)
+    why: as recorded by the first-run snapshot (2026-11-01 18:30)
+    basis: recorded -- first.txt, read from this PC's service manager when Hadron first ran
+[x] Spooler  Manual -> Auto  (3/1 -> 2/0)
+    why: as recorded by the first-run snapshot (2026-11-01 18:30)
+    basis: recorded -- first.txt, read from this PC's service manager when Hadron first ran
+[x] WSearch  Manual -> Auto (delayed)  (3/- -> 2/1)
+    why: as recorded by the first-run snapshot (2026-11-01 18:30)
+    basis: recorded -- first.txt, read from this PC's service manager when Hadron first ran
+[x] XblGameSave  Disabled -> Manual  (4/- -> 3/-)
+    why: as recorded by the first-run snapshot (2026-11-01 18:30)
+    basis: recorded -- first.txt, read from this PC's service manager when Hadron first ran

@@ -109,23 +109,52 @@ HANDLE DupImpersonation(DWORD pid, DWORD* err) {
     return dup;
 }
 
+}  // namespace
+
+bool TiService::Ensure(SvcItem* ti, std::wstring* err) {
+    started_ = false;
+    std::wstring e;
+    if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read the TrustedInstaller service: " + e; return false; }
+    if (ti->state == SERVICE_STOPPED) {
+        if (!b_->Control(L"TrustedInstaller", Op::Start, nullptr, &e)) { *err = L"could not start TrustedInstaller: " + e; return false; }
+        started_ = true;   // our StartService succeeded from STOPPED: only then is it Hadron's to stop
+        if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read TrustedInstaller after starting it: " + e; return false; }
+    }
+    // Someone else is starting it: wait for RUNNING, but it stays theirs.
+    DWORD t0 = GetTickCount();
+    while (ti->state == SERVICE_START_PENDING && GetTickCount() - t0 < waitMs) {
+        Sleep(pollMs);
+        if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read the TrustedInstaller service: " + e; return false; }
+    }
+    if (ti->state != SERVICE_RUNNING) { *err = L"TrustedInstaller is not running (" + StateName(ti->state) + L")"; return false; }
+    return true;
+}
+
+bool TiService::StopIfStarted(std::wstring* note) {
+    if (!started_) return false;
+    started_ = false;
+    std::wstring e;
+    if (!b_->Control(L"TrustedInstaller", Op::Stop, nullptr, &e)) {
+        *note = L"Hadron started TrustedInstaller and could not stop it again: " + e;
+        return false;
+    }
+    *note = L"Hadron started TrustedInstaller for this apply and stopped it again.";
+    return true;
+}
+
+namespace {
+
 class LiveTi : public TiProvider {
 public:
-    explicit LiveTi(Backend* b) : b_(b) {}
+    explicit LiveTi(Backend* b) : svc_(b) {}
     ~LiveTi() override { if (tok_) CloseHandle(tok_); }
 
     bool Acquire(std::wstring* err) override {
-        if (tok_) return true;
-        // Start TrustedInstaller if it is stopped (through the Backend), remembering that Hadron did.
+        if (tok_) { CloseHandle(tok_); tok_ = nullptr; }   // never reuse a token across applies
+        // Start TrustedInstaller only if it is stopped (through the Backend); the claim is reset here.
         SvcItem ti;
-        std::wstring e;
-        if (!b_->Query(L"TrustedInstaller", &ti, &e)) { *err = L"could not read the TrustedInstaller service: " + e; return false; }
-        if (ti.state != SERVICE_RUNNING) {
-            if (!b_->Control(L"TrustedInstaller", Op::Start, nullptr, &e)) { *err = L"could not start TrustedInstaller: " + e; return false; }
-            started_ = true;
-            if (!b_->Query(L"TrustedInstaller", &ti, &e)) { *err = L"could not read TrustedInstaller after starting it: " + e; return false; }
-        }
-        if (ti.state != SERVICE_RUNNING || !ti.pid) { *err = L"TrustedInstaller is not running"; return false; }
+        if (!svc_.Ensure(&ti, err)) return false;
+        if (!ti.pid) { *err = L"TrustedInstaller is running but reports no process id"; return false; }
         // SeDebugPrivilege on this thread only.
         ThreadPrivilege dbg(L"SeDebugPrivilege");
         if (!dbg.ok()) { *err = Err(L"SeDebugPrivilege is not available", dbg.err()); return false; }
@@ -144,7 +173,7 @@ public:
         return true;
     }
 
-    bool StartedService() const override { return started_; }
+    bool StartedService() const override { return svc_.Started(); }
 
     bool Impersonate(std::wstring* identity, std::wstring* err) override {
         if (!tok_) { *err = L"no TrustedInstaller token"; return false; }
@@ -179,20 +208,13 @@ public:
 
     bool Release(std::wstring* note) override {
         if (tok_) { CloseHandle(tok_); tok_ = nullptr; }
-        if (!started_) return false;
-        std::wstring e;
-        if (!b_->Control(L"TrustedInstaller", Op::Stop, nullptr, &e)) {
-            *note = L"Hadron started TrustedInstaller and could not stop it again: " + e;
-            return false;
-        }
-        *note = L"Hadron started TrustedInstaller for this apply and stopped it again.";
-        return true;
+        return svc_.StopIfStarted(note);
     }
 
 private:
-    Backend* b_;
+    TiService svc_;
     HANDLE tok_ = nullptr;
-    bool started_ = false, on_ = false;
+    bool on_ = false;
 };
 
 }  // namespace

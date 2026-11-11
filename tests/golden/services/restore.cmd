@@ -23,20 +23,38 @@ call :put "DiagTrack" 2 -   & rem Auto
 call :put "MapsBroker" 2 1   & rem Auto (delayed)
 call :put "Spooler" 2 -   & rem Auto
 call :put "CDPUserSvc" 2 0   & rem Auto
-echo 2 name(s) can't be typed in this script: see README.txt, section C.
+echo 3 names can't be typed in this script: see README.txt, section C.
 reg unload HKLM\HXOFF
+if errorlevel 1 echo WARNING: reg unload HKLM\HXOFF failed. Close regedit, then run: reg unload HKLM\HXOFF
 echo Done: %OK% restored, %MISS% not on this Windows, %BAD% failed.
+if not "%BAD%"=="0" echo Failed rows: see README.txt, section E.
 echo Close this window and choose Continue to start Windows.
 exit /b 0
 
 :put
-reg query "%K%\%~1" >nul 2>&1
-if errorlevel 1 (echo skip %~1: no such key & set /a MISS+=1 & exit /b 0)
-reg add "%K%\%~1" /v Start /t REG_DWORD /d %~2 /f >nul
-if errorlevel 1 (echo FAILED %~1 & set /a BAD+=1 & exit /b 0)
-if not "%~3"=="-" reg add "%K%\%~1" /v DelayedAutostart /t REG_DWORD /d %~3 /f >nul
-echo restored %~1 Start=%~2
+set "N=%~1"
+reg query "%K%\%N%" >nul 2>&1
+if errorlevel 1 goto :miss
+reg add "%K%\%N%" /v Start /t REG_DWORD /d %~2 /f >nul
+if errorlevel 1 goto :bad
+if "%~3"=="-" goto :putok
+reg add "%K%\%N%" /v DelayedAutostart /t REG_DWORD /d %~3 /f >nul
+if errorlevel 1 goto :baddelay
+:putok
+echo restored "%N%" Start=%~2
 set /a OK+=1
+exit /b 0
+:miss
+echo skip "%N%": no such key
+set /a MISS+=1
+exit /b 0
+:bad
+echo FAILED "%N%": Start was not written
+set /a BAD+=1
+exit /b 0
+:baddelay
+echo FAILED "%N%": Start was written, DelayedAutostart was not
+set /a BAD+=1
 exit /b 0
 
 :nowin
@@ -44,7 +62,8 @@ echo No Windows installation at %T% (no %T%\Windows\System32\config\SYSTEM).
 echo Run it with the drive that holds Windows, for example: restore.cmd D:
 exit /b 1
 :noload
-echo reg load failed: is the drive BitLocker-locked? See README.txt, section A.
+echo reg load failed. Either the drive is BitLocker-locked, see README.txt section A,
+echo or HKLM\HXOFF is still loaded from an earlier run: run  reg unload HKLM\HXOFF  and try again.
 exit /b 1
 :nosel
 echo Could not read Select\Current from the offline hive. Nothing was changed.

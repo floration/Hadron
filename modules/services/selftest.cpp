@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 
 namespace hx::services {
@@ -98,16 +99,127 @@ bool WriteAll(const std::wstring& path, const std::string& data) {   // test out
     return ok;
 }
 
-// A fresh, empty temp folder for one test's data dir. Left in place (the path is printed); nothing is deleted.
+// A fresh, empty temp folder for one test's data dir, made the way Hadron makes its own (Store::EnsureRoot: owner
+// Administrators, protected DACL), so RunApply's owner check accepts it. Left in place; nothing is deleted.
 std::wstring NewTempDir(const std::wstring& tag) {
     wchar_t tmp[MAX_PATH];
     DWORD n = GetTempPathW(MAX_PATH, tmp);
     std::wstring base = (n && n < MAX_PATH) ? std::wstring(tmp) : L".\\";
+    while (!base.empty() && base.back() == L'\\') base.pop_back();
     for (int i = 0; i < 1000; i++) {
-        std::wstring d = base + L"HadronSvcTest-" + std::to_wstring(GetCurrentProcessId()) + L"-" + tag + L"-" + std::to_wstring(i);
-        if (CreateDirectoryW(sys::ToExtended(d).c_str(), nullptr)) return d;
+        std::wstring d = base + L"\\HadronSvcTest-" + std::to_wstring(GetCurrentProcessId()) + L"-" + tag + L"-" + std::to_wstring(i);
+        if (GetFileAttributesW(sys::ToExtended(d).c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        std::wstring e;
+        if (Store(d).EnsureRoot(true, &e)) return d;
+        wprintf(L"  [info] could not make the test data dir %ls: %ls\n", d.c_str(), e.c_str());
+        return L"";
     }
     return L"";
+}
+
+// The echo-only variant of a generated restore.cmd that CI runs on real cmd.exe (windows-latest): every reg call
+// becomes "call :dry reg ...", which prints it and sets errorlevel 0; Select\Current reads as 1; and one extra row
+// with ( ) in its name is fed to :put, to prove the subroutine survives the characters that broke the old block
+// form, although CmdSafeName keeps such names out of real scripts. Nothing touches the registry.
+std::string DryRunCmd(const std::string& cmd) {
+    std::string out;
+    size_t a = 0;
+    bool injected = false;
+    while (a < cmd.size()) {
+        size_t b = cmd.find("\r\n", a);
+        std::string line = cmd.substr(a, b == std::string::npos ? std::string::npos : b - a);
+        a = b == std::string::npos ? cmd.size() : b + 2;
+        if (line.rfind("for /f ", 0) == 0) {
+            size_t p = line.find("('"), q = line.find("')");
+            if (p != std::string::npos && q != std::string::npos) line = line.substr(0, p) + "('echo Current REG_DWORD 0x1')" + line.substr(q + 2);
+        }
+        if (!injected && line == "reg unload HKLM\\HXOFF") {
+            out += "call :put \"Intel(R) Dry Run (x86)\" 3 -\r\n";
+            injected = true;
+        }
+        if (line.rfind("reg ", 0) == 0) line = "call :dry " + line;
+        out += line + "\r\n";
+    }
+    out += ":dry\r\necho DRYRUN %*\r\nexit /b 0\r\n";
+    return out;
+}
+
+bool IsReparse(const std::wstring& p) {
+    DWORD a = GetFileAttributesW(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+bool MakeJunction(const std::wstring& link, const std::wstring& target);
+
+// A junction, or failing that a directory symbolic link, under dir -> target (an existing folder), that the
+// system reports as a reparse point. For the EnsureRoot test only, inside the test's own temp folder. Returns its
+// path, or "" when neither works here.
+std::wstring MakeLink(const std::wstring& dir, const std::wstring& target, std::wstring* how) {
+    std::wstring j = dir + L"\\junction";
+    if (MakeJunction(j, target) && IsReparse(j)) { *how = L"junction"; return j; }
+    std::wstring s = dir + L"\\symlink";
+    if (CreateSymbolicLinkW(s.c_str(), target.c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY | 0x2 /* ALLOW_UNPRIVILEGED_CREATE */) && IsReparse(s)) {
+        *how = L"symbolic link";
+        return s;
+    }
+    *how = L"neither a junction nor a symbolic link that reports FILE_ATTRIBUTE_REPARSE_POINT";
+    return L"";
+}
+
+bool MakeJunction(const std::wstring& link, const std::wstring& target) {
+    if (!CreateDirectoryW(link.c_str(), nullptr)) return false;
+    HANDLE h = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    std::wstring sub = L"\\??\\" + target;
+    std::vector<BYTE> buf(16 + (sub.size() + 1 + target.size() + 1) * 2, 0);
+    auto put16 = [&](size_t at, size_t v) { buf[at] = (BYTE)(v & 0xFF); buf[at + 1] = (BYTE)(v >> 8); };
+    DWORD tag = 0xA0000003;   // IO_REPARSE_TAG_MOUNT_POINT
+    memcpy(buf.data(), &tag, 4);
+    put16(4, buf.size() - 8);
+    put16(8, 0);
+    put16(10, sub.size() * 2);
+    put16(12, (sub.size() + 1) * 2);
+    put16(14, target.size() * 2);
+    memcpy(buf.data() + 16, sub.c_str(), sub.size() * 2);
+    memcpy(buf.data() + 16 + (sub.size() + 1) * 2, target.c_str(), target.size() * 2);
+    DWORD ret = 0;
+    BOOL ok = DeviceIoControl(h, 0x000900A4 /* FSCTL_SET_REPARSE_POINT */, buf.data(), (DWORD)buf.size(), nullptr, 0, &ret, nullptr);
+    CloseHandle(h);
+    return ok != FALSE;
+}
+
+// A TrustedInstaller provider that is only the service half (TiService) over the fake backend: what LiveTi does
+// with the service, without the token work.
+struct ServiceOnlyTi : TiProvider {
+    TiService svc;
+    explicit ServiceOnlyTi(Backend* b) : svc(b) {}
+    bool Acquire(std::wstring* err) override { SvcItem t; return svc.Ensure(&t, err); }
+    bool StartedService() const override { return svc.Started(); }
+    bool Impersonate(std::wstring* identity, std::wstring*) override { *identity = L"ti"; return true; }
+    void Revert() override {}
+    bool Release(std::wstring* note) override { return svc.StopIfStarted(note); }
+};
+
+SvcItem Mk(const wchar_t* name, int start, std::vector<std::wstring> deps, DWORD type = 0x10) {
+    SvcItem s;
+    s.name = name;
+    s.type = type;
+    s.kind = KindOf(type);
+    s.cfg = StartCfg{start, -1};
+    s.regStart = start;
+    s.deps = std::move(deps);
+    return s;
+}
+
+PlanRow Lower4(const SvcItem& s, bool include = true) {
+    PlanRow r;
+    r.name = s.name;
+    r.before = s.cfg;
+    r.after = StartCfg{4, s.cfg.delayed};
+    r.op = WriteOp{4, -1};
+    r.deps = s.deps;
+    r.include = include;
+    return r;
 }
 
 std::vector<SvcItem> Folded(FakeBackend& b) {
@@ -234,6 +346,11 @@ int RunSelftest(const std::vector<std::wstring>& args) {
     // ---- pure text ----------------------------------------------------------------------------------
     {
         StartCfg c;
+        std::wstring ev0;
+        HwInfo hok;
+        hok.ok = true;
+        check(HwEvidence(hok, L"bogus:x", L"x", &ev0) == 0,
+              L"hw evidence: an unknown hint fails closed (kept, never ticked)");
         check(CfgText(StartCfg{2, 1}) == L"2/1" && CfgText(StartCfg{3, -1}) == L"3/-", L"CfgText: \"2/1\", \"3/-\"");
         check(ParseCfg(L"4/0", &c) && c.start == 4 && c.delayed == 0 && !ParseCfg(L"5/-", &c) && !ParseCfg(L"2/x", &c),
               L"ParseCfg accepts 4/0 and rejects 5/- and 2/x");
@@ -307,6 +424,29 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         for (auto& e : kb.entries) if (e.stock >= 0) stock++;
         info(L"KB: " + std::to_wstring(n) + L" entries, " + std::to_wstring(stock) +
              L" with a Windows stock value (none has a measured or published stock basis yet)");
+    }
+
+    // ---- A5 first: the data folder owner check (before any test makes a data dir) ----------------------------
+    {
+        bool wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+        wchar_t tmp[MAX_PATH];
+        DWORD n = GetTempPathW(MAX_PATH, tmp);
+        std::wstring d;
+        bool made = false;
+        for (int i = 0; i < 1000 && !made; i++) {   // default ACL, the token's default owner
+            d = std::wstring(n && n < MAX_PATH ? tmp : L".\\") + L"HadronSvcTest-" + std::to_wstring(GetCurrentProcessId()) + L"-owner-" + std::to_wstring(i);
+            made = CreateDirectoryW(d.c_str(), nullptr) != FALSE;
+        }
+        std::wstring e;
+        bool ok = made && Store(d).EnsureRoot(true, &e);
+        if (!made) info(L"A5: could not create " + d);
+        else if (ok) info(L"A5: a folder made with this token's default owner passes (an elevated token's default owner is Administrators)");
+        else check(e.find(L"owned by") != std::wstring::npos,
+                   L"A5: a data folder owned by someone other than Administrators or SYSTEM is refused: " + e);
+        if (wine) {
+            Store::AcceptTokenUserAsOwner() = true;
+            info(L"A5: Wine ignores the owner in a security descriptor, so from here on this process's own user passes the owner check");
+        }
     }
 
     // ---- fixture: snapshot round trip, hw --------------------------------------------------------------
@@ -435,6 +575,54 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         check(pn.Included() == 0, L"guard: never-touch items refuse single changes too");
         Plan pw = BuildSingle(*ItemOf(w.items, L"WinDefend"), StartCfg{3, -1}, w.items, c);
         check(pw.Included() == 1, L"guard: a never-in-preset item allows a single change (Windows may still refuse)");
+        SvcItem sys1 = *ItemOf(w.items, L"MapsBroker");
+        sys1.cfg.start = 1;
+        check(CheckGuard(sys1, c).neverTouch, L"guard: a Win32 service whose registry Start is System -> never touch (logic M6)");
+        Ctx nohw = c;
+        nohw.hw = nullptr;
+        nohw.Prepare();
+        HwInfo noBoot = w.hw;
+        noBoot.bootDisk.clear();
+        Ctx nb = c;
+        nb.hw = &noBoot;
+        nb.Prepare();
+        Plan pnh = BuildPreset(LV_STRIPPED, TAB_DRIVERS, w.items, nohw);
+        bool noteHw = false;
+        for (auto& n : pnh.notes) if (n.find(L"device list could not be read") != std::wstring::npos) noteHw = true;
+        check(CheckGuard(*ItemOf(w.items, L"igfxn"), nohw).neverTouch && CheckGuard(*ItemOf(w.items, L"igfxn"), nb).neverTouch &&
+                  pnh.Included() == 0 && noteHw && !CheckGuard(*ItemOf(w.items, L"DiagTrack"), nohw).neverTouch,
+              L"guard: no device list or no boot disk -> every driver kept, with a note (fail closed); services unaffected");
+        SvcItem grouped = *ItemOf(w.items, L"MapsBroker");
+        grouped.group = L"TestGroup";
+        Plan pg = BuildSingle(grouped, StartCfg{2, 1}, w.items, c);
+        Plan pg2 = BuildSingle(grouped, StartCfg{2, 0}, w.items, c);
+        check(pg.Included() == 0 && !pg.rows.empty() && pg.rows[0].blocked.find(L"load-order group") != std::wstring::npos &&
+                  pg2.Included() <= 1,
+              L"Auto (delayed) is never offered for a service in a load-order group (docs D1)");
+        {   // M5: a preset never raises (Disabled -> Manual), even if the KB target is Manual.
+            Kb k5;
+            k5.Parse("V\t1\tservices\nB\t19045\n"
+                     "K\tXblGameSave\tsvc\t19045\tt\te\t\t\t3\t\t\twhy\t\t\t0\t0\treasoning\tn\treasoning\tn\t\t\t\t\t\t\n", &err);
+            Ctx c5 = c;
+            c5.kb = &k5;
+            Plan p5 = BuildPreset(LV_BLOAT, TAB_SERVICES, w.items, c5);
+            bool note = false;
+            for (auto& n : p5.notes) if (n.find(L"stricter") != std::wstring::npos) note = true;
+            check(ItemOf(w.items, L"XblGameSave")->cfg.start == 4 && !RowOf(p5, L"XblGameSave") && note,
+                  L"a preset never raises a start type: Disabled stays Disabled where the level says Manual (logic M5)");
+        }
+        {   // M6: Restore first snapshot can't lower a live System-start driver without sysok.
+            std::vector<SvcItem> it6 = w.items;
+            for (auto& i : it6) if (i.name == L"Beep") i.cfg = StartCfg{1, -1};
+            Snapshot f6 = w.fx.first;
+            for (auto& i : f6.items) if (i.name == L"Beep") i.cfg = StartCfg{3, -1};
+            Ctx c6 = c;
+            c6.first = &f6;
+            Plan p6 = BuildDefault(false, TAB_DRIVERS, it6, c6);
+            const PlanRow* br = RowOf(p6, L"Beep");
+            check(br && !br->blocked.empty() && br->blocked.find(L"sysok") != std::wstring::npos,
+                  L"Restore first snapshot: a live System-start driver without sysok is blocked (logic M6)");
+        }
         Plan pc = BuildControl(*ItemOf(w.items, L"igfxn"), 1, w.fx.backend, w.items);
         check(!pc.rows.empty() && !pc.rows[0].blocked.empty(), L"guard: drivers are never loaded or unloaded live");
         Plan pr = BuildControl(*ItemOf(w.items, L"Audiosrv"), 2, w.fx.backend, w.items);
@@ -466,7 +654,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         const PlanRow* sn = RowOf(st, L"SensorService");
         check(sn && sn->include, L"Stripped: never-seen sensors -> ticked, with evidence");
         const PlanRow* sp = RowOf(st, L"Spooler");
-        check(sp && !sp->include && sp->warning.find(L"Fax") != std::wstring::npos,
+        check(sp && !sp->include && sp->depWarning.find(L"Fax") != std::wstring::npos,
               L"dependency check: disabling Spooler while Fax depends on it -> warning, unticked");
         const PlanRow* vm = RowOf(st, L"vmicheartbeat");
         check(vm && vm->include && !vm->contested.empty(), L"Stripped: Hyper-V guest pieces on hardware -> ticked, contested shown");
@@ -484,6 +672,57 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         Plan df = PlanFor(LEVEL_DEFAULT, TAB_SERVICES, w);
         check(df.Included() == 3 && RowOf(df, L"WSearch") && RowOf(df, L"WSearch")->after.Delayed(),
               L"Default (first snapshot): 3 rows, WSearch back to Auto (delayed)");
+        {   // A7: a lingering DelayedAutostart=1 under Manual, restored to plain Auto (sniffer delayedlinger).
+            World dl;
+            std::wstring e;
+            bool okw = MakeWorld(fixture + L"\\delayedlinger", &kb, &dl, &e);
+            Plan pd = PlanFor(LEVEL_DEFAULT, TAB_SERVICES, dl);
+            const PlanRow* sr = RowOf(pd, L"Spooler");
+            check(okw && sr && sr->before.start == 3 && sr->before.delayed == 1 && sr->op.start == 2 && sr->op.delayed == 0 &&
+                      sr->after.start == 2 && sr->after.delayed == 0 && !sr->after.Delayed(),
+                  L"A7: Restore first snapshot writes DelayedAutostart=0 with Start=2 when 1 was left behind (3/1 -> 2/0, not 2/1)");
+            std::string got = DumpPlan(pd);
+            std::wstring gp = golden + L"\\plan-services-default-delayedlinger.txt";
+            if (update) check(WriteAll(gp, got), L"wrote golden " + gp);
+            else {
+                std::string want;
+                bool have = ReadAll(gp, &want);
+                check(have && want == got, L"golden plan-services-default-delayedlinger.txt" + std::wstring(have ? (want == got ? L"" : L" differs") : L" missing"));
+            }
+            // The same through stock (in-memory KB with a stock value of plain Auto).
+            Kb kd;
+            kd.Parse("V\t1\tservices\nB\t19045\n"
+                     "K\tSpooler\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t0\treasoning\tn\t\t\t2/0\towner-measured\tclean VM\t\t\t\n", &e);
+            Ctx cd = dl.ctx;
+            cd.kb = &kd;
+            Plan ps = BuildDefault(true, TAB_SERVICES, dl.items, cd);
+            const PlanRow* ss = RowOf(ps, L"Spooler");
+            check(ss && ss->op.start == 2 && ss->op.delayed == 0, L"A7: Windows stock to plain Auto also writes DelayedAutostart=0 over a lingering 1");
+        }
+        {   // A2: recovery\first restores only what Hadron itself may change.
+            std::vector<std::wstring> skipped;
+            std::vector<RestoreRow> fr = FirstRestoreRows(w.fx.first, w.ctx, &skipped);
+            auto has = [&](const wchar_t* n) { for (auto& r : fr) if (IEq(r.name, n)) return true; return false; };
+            auto skip = [&](const wchar_t* n) { for (auto& s : skipped) if (IEq(s, n)) return true; return false; };
+            bool noLow = true;
+            for (auto& r : fr) if (r.cfg.start < 2) noLow = false;
+            check(noLow && !has(L"stornvme") && !has(L"disk") && !has(L"pci") && !has(L"RpcSs") && !has(L"WdBoot") && !has(L"WinDefend") &&
+                      !has(L"ExampleAudioFlt") && skip(L"stornvme") && skip(L"disk") && skip(L"RpcSs") && has(L"WSearch") && has(L"DiagTrack"),
+                  L"A2: the first-run recovery leaves out Boot/System values, storage, the boot path, never-touch and protected items (" +
+                      std::to_wstring(fr.size()) + L" rows, " + std::to_wstring(skipped.size()) + L" left out)");
+            const std::wstring ftitle = L"start types as recorded when Hadron first ran";
+            std::string fcmd = RestoreCmd(L"first", ftitle, fr);
+            std::string frd = ReadmeTxt(L"first", L"\\ProgramData\\Hadron\\services\\recovery\\first", ftitle, fr, skipped);
+            check(frd.find("F. Not in these scripts") != std::string::npos && frd.find("  stornvme\r\n") != std::string::npos,
+                  L"A2: README.txt lists the names left out (section F)");
+            for (auto& g2 : {std::make_pair(std::wstring(L"first-restore.cmd"), fcmd), std::make_pair(std::wstring(L"first-README.txt"), frd)}) {
+                std::wstring gp = golden + L"\\" + g2.first;
+                if (update) { check(WriteAll(gp, g2.second), L"wrote golden " + gp); continue; }
+                std::string want;
+                bool have = ReadAll(gp, &want);
+                check(have && want == g2.second, L"golden " + g2.first + (have ? (want == g2.second ? L"" : L" differs") : L" missing"));
+            }
+        }
         Plan sk = PlanFor(-2, TAB_SERVICES, w);
         check(sk.rows.empty() && !sk.notes.empty(), L"Default (Windows stock): no KB stock values yet -> no rows, with a note");
         // Stock mechanism with an in-memory KB that has one measured stock value (and one refused storage driver).
@@ -561,7 +800,8 @@ int RunSelftest(const std::vector<std::wstring>& args) {
     {
         std::vector<RestoreRow> rows = {{L"DiagTrack", {2, -1}, false}, {L"MapsBroker", {2, 1}, true},
                                         {L"Spooler", {2, -1}, false}, {L"CDPUserSvc", {2, 0}, true},
-                                        {L"Bad&Name", {3, -1}, false}, {L"D\u00e9mo", {3, -1}, false}};
+                                        {L"Bad&Name", {3, -1}, false}, {L"D\u00e9mo", {3, -1}, false},
+                                        {L"Intel(R) TPM Provisioning Service", {2, 1}, true, true}};
         std::string cmd = RestoreCmd(L"20261111-101500", L"Stripped (Services)", rows);
         std::wstring gp = golden + L"\\restore.cmd";
         if (update) check(WriteAll(gp, cmd), L"wrote golden " + gp);
@@ -574,8 +814,38 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         for (unsigned char ch : cmd) if (ch >= 0x80) ascii = false;
         check(ascii && cmd.find("Bad&Name") == std::string::npos && cmd.find("\r\n") != std::string::npos,
               L"restore.cmd is ASCII with CRLF and leaves cmd-unsafe names to the .reg files");
-        check(CmdSafeName(L"DiagTrack") && !CmdSafeName(L"A&B") && !CmdSafeName(L"a%b") && !CmdSafeName(L"D\u00e9mo"),
-              L"CmdSafeName rejects cmd metacharacters and non-ASCII");
+        check(CmdSafeName(L"DiagTrack") && !CmdSafeName(L"A&B") && !CmdSafeName(L"a%b") && !CmdSafeName(L"D\u00e9mo") &&
+                  !CmdSafeName(L"Intel(R) X") && !CmdSafeName(L"a)b") && !CmdSafeName(L"a:b") && !CmdSafeName(L" lead") &&
+                  CmdSafeName(L"NVDisplay.ContainerLocalSystem") && CmdSafeName(L"Some Service_1-2"),
+              L"CmdSafeName is an allow-list: ( ) and every other cmd character go to the .reg files (A1)");
+        bool blockFree = cmd.find("Intel(R)") == std::string::npos;
+        std::string online = RestoreOnlineCmd(L"20261111-101500", rows);
+        for (const std::string* s : {&cmd, &online}) {
+            size_t a = 0;
+            while (a < s->size()) {
+                size_t b = s->find("\r\n", a);
+                std::string line = s->substr(a, b == std::string::npos ? std::string::npos : b - a);
+                a = b == std::string::npos ? s->size() : b + 2;
+                bool usesName = line.find("%~1") != std::string::npos || line.find("%N%") != std::string::npos;
+                if ((usesName && (line.find('(') != std::string::npos || line.find(')') != std::string::npos)) ||
+                    (line.rfind("if ", 0) == 0 && line.find('(') != std::string::npos))
+                    blockFree = false;
+            }
+        }
+        check(blockFree && cmd.find("goto :baddelay") != std::string::npos && cmd.find("reg unload HKLM\\HXOFF\r\nif errorlevel 1 echo WARNING") != std::string::npos &&
+                  online.find("goto :noadmin") != std::string::npos && online.find("goto :baddelay") != std::string::npos,
+              L"restore scripts: no ( ) block near a name, every reg add and the unload checked (A1, win32 M1)");
+        std::string dry = DryRunCmd(cmd);
+        std::wstring dgp = golden + L"\\restore-dryrun.cmd";
+        if (update) check(WriteAll(dgp, dry), L"wrote golden " + dgp);
+        else {
+            std::string want;
+            bool have = ReadAll(dgp, &want);
+            check(have && want == dry, L"restore-dryrun.cmd matches tests/golden/services (CI runs it on real cmd.exe)" + std::wstring(have ? L"" : L" (missing)"));
+        }
+        std::string readme = ReadmeTxt(L"20261111-101500", L"\\x", L"t", rows);
+        check(readme.find("E. Rows that may print FAILED") != std::string::npos && readme.find("(needed TrustedInstaller: see E)") != std::string::npos,
+              L"README.txt says rows that needed TrustedInstaller may fail in WinRE / Safe Mode (docs D9)");
         std::vector<ZipEntry> z = {{"restore.cmd", cmd}, {"README.txt", "readme"}};
         std::string zip = MakeZip(z, 0x5000, 0x5B6B);
         std::vector<ZipEntry> back;
@@ -602,6 +872,11 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         }
         check(parsed && hasCmd && hasReadme && hasReg, L"recovery zip parses back with restore.cmd, README.txt and the .reg files");
         check(!WriteRecovery(s, L"rtest", L"test", rows, &dir, &zp, &err), L"recovery files are never overwritten");
+        Store sp(L"\\\\?\\" + tmpRoot);
+        std::string rd;
+        bool wp = WriteRecovery(sp, L"rtest2", L"test", rows, &dir, &zp, &err) && sp.Read(L"recovery\\rtest2\\README.txt", &rd, &err);
+        check(wp && rd.find("\\\\?\\") == std::string::npos && rd.find("\\recovery\\rtest2\\restore.cmd") != std::string::npos,
+              L"a \\\\?\\-prefixed data dir gives a README path without the prefix (sniffer #8)");
     }
 
     // ---- first-run snapshot ---------------------------------------------------------------------------------
@@ -609,20 +884,27 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         std::wstring root = NewTempDir(L"first");
         Store s(root);
         Snapshot first;
-        FirstRunResult r = EnsureFirstSnapshot(s, w.items, L"19045", L"machine-a", &first);
+        Ctx ca = w.ctx, cb = w.ctx;
+        ca.machine = L"machine-a";
+        cb.machine = L"machine-b";
+        FirstRunResult r = EnsureFirstSnapshot(s, w.items, ca, &first);
         check(r.wrote && r.error.empty() && s.Exists(L"recovery-first.zip") && s.Exists(L"recovery\\first\\restore.cmd"),
               L"first run: first.txt, recovery\\first and recovery-first.zip written" + (r.error.empty() ? L"" : L": " + r.error));
         Snapshot again;
-        FirstRunResult r2 = EnsureFirstSnapshot(s, w.items, L"19045", L"machine-a", &again);
+        FirstRunResult r2 = EnsureFirstSnapshot(s, w.items, ca, &again);
         check(r2.existed && !r2.wrote && again.items.size() == first.items.size(), L"first run: an existing first.txt is read, never rewritten");
-        FirstRunResult r3 = EnsureFirstSnapshot(s, w.items, L"19045", L"machine-b", &again);
+        FirstRunResult r3 = EnsureFirstSnapshot(s, w.items, cb, &again);
         check(r3.foreign, L"first run: a first.txt from another machine GUID is flagged");
         std::wstring root2 = NewTempDir(L"corrupt");
         Store s2(root2);
         s2.WriteNew(L"first.txt", "not a snapshot", &err);
-        FirstRunResult r4 = EnsureFirstSnapshot(s2, w.items, L"19045", L"machine-a", &again);
+        FirstRunResult r4 = EnsureFirstSnapshot(s2, w.items, ca, &again);
         check(r4.corrupt && r4.wrote && s2.List(L"first.txt.corrupt-*").size() == 1,
               L"first run: a corrupt first.txt is renamed aside (kept), and a new one written");
+        std::string fc;
+        check(s.Read(L"recovery\\first\\restore.cmd", &fc, &err) && fc.find("\"stornvme\"") == std::string::npos &&
+                  fc.find("\"WSearch\"") != std::string::npos,
+              L"first run: recovery\\first\\restore.cmd leaves out the storage drivers (A2)");
     }
 
     // ---- apply -> undo round trip on the fake ----------------------------------------------------------------
@@ -837,6 +1119,273 @@ int RunSelftest(const std::vector<std::wstring>& args) {
               L"interrupted fixture: offers Undo/Resume and notices TrustedInstaller left running");
     }
 
+    // ---- A4: undo and resume guards, foreign logs -------------------------------------------------------------
+    {
+        World f;
+        std::wstring e;
+        bool okw = MakeWorld(fixture + L"\\forged", &kb, &f, &e);
+        auto logs = LoadLogs(Store(fixture + L"\\forged"), nullptr);
+        int k = FindUndoable(logs);
+        Plan u = k >= 0 ? BuildUndo(logs[k], f.fx.backend, f.ctx) : Plan{};
+        MarkTi(&u, f.fx.backend, false);
+        bool allBlocked = u.rows.size() == 3;
+        for (auto& r : u.rows) if (r.blocked.empty() || r.include || r.canToggle) allBlocked = false;
+        check(okw && k == 0 && allBlocked && u.Included() == 0 && RowOf(u, L"stornvme") && RowOf(u, L"disk") && RowOf(u, L"RpcSs"),
+              L"A4: a forged undo log (valid CRCs) can't set stornvme, disk or RpcSs to Disabled: every row blocked");
+        UndoLog other = logs.empty() ? UndoLog{} : logs[0];
+        other.machine = L"another-machine";
+        Plan um = BuildUndo(other, f.fx.backend, f.ctx);
+        Plan rm = BuildResume(other, f.fx.backend, f.items, f.ctx);
+        UndoLog oldBuild = logs.empty() ? UndoLog{} : logs[0];
+        oldBuild.build = L"22631";
+        Plan ub = BuildUndo(oldBuild, f.fx.backend, f.ctx);
+        auto refused = [](const Plan& p) { return p.rows.empty() && !p.notes.empty() && p.notes[0].rfind(L"Refused", 0) == 0; };
+        check(refused(um) && refused(rm) && refused(ub), L"A4: Undo and Resume refuse a log from another machine GUID or another build");
+        // Resume through the same guards: a log that would raise a service to System start.
+        UndoLog rs = logs.empty() ? UndoLog{} : logs[0];
+        rs.hasE = false;
+        rs.rows.clear();
+        UndoRow ur;
+        ur.seq = 1; ur.name = L"MapsBroker"; ur.before = ItemOf(f.items, L"MapsBroker")->cfg; ur.after = StartCfg{1, -1};
+        rs.rows.push_back(ur);
+        Plan rp = BuildResume(rs, f.fx.backend, f.items, f.ctx);
+        check(rp.Included() == 0 && RowOf(rp, L"MapsBroker") && !RowOf(rp, L"MapsBroker")->blocked.empty(),
+              L"A4: Resume refuses a row that would give a service Boot or System start");
+        // Records dropped for a bad CRC are shown on the plan (logic M9).
+        World it;
+        MakeWorld(fixture + L"\\interrupted", &kb, &it, &e);
+        auto il = LoadLogs(Store(fixture + L"\\interrupted"), nullptr);
+        Plan iu = il.empty() ? Plan{} : BuildUndo(il[0], it.fx.backend, it.ctx);
+        bool bad = false;
+        for (auto& n : iu.notes) if (n.find(L"failed their check") != std::wstring::npos) bad = true;
+        check(bad, L"Undo shows how many log records failed their check and were ignored (logic M9)");
+    }
+
+    // ---- A7 in Undo and Resume ----------------------------------------------------------------------------------
+    {
+        World a;
+        freshWorld(&a);
+        a.fx.backend.SetStart(L"MapsBroker", WriteOp{3, 1}, Identity::Admin, &err);   // Manual, DelayedAutostart=1 left over
+        UndoLog l;
+        l.hasB = true; l.hasE = true; l.stamp = L"20261111-090000"; l.source = L"single"; l.count = 1;
+        l.machine = a.ctx.machine; l.build = a.ctx.build;
+        UndoRow r;
+        r.seq = 1; r.name = L"MapsBroker"; r.before = StartCfg{2, -1}; r.after = StartCfg{3, -1};
+        r.hasI = true; r.hasD = true; r.result = L"ok"; r.observed = StartCfg{2, -1}; r.afterObs = StartCfg{3, 1};
+        l.rows.push_back(r);
+        Plan u = BuildUndo(l, a.fx.backend, a.ctx);
+        const PlanRow* m = RowOf(u, L"MapsBroker");
+        check(m && m->op.start == 2 && m->op.delayed == 0 && m->after.delayed == 0,
+              L"A7: Undo to plain Auto writes DelayedAutostart=0 over a lingering 1 (not Auto (delayed))");
+        UndoLog rl = l;
+        rl.hasE = false;
+        rl.rows[0].hasD = false;
+        rl.rows[0].before = StartCfg{3, 1};
+        rl.rows[0].after = StartCfg{2, -1};
+        Plan rp = BuildResume(rl, a.fx.backend, a.items, a.ctx);
+        const PlanRow* mr = RowOf(rp, L"MapsBroker");
+        check(mr && mr->op.start == 2 && mr->op.delayed == 0, L"A7: Resume compares the raw delayed value too");
+    }
+
+    // ---- A6: dependencies to a fixed point, both directions, on toggles, at apply time -----------------------------
+    {
+        std::vector<SvcItem> items = {Mk(L"aaa", 3, {}), Mk(L"bbb", 3, {L"aaa"}), Mk(L"ccc", 3, {L"bbb"})};
+        Plan p;
+        p.rows = {Lower4(items[0]), Lower4(items[1])};
+        DependencyCheck(&p, items);
+        check(!p.rows[0].include && !p.rows[1].include && !p.rows[0].depWarning.empty() && !p.rows[1].depWarning.empty(),
+              L"A6: aaa <- bbb <- ccc, ccc stays enabled: bbb and aaa are both unticked (fixed point, any row order)");
+        Plan q;
+        q.rows = {Lower4(items[0]), Lower4(items[1]), Lower4(items[2], false)};
+        DependencyCheck(&q, items);
+        bool off = !q.rows[0].include && !q.rows[1].include;
+        q.rows[2].include = true;   // the user ticks ccc
+        DependencyCheck(&q, items, 2);
+        bool back = q.rows[0].include && q.rows[1].include && q.rows[0].depWarning.empty() && q.rows[1].depWarning.empty();
+        q.rows[1].include = false;  // the user unticks bbb
+        DependencyCheck(&q, items, 1);
+        check(off && back && !q.rows[0].include && !q.rows[0].depWarning.empty() && q.rows[2].include,
+              L"A6: re-run on every toggle: ticking ccc clears and re-ticks bbb and aaa; unticking bbb unticks aaa with a warning");
+        std::vector<SvcItem> up = {Mk(L"ddd", 4, {}), Mk(L"eee", 4, {L"ddd"})};
+        Plan r;
+        PlanRow re;
+        re.name = L"eee"; re.before = up[1].cfg; re.after = StartCfg{3, -1}; re.op = WriteOp{3, -1}; re.deps = up[1].deps;
+        r.rows = {re};
+        DependencyCheck(&r, up);
+        bool warned = !r.rows[0].include && r.rows[0].depWarning.find(L"ddd") != std::wstring::npos;
+        PlanRow rd = re;
+        rd.name = L"ddd"; rd.deps.clear();
+        r.rows.push_back(rd);
+        r.rows[1].include = true;
+        DependencyCheck(&r, up, 1);
+        check(warned && r.rows[0].include && r.rows[0].depWarning.empty(),
+              L"A6: enable direction: raising eee while ddd stays Disabled warns and unticks; raising ddd too clears it");
+        // Apply time (logic M1): ccc fails, so bbb is skipped, so aaa must be skipped too.
+        for (int mode = 0; mode < 2; mode++) {
+            FakeBackend fb;
+            fb.SetItems(items);
+            if (mode == 0) fb.faults.deny = {L"ccc"};
+            else fb.faults.changeOnQuery = {L"ccc"};   // someone set ccc to Auto since the plan
+            Plan pa;
+            pa.rows = {Lower4(items[0]), Lower4(items[1]), Lower4(items[2])};
+            Store s(NewTempDir(mode ? L"deps-changed" : L"deps-fail"));
+            ApplyResult ar;
+            RunApply(pa, EnvFor(&fb, &s), &ar);
+            bool aSkipped = false, bSkipped = false;
+            for (auto& l : ar.lines) {
+                if (l.rfind(L"skip aaa", 0) == 0) aSkipped = true;
+                if (l.rfind(L"skip bbb", 0) == 0) bSkipped = true;
+            }
+            int aStart = -1;
+            for (auto& i : fb.Items()) if (i.name == L"aaa") aStart = i.cfg.start;
+            check(aSkipped && bSkipped && aStart == 3,
+                  mode ? L"A6 apply: ccc changed to enabled since the plan -> bbb and then aaa are skipped, not disabled"
+                       : L"A6 apply: ccc fails -> bbb skipped -> aaa skipped too (a skipped dependent protects its dependencies)");
+        }
+    }
+
+    // ---- A3: TrustedInstaller is stopped only when this apply started it --------------------------------------------
+    {
+        World a;
+        freshWorld(&a);
+        a.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        Store s(NewTempDir(L"ti-svc"));
+        s.fixedStamp = L"20261111-120000";
+        ServiceOnlyTi ti(&a.fx.backend);
+        Plan p = BuildPreset(LV_STRIPPED, TAB_SERVICES, a.items, a.ctx);
+        MarkTi(&p, a.fx.backend, true);
+        Tick(&p, L"dmwappushservice");
+        ApplyEnv env = EnvFor(&a.fx.backend, &s);
+        env.ti = &ti;
+        env.tiOn = true;
+        ApplyResult r1;
+        bool ok1 = RunApply(p, env, &r1);
+        auto stateOf = [&](const wchar_t* n) { for (auto& i : a.fx.backend.Items()) if (i.name == n) return i.state; return (DWORD)0; };
+        DWORD after1 = stateOf(L"TrustedInstaller");
+        // Windows (or the user) starts TrustedInstaller before the next apply.
+        a.fx.backend.SetState(L"TrustedInstaller", SERVICE_RUNNING);
+        a.items = Folded(a.fx.backend);
+        Plan p2 = BuildSingle(*ItemOf(a.items, L"dmwappushservice"), StartCfg{3, -1}, a.items, a.ctx);
+        MarkTi(&p2, a.fx.backend, true);
+        ApplyResult r2;
+        bool ok2 = RunApply(p2, env, &r2);
+        auto logs = LoadLogs(s, nullptr);
+        int stops = 0;
+        for (auto& c : a.fx.backend.controlLog) if (c == L"stop TrustedInstaller") stops++;
+        check(ok1 && ok2 && r1.ok >= 1 && r2.ok == 1 && after1 == SERVICE_STOPPED && stateOf(L"TrustedInstaller") == SERVICE_RUNNING &&
+                  stops == 1 && logs.size() == 2 && logs[0].tiStarted && logs[0].tiStopped && !logs[1].tiStarted && !logs[1].tiStopped,
+              L"A3: two applies; TrustedInstaller already running before the second -> Hadron neither claims nor stops it");
+        TiService pend(&a.fx.backend);
+        pend.waitMs = 0;
+        a.fx.backend.SetState(L"TrustedInstaller", SERVICE_START_PENDING);
+        SvcItem t;
+        std::wstring e;
+        size_t before = a.fx.backend.controlLog.size();
+        bool en = pend.Ensure(&t, &e);
+        std::wstring note;
+        check(!en && !pend.Started() && !pend.StopIfStarted(&note) && a.fx.backend.controlLog.size() == before,
+              L"A3: START_PENDING is someone else's start: never started, claimed or stopped by Hadron");
+        // win32 M2: an undo-log failure after the token was taken still puts TrustedInstaller back.
+        World b;
+        freshWorld(&b);
+        Store s2(NewTempDir(L"ti-flush"));
+        Plan p3 = BuildPreset(LV_STRIPPED, TAB_SERVICES, b.items, b.ctx);
+        MarkTi(&p3, b.fx.backend, true);
+        Tick(&p3, L"dmwappushservice");
+        FakeTi fti;
+        ApplyEnv e3 = EnvFor(&b.fx.backend, &s2);
+        e3.ti = &fti;
+        e3.tiOn = true;
+        e3.failFlushAfter = 2 + (int)ApplyOrder(p3).size();   // header, B, every P: then the T record fails
+        ApplyResult r3;
+        bool ok3 = RunApply(p3, e3, &r3);
+        check(!ok3 && r3.aborted && fti.acquired && fti.released && b.fx.backend.faults.setStartCalls == 0,
+              L"TI: an undo-log flush failure after Acquire still releases TrustedInstaller (win32 M2), nothing changed");
+    }
+
+    // ---- logs: order, resolution, interrupted undo, TI marker -------------------------------------------------------
+    {
+        auto mkLog = [](const wchar_t* stamp, const wchar_t* source, bool end, int order) {
+            UndoLog l;
+            l.hasB = true; l.hasE = end; l.stamp = stamp; l.source = source; l.order = order;
+            return l;
+        };
+        Store s(NewTempDir(L"order"));
+        auto write = [&](const UndoLog& l) {
+            std::string t = "HXSVC\t1\tundo\n" + Record({L"B", l.stamp, Esc(l.source), L"0", L"m", L"19045", std::to_wstring(l.order)});
+            if (l.hasE) t += Record({L"E", l.stamp, L"0", L"0", L"0", L"done"});
+            std::wstring e;
+            s.WriteNew(L"undo-" + l.stamp + L".log", t, &e);
+        };
+        write(mkLog(L"20261111-101500-10", L"preset:bloat:services", true, 0));
+        write(mkLog(L"20261111-101500-2", L"preset:bloat:services", true, 0));
+        write(mkLog(L"20261101-000000", L"preset:stripped:services", true, 7));
+        auto logs = LoadLogs(s, nullptr);
+        check(logs.size() == 3 && logs[0].stamp == L"20261111-101500-2" && logs[1].stamp == L"20261111-101500-10" &&
+                  logs[2].stamp == L"20261101-000000",
+              L"log order: the B record's sequence number first, then the stamp with -N compared as a number (-2 before -10)");
+        std::vector<UndoLog> v = {mkLog(L"20261111-110000", L"undo:20261111-120000", true, 0), mkLog(L"20261111-120000", L"preset:bloat:services", false, 0)};
+        check(FindInterrupted(v) < 0, L"an undo stamped earlier than its apply (clock change) still resolves it (logic M4)");
+        std::vector<UndoLog> t2 = {mkLog(L"20261111-100000", L"preset:stripped:services", true, 1), mkLog(L"20261111-110000", L"preset:bloat:services", true, 2)};
+        t2[0].tiStarted = true;
+        check(TiLeftRunning(t2), L"TiLeftRunning checks every log: a later apply doesn't hide a TrustedInstaller left running (win32 M15)");
+        // The multi fixture: an interrupted apply A, then an interrupted undo of A.
+        std::vector<std::wstring> probs;
+        auto ml = LoadLogs(Store(fixture + L"\\multi"), &probs);
+        int k = FindInterrupted(ml);
+        int base = UndoBase(ml, k);
+        bool shape = ml.size() == 2 && k == 1 && base == 0 && ml[1].source == L"undo:" + ml[0].stamp;
+        World m;
+        std::wstring e;
+        MakeWorld(fixture + L"\\multi", &kb, &m, &e);
+        Plan u = shape ? BuildUndo(ml[base], m.fx.backend, m.ctx) : Plan{};
+        const PlanRow* mb = RowOf(u, L"MapsBroker");
+        check(shape && mb && mb->include && mb->after.start == 2 && mb->after.delayed == 1,
+              L"interrupted undo: the banner's Undo restarts undoing the apply (MapsBroker back to Auto (delayed)), never undoes the undo");
+        std::vector<UndoLog> done = ml;
+        done.push_back(mkLog(L"20261110-230000", (L"resume:" + (ml.size() > 1 ? ml[1].stamp : std::wstring())).c_str(), true, 3));
+        std::vector<UndoLog> done2 = ml;
+        done2.push_back(mkLog(L"20261110-230000", (L"undo:" + (ml.empty() ? std::wstring() : ml[0].stamp)).c_str(), true, 3));
+        check(FindInterrupted(done) < 0 && FindInterrupted(done2) < 0,
+              L"interrupted undo: a finished resume of the undo, or a finished undo of the apply, resolves both logs");
+    }
+
+    // ---- A5: the data folder is never followed through a link, and is owned by Administrators or SYSTEM -----------
+    {
+        std::wstring base = NewTempDir(L"root");
+        std::wstring real = base + L"\\real", how;
+        CreateDirectoryW(real.c_str(), nullptr);
+        std::wstring link = MakeLink(base, real, &how);
+        if (link.empty()) {
+            info(L"A5: made " + how + L" here, so the reparse point is injected (Windows CI makes a real one)");
+            link = real;
+            how = L"reparse point (injected)";
+            Store::InjectedReparsePoint() = real;
+        }
+        {
+            {
+                std::wstring e1, e2;
+                bool root = Store(link).EnsureRoot(true, &e1);
+                bool child = Store(link + L"\\Hadron\\services").EnsureRoot(true, &e2);
+                DWORD ca = GetFileAttributesW((real + L"\\Hadron").c_str());
+                check(!root && !child && e1.find(L"link") != std::wstring::npos && e2.find(L"link") != std::wstring::npos &&
+                          ca == INVALID_FILE_ATTRIBUTES,
+                      L"A5: EnsureRoot refuses a data folder that is, or sits below, a " + how + L", and creates nothing through it");
+            }
+        }
+        Store::InjectedReparsePoint().clear();
+        std::wstring e3;
+        Store deep(L"\\\\?\\" + base + L"\\a\\b\\c");
+        bool okDeep = deep.EnsureRoot(true, &e3);
+        std::wstring e4;
+        bool again = deep.EnsureRoot(true, &e4);
+        check(okDeep && again && DirExists(base + L"\\a\\b\\c"),
+              L"A5: a \\\\?\\-prefixed root with missing parents is created, then re-checked and accepted (owner, DACL)" +
+                  (okDeep ? L"" : L": " + e3) + (again ? L"" : L": " + e4));
+        check(Store::Plain(L"\\\\?\\UNC\\srv\\share\\x") == L"\\\\srv\\share\\x" && Store::Plain(L"\\\\?\\C:\\x") == L"C:\\x",
+              L"Store::Plain strips \\\\?\\ and \\\\?\\UNC\\ (--data-dir is kept without the prefix)");
+    }
+
     // ---- live, read-only ------------------------------------------------------------------------------------
     {
         auto live = MakeLiveBackend();
@@ -901,11 +1450,12 @@ int RunLiveTest(const std::vector<std::wstring>& args) {
     std::wstring root = ArgValue(args, L"--data-dir");
     if (root.empty()) root = NewTempDir(L"live");
     Store st(root);
-    if (!st.EnsureRoot(false, &err)) { wprintf(L"FAIL: data dir: %ls\n", err.c_str()); return 1; }
+    if (!st.EnsureRoot(true, &err)) { wprintf(L"FAIL: data dir: %ls\n", err.c_str()); return 1; }
     wprintf(L"  data dir %ls\n", root.c_str());
     std::unique_ptr<TiProvider> ti = useTi ? MakeLiveTi(b.get()) : nullptr;
     Ctx c;
     c.build = b->Build();
+    c.machine = b->MachineGuid();
     c.tiOn = useTi;
     const StartCfg original = item.cfg;
     int fails = 0;

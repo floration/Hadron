@@ -90,6 +90,62 @@ const SvcItem* FindItem(const std::vector<SvcItem>& items, const std::wstring& n
 
 std::wstring TabName(int tab) { return tab == TAB_DRIVERS ? L"Drivers" : L"Services"; }
 
+// A7: restores compare and write the raw DelayedAutostart value, as BuildSingle does. Delayed() is false for any
+// start but Auto, so a lingering 1 under Manual or Disabled would otherwise turn a restore to plain Auto into
+// Auto (delayed). The flag only matters when the target is Auto; then 1 is "delayed", anything else is not.
+bool SameStart(const StartCfg& have, const StartCfg& want) {
+    if (have.start != want.start) return false;
+    return want.start != 2 || (have.delayed == 1) == (want.delayed == 1);
+}
+WriteOp OpTo(const StartCfg& have, const StartCfg& want) {
+    WriteOp op{want.start, -1};
+    if (want.start == 2 && (have.delayed == 1) != (want.delayed == 1)) op.delayed = want.delayed == 1 ? 1 : 0;
+    return op;
+}
+StartCfg AfterOf(const StartCfg& have, const WriteOp& op) { return StartCfg{op.start, op.delayed >= 0 ? op.delayed : have.delayed}; }
+
+bool SysOk(const SvcItem& s, const Ctx& c) {
+    const KbEntry* e = c.kb ? c.kb->Find(TemplateName(s.name, s.type)) : nullptr;
+    return e && e->sysok && e->ForBuild(c.build);
+}
+
+// A4: what an undo or resume row may write. Undo logs are integrity-checked (CRC), not authenticated, so every
+// row passes the same guards a plan would: never-touch items, Boot start, a Boot/System value on a service,
+// and a System-start driver without a curated sysok entry are refused whatever the log says.
+std::wstring TargetGuard(const SvcItem& live, const StartCfg& target, const Ctx& c) {
+    if (live.kind == Kind::UserInstance) return L"Per-user instance: change its template instead";
+    Guard g = CheckGuard(live, c);
+    if (g.neverTouch) return L"Protected: never touched by Hadron. " + g.reason;
+    bool drv = IsDriverType(live.type);
+    if (target.start == 0) return L"Refused: Hadron never sets Boot start";
+    if (!drv && target.start < 2) return L"Refused: Boot and System start are for drivers only";
+    if (drv && (target.start < 2 || live.cfg.start < 2) && !SysOk(live, c))
+        return L"Protected: System-start driver without a curated sysok entry";
+    return L"";
+}
+
+std::wstring LogRefusal(const UndoLog& log, const Ctx& c) {
+    if (c.machine.empty()) return L"Refused: this PC's machine GUID could not be read, so the log can't be matched to it.";
+    if (log.machine != c.machine)
+        return L"Refused: this undo log was not written on this PC (its machine GUID " +
+               std::wstring(log.machine.empty() ? L"is missing" : L"differs") + L"). Nothing from it is offered.";
+    if (log.build.empty() || log.build != c.build)
+        return L"Refused: this undo log was written on Windows build " + (log.build.empty() ? std::wstring(L"(missing)") : log.build) +
+               L"; this PC runs build " + (c.build.empty() ? std::wstring(L"(unknown)") : c.build) +
+               L". Service names and defaults change between builds, so nothing from it is offered.";
+    return L"";
+}
+
+std::wstring BadRecordsNote(const UndoLog& log) {
+    std::wstring t;
+    if (log.badRecords)
+        t = std::to_wstring(log.badRecords) + L" record(s) in this log failed their check (torn or changed) and were ignored.";
+    if (log.count > 0 && (int)log.rows.size() != log.count)
+        t += (t.empty() ? L"" : L" ") + std::wstring(L"The log planned ") + std::to_wstring(log.count) + L" row(s) but only " +
+             std::to_wstring(log.rows.size()) + L" could be read: an item it lost may still be changed; compare with the snapshot.";
+    return t;
+}
+
 }  // namespace
 
 bool IsStorageDriver(const std::wstring& name) {
@@ -112,6 +168,13 @@ Guard CheckGuard(const SvcItem& s, const Ctx& c) {
     bool drv = IsDriverType(s.type);
     auto never = [&](const std::wstring& r) { g.neverTouch = true; g.reason = r; return g; };
     if (drv && s.cfg.start == 0) return never(L"Boot-start driver: loaded by the boot loader before Windows can read the disk");
+    if (!drv && s.cfg.start < 2 && s.kind != Kind::UserInstance)
+        return never(L"a service whose registry Start is " + StartName(s.cfg.start) + L": not a start type Windows uses for services, so Hadron leaves it");
+    // Fail closed: without the device list or the boot disk the filter and boot-path checks can't run.
+    if (drv && (!c.hw || !c.hw->ok))
+        return never(L"the device list could not be read, so the filter and boot-path checks can't run: every driver is kept");
+    if (drv && c.hw->bootDisk.empty())
+        return never(L"the boot disk could not be found, so the boot-path check can't run: every driver is kept");
     if (c.filters.count(l)) return never(L"named in a class or device UpperFilters/LowerFilters value: disabling it stops every device that lists it (0x7B for disks, no input for keyboards)");
     if (c.bootChain.count(l)) return never(L"serves a device on the boot disk's path");
     if (s.errctl == 3) return never(L"ErrorControl is Critical: Windows can't start without it");
@@ -136,6 +199,19 @@ Guard CheckGuard(const SvcItem& s, const Ctx& c) {
     return g;
 }
 
+namespace {
+std::wstring HwNote(int tab, const Ctx& c) {
+    if (tab != TAB_DRIVERS) return L"";
+    if (!c.hw || !c.hw->ok)
+        return L"The device list could not be read" + (c.hw && !c.hw->error.empty() ? L" (" + c.hw->error + L")" : std::wstring()) +
+               L", so every driver is kept: the filter and boot-path checks can't run without it.";
+    if (c.hw->bootDisk.empty())
+        return L"The boot disk could not be found" + (c.hw->error.empty() ? std::wstring() : L" (" + c.hw->error + L")") +
+               L", so every driver is kept: the boot-path check can't run without it.";
+    return L"";
+}
+}  // namespace
+
 int Plan::Included() const { int n = 0; for (auto& r : rows) if (r.blocked.empty() && r.include) n++; return n; }
 int Plan::Optional() const { int n = 0; for (auto& r : rows) if (r.blocked.empty() && !r.include) n++; return n; }
 int Plan::Blocked() const { int n = 0; for (auto& r : rows) if (!r.blocked.empty()) n++; return n; }
@@ -149,6 +225,7 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
     p.title = LevelName(level) + L" (" + TabName(tab) + L")";
     p.source = L"preset:" + std::wstring(level == LV_BLOAT ? L"bloat" : level == LV_STRIPPED ? L"stripped" : L"minimum") +
                L":" + (tab == TAB_DRIVERS ? L"drivers" : L"services");
+    int stricter = 0;
     for (auto& s : items) {
         if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
         const KbEntry* e = c.kb ? c.kb->Find(s.name) : nullptr;
@@ -156,6 +233,7 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
         int t = e->TargetAt(level);
         if (t < 0) continue;
         if (s.cfg.start == t) { p.alreadySet++; continue; }
+        if (s.cfg.start > t) { stricter++; continue; }   // presets only lower: never Disabled -> Manual
         PlanRow r;
         r.name = s.name;
         r.display = s.display;
@@ -197,6 +275,10 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
                           L"stock driver as safe to disable.");
     if (p.unknown)
         p.notes.push_back(std::to_wstring(p.unknown) + L" item(s) on this tab have no KB entry (third-party or unknown): never in a preset.");
+    if (stricter)
+        p.notes.push_back(std::to_wstring(stricter) + L" item(s) are already stricter than this level (for example Disabled where it says Manual): "
+                                                       L"left alone, a preset never raises a start type.");
+    if (std::wstring hn = HwNote(tab, c); !hn.empty()) p.notes.push_back(hn);
     if (c.kb && !c.kb->build.empty() && c.kb->build != c.build)
         p.notes.push_back(L"Hadron's KB is for build " + c.kb->build + L"; this PC is build " + c.build + L": entries for other builds are not used.");
     p.notes.push_back(L"Start types only. Changes take effect at the next restart; Hadron never restarts the PC.");
@@ -223,12 +305,12 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
             const SvcItem* f = c.first->Find(s.name);
             if (!f) { added++; continue; }
-            if (s.cfg.start == f->cfg.start && s.cfg.Delayed() == f->cfg.Delayed()) { p.alreadySet++; continue; }
+            if (SameStart(s.cfg, f->cfg)) { p.alreadySet++; continue; }
             PlanRow r;
             r.name = s.name; r.display = s.display; r.driver = IsDriverType(s.type);
-            r.before = s.cfg; r.after = f->cfg; r.deps = s.deps;
-            r.op = WriteOp{f->cfg.start, s.cfg.Delayed() != f->cfg.Delayed() ? (f->cfg.Delayed() ? 1 : 0) : -1};
-            if (r.op.delayed < 0) r.after.delayed = s.cfg.delayed;
+            r.before = s.cfg; r.deps = s.deps;
+            r.op = OpTo(s.cfg, f->cfg);
+            r.after = AfterOf(s.cfg, r.op);
             auto cr = c.first->meta.find(L"created");
             r.reason = L"as recorded by the first-run snapshot" + (cr != c.first->meta.end() ? L" (" + cr->second + L")" : L"");
             r.basis = L"recorded";
@@ -239,6 +321,8 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             else if (named) r.blocked = L"Protected: not in presets. " + std::wstring(named);
             else if (s.protect) r.blocked = L"Protected: " + g.reason;
             else if (f->cfg.start < 2) r.blocked = L"Kept: Hadron never sets Boot or System start; Windows changes these itself";
+            else if (r.driver && s.cfg.start < 2 && !SysOk(s, c))
+                r.blocked = L"Protected: System-start driver without a curated sysok entry (live start type)";
             if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
             p.rows.push_back(std::move(r));
         }
@@ -257,17 +341,20 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (!e || e->stock < 0 || !e->ForBuild(c.build) || IsStorageDriver(s.name)) continue;
             withStock++;
             StartCfg t{e->stock, e->stock == 2 ? e->stockDelayed : s.cfg.delayed};
-            if (s.cfg.start == t.start && s.cfg.Delayed() == t.Delayed()) { p.alreadySet++; continue; }
+            if (SameStart(s.cfg, t)) { p.alreadySet++; continue; }
             PlanRow r;
             r.name = s.name; r.display = s.display; r.driver = IsDriverType(s.type);
-            r.before = s.cfg; r.after = t; r.deps = s.deps;
-            r.op = WriteOp{t.start, s.cfg.Delayed() != t.Delayed() ? (t.Delayed() ? 1 : 0) : -1};
+            r.before = s.cfg; r.deps = s.deps;
+            r.op = OpTo(s.cfg, t);
+            r.after = AfterOf(s.cfg, r.op);
             r.reason = L"Windows stock start type for build 19045";
             r.basis = e->stockBasis;
             r.basisNote = e->stockNote;
             Guard g = CheckGuard(s, c);
             if (g.neverTouch || g.neverPreset) r.blocked = L"Protected: not in presets. " + g.reason;
             else if (t.start < 2) r.blocked = L"Kept: Hadron never sets Boot or System start";
+            else if (r.driver && s.cfg.start < 2 && !SysOk(s, c))
+                r.blocked = L"Protected: System-start driver without a curated sysok entry (live start type)";
             if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
             p.rows.push_back(std::move(r));
         }
@@ -275,6 +362,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
                           L" items have a Windows stock value with a measured or published basis in Hadron's KB; the rest are left alone. "
                           L"Storage drivers never get a stock value: Windows sets those per PC.");
     }
+    if (std::wstring hn = HwNote(tab, c); !hn.empty()) p.notes.push_back(hn);
     DependencyCheck(&p, items);
     SortRows(&p);
     p.notes.push_back(L"Start types only. Changes take effect at the next restart; Hadron never restarts the PC.");
@@ -302,17 +390,19 @@ Plan BuildSingle(const SvcItem& s, StartCfg target, const std::vector<SvcItem>& 
     if (s.kind == Kind::UserInstance) r.blocked = L"Per-user instance: change its template instead";
     else if (g.neverTouch) r.blocked = L"Protected: " + g.reason;
     else if (target.start < 2) r.blocked = L"Hadron never sets Boot or System start";
-    else if (!r.driver && target.start < 2) r.blocked = L"Boot and System apply to drivers only";
     else if (c.tiOn && IEq(s.name, L"TrustedInstaller")) r.blocked = L"Not while the TrustedInstaller toggle is on: the toggle needs this service";
+    else if (target.start == 2 && target.delayed == 1 && !s.group.empty())
+        r.blocked = L"Windows doesn't allow a delayed auto-start service in a load-order group (" + s.group + L"): use Auto";
     if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
     if (r.blocked.empty() && r.before.start == r.after.start && r.before.Delayed() == r.after.Delayed()) {
         p.alreadySet = 1;
         p.notes.push_back(L"Nothing to change: it is already " + StartLabel(s.cfg, false) + L".");
         return p;
     }
+    const bool drv = r.driver;
     p.rows.push_back(std::move(r));
     DependencyCheck(&p, items);
-    if (!r.driver) p.notes.push_back(L"Manual doesn't stop trigger starts; Disabled does. Hadron never removes triggers.");
+    if (!drv) p.notes.push_back(L"Manual doesn't stop trigger starts; Disabled does. Hadron never removes triggers.");
     p.notes.push_back(L"Takes effect at the next restart (or the next start of the service); Hadron never restarts the PC.");
     return p;
 }
@@ -357,11 +447,12 @@ Plan BuildControl(const SvcItem& s, int what, Backend& b, const std::vector<SvcI
 }
 
 Plan BuildUndo(const UndoLog& log, Backend& b, const Ctx& c) {
-    (void)c;
     Plan p;
     p.kind = PlanKind::Undo;
     p.source = L"undo:" + log.stamp;
     p.title = L"Undo the apply of " + log.stamp;
+    if (std::wstring why = LogRefusal(log, c); !why.empty()) { p.notes.push_back(why); return p; }
+    if (std::wstring bad = BadRecordsNote(log); !bad.empty()) p.notes.push_back(bad);
     std::vector<UndoRow> rows = log.rows;
     std::sort(rows.begin(), rows.end(), [](const UndoRow& a, const UndoRow& b2) { return a.seq > b2.seq; });
     for (auto& u : rows) {
@@ -380,15 +471,17 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const Ctx& c) {
         }
         r.display = live.display; r.driver = IsDriverType(live.type); r.deps = live.deps;
         r.before = live.cfg;
-        if (live.cfg.start == u.before.start && live.cfg.Delayed() == u.before.Delayed()) { p.alreadySet++; continue; }
-        r.op = WriteOp{u.before.start, live.cfg.Delayed() != u.before.Delayed() ? (u.before.Delayed() ? 1 : 0) : -1};
+        if (SameStart(live.cfg, u.before)) { p.alreadySet++; continue; }
+        r.op = OpTo(live.cfg, u.before);
+        r.after = AfterOf(live.cfg, r.op);
         if (r.op.delayed == 0 && u.before.delayed < 0)
             r.evidence = L"DelayedAutostart was absent before; it is written as 0, which has the same effect";
         bool hadronWrote = u.hasD && u.result == L"ok";
-        if (hadronWrote && !(live.cfg.start == u.afterObs.start && live.cfg.Delayed() == u.afterObs.Delayed())) {
+        if (hadronWrote && !SameStart(live.cfg, u.afterObs)) {
             r.include = false;
             r.warning = L"changed since Hadron set it: now " + StartLabel(live.cfg, false) + L" (unticked; tick to restore anyway)";
         }
+        if (std::wstring g = TargetGuard(live, u.before, c); !g.empty()) { r.blocked = g; r.include = false; r.canToggle = false; }
         p.rows.push_back(r);
     }
     SortRows(&p);
@@ -401,6 +494,8 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
     p.kind = PlanKind::Resume;
     p.source = L"resume:" + log.stamp;
     p.title = L"Resume the apply of " + log.stamp;
+    if (std::wstring why = LogRefusal(log, c); !why.empty()) { p.notes.push_back(why); return p; }
+    if (std::wstring bad = BadRecordsNote(log); !bad.empty()) p.notes.push_back(bad);
     for (auto& u : log.rows) {
         if (u.hasD) continue;
         PlanRow r;
@@ -417,16 +512,14 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
         }
         r.display = live.display; r.driver = IsDriverType(live.type); r.deps = live.deps;
         r.before = live.cfg;
-        if (live.cfg.start == u.after.start && live.cfg.Delayed() == u.after.Delayed()) { p.alreadySet++; continue; }
-        r.after = StartCfg{u.after.start, live.cfg.delayed};
-        r.op = WriteOp{u.after.start, live.cfg.Delayed() != u.after.Delayed() ? (u.after.Delayed() ? 1 : 0) : -1};
-        if (r.op.delayed >= 0) r.after.delayed = r.op.delayed;
-        if (!(live.cfg.start == u.before.start && live.cfg.Delayed() == u.before.Delayed())) {
+        if (SameStart(live.cfg, u.after)) { p.alreadySet++; continue; }
+        r.op = OpTo(live.cfg, u.after);
+        r.after = AfterOf(live.cfg, r.op);
+        if (!SameStart(live.cfg, u.before)) {
             r.include = false;
             r.warning = L"changed since the plan: now " + StartLabel(live.cfg, false) + L" (unticked)";
         }
-        Guard g = CheckGuard(live, c);
-        if (g.neverTouch) { r.blocked = L"Protected: " + g.reason; r.include = false; r.canToggle = false; }
+        if (std::wstring g = TargetGuard(live, u.after, c); !g.empty()) { r.blocked = g; r.include = false; r.canToggle = false; }
         p.rows.push_back(r);
     }
     DependencyCheck(&p, items);
@@ -465,31 +558,77 @@ void MarkTi(Plan* p, Backend& b, bool tiOn) {
     SortRows(p);
 }
 
-void DependencyCheck(Plan* p, const std::vector<SvcItem>& items) {
-    std::map<std::wstring, const PlanRow*> disabling;
-    for (auto& r : p->rows) if (r.blocked.empty() && r.after.start == 4) disabling[Lower(r.name)] = &r;
-    for (auto& r : p->rows) {
-        if (!r.blocked.empty() || r.after.start != 4) continue;
-        const SvcItem* self = FindItem(items, r.name);
+namespace {
+// One row's dependency warning against the start every item ends with if the ticked rows are applied.
+std::wstring DepWarning(const PlanRow& r, const std::vector<SvcItem>& items, const std::map<std::wstring, int>& fin) {
+    auto end = [&](const std::wstring& name) { auto it = fin.find(Lower(name)); return it == fin.end() ? -1 : it->second; };
+    std::wstring out;
+    const SvcItem* self = FindItem(items, r.name);
+    if (r.after.start == 4) {   // disabling: does anything that stays enabled depend on it?
         std::wstring group = self ? Lower(self->group) : L"";
         std::vector<std::wstring> who;
         for (auto& s : items) {
-            if (s.kind == Kind::UserInstance) continue;
+            if (s.kind == Kind::UserInstance || IEq(s.name, r.name)) continue;
             bool dep = false;
             for (auto& d : s.deps) {
                 if (IEq(d, r.name)) dep = true;
                 else if (!group.empty() && d.size() > 1 && d[0] == L'+' && Lower(d.substr(1)) == group) dep = true;
             }
-            if (!dep) continue;
-            auto it = disabling.find(Lower(s.name));
-            bool staysOff = s.cfg.start == 4 || (it != disabling.end() && it->second->include);
-            if (!staysOff) who.push_back(s.name + L" (" + StartName(s.cfg.start) + L")");
+            int e = end(s.name);
+            if (dep && e != 4) who.push_back(s.name + L" (" + StartName(e) + L")");
         }
-        if (!who.empty()) {
-            r.include = false;
-            r.warning = Join(who, L", ") + (who.size() == 1 ? L" depends on it and stays enabled" : L" depend on it and stay enabled") +
-                        L": unticked by default";
+        if (!who.empty())
+            out = Join(who, L", ") + (who.size() == 1 ? L" depends on it and stays enabled" : L" depend on it and stay enabled") +
+                  L": unticked by default";
+    } else if (r.after.start < r.before.start) {   // raising: does it need something that stays Disabled?
+        std::vector<std::wstring> need;
+        const std::vector<std::wstring>& deps = self ? self->deps : r.deps;
+        for (auto& d : deps) {
+            if (d.size() > 1 && d[0] == L'+') {
+                std::wstring g = Lower(d.substr(1));
+                int members = 0, off = 0;
+                for (auto& s : items)
+                    if (Lower(s.group) == g) { members++; if (end(s.name) == 4) off++; }
+                if (members && members == off) need.push_back(L"group " + d.substr(1));
+            } else if (end(d) == 4) {
+                need.push_back(d);
+            }
         }
+        if (!need.empty())
+            out = L"needs " + Join(need, L", ") + L", which " + (need.size() == 1 ? L"stays" : L"stay") +
+                  L" Disabled: Windows can't start it: unticked by default";
+    }
+    return out;
+}
+}  // namespace
+
+void DependencyCheck(Plan* p, const std::vector<SvcItem>& items, int toggled) {
+    if (p->kind == PlanKind::Control) return;
+    if (toggled >= 0 && toggled < (int)p->rows.size()) p->rows[toggled].depUnticked = false;   // the user's choice now
+    // Iterate to a fixed point: unticking one row can leave a dependency of it with an enabled dependent (aaa <- bbb
+    // <- ccc), and ticking one can clear another's warning. Rows the check unticked come back when the reason goes.
+    for (size_t round = 0; round <= 2 * p->rows.size() + 2; round++) {
+        std::map<std::wstring, int> fin;
+        for (auto& s : items) fin[Lower(s.name)] = s.cfg.start;
+        for (auto& r : p->rows) if (r.blocked.empty() && r.include) fin[Lower(r.name)] = r.after.start;
+        bool changed = false;
+        for (size_t k = 0; k < p->rows.size(); k++) {
+            PlanRow& r = p->rows[k];
+            std::wstring w = r.blocked.empty() ? DepWarning(r, items, fin) : L"";
+            bool fresh = r.depWarning.empty() && !w.empty();
+            if (w.empty() && r.depUnticked && r.blocked.empty() && r.canToggle) {
+                r.include = true;
+                r.depUnticked = false;
+                changed = true;
+            }
+            r.depWarning = w;
+            if (fresh && r.include && (int)k != toggled) {
+                r.include = false;
+                r.depUnticked = true;
+                changed = true;
+            }
+        }
+        if (!changed) break;
     }
 }
 
@@ -550,6 +689,7 @@ std::string DumpPlan(const Plan& p) {
         if (!r.contested.empty()) o += L"    contested: " + r.contested + L"\n";
         if (!r.evidence.empty()) o += L"    evidence: " + r.evidence + L"\n";
         if (!r.warning.empty()) o += L"    warning: " + r.warning + L"\n";
+        if (!r.depWarning.empty()) o += L"    warning: " + r.depWarning + L"\n";
         if (r.needsTi) o += L"    needs TrustedInstaller\n";
     }
     return ToUtf8(o);
@@ -559,11 +699,16 @@ std::string DumpPlan(const Plan& p) {
 namespace {
 std::wstring Num(int v) { return std::to_wstring(v); }
 
+struct OnExit {   // runs f on every return path unless it was cleared
+    std::function<void()> f;
+    ~OnExit() { if (f) f(); }
+};
+
 std::vector<RestoreRow> RowsFor(const Plan& p, const std::vector<size_t>& order) {
     std::vector<RestoreRow> v;
     for (size_t i : order) {
         const PlanRow& r = p.rows[i];
-        v.push_back(RestoreRow{r.name, r.before, r.op.delayed >= 0});
+        v.push_back(RestoreRow{r.name, r.before, r.op.delayed >= 0, r.needsTi});
     }
     return v;
 }
@@ -582,6 +727,8 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     if (!lock.Acquire(env.lockName, &err)) { r->aborted = true; r->error = err; return false; }
     if (!st.EnsureRoot(true, &err)) { r->aborted = true; r->error = err; return false; }
     r->stamp = st.NewStamp();
+    int order1 = 1;   // the B record's sequence number: the log order that does not depend on the clock
+    for (auto& l : LoadLogs(st, nullptr)) order1 = std::max(order1, l.order + 1);
 
     // 2. A full snapshot before anything changes.
     Snapshot snap;
@@ -615,7 +762,7 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
         return false;
     };
     if (!put("HXSVC\t1\tundo\n")) return false;
-    if (!put(Record({L"B", r->stamp, Esc(p.source), Num((int)order.size()), env.machine, env.build}))) return false;
+    if (!put(Record({L"B", r->stamp, Esc(p.source), Num((int)order.size()), env.machine, env.build, Num(order1)}))) return false;
     for (size_t k = 0; k < order.size(); k++) {
         const PlanRow& row = p.rows[order[k]];
         if (!put(Record({L"P", Num((int)k + 1), Esc(row.name), L"start", CfgText(row.before), CfgText(row.after),
@@ -628,7 +775,13 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     for (size_t i : order) if (p.rows[i].needsTi) needTi = true;
     bool tiReady = false;
     std::wstring tiErr;
+    // From Acquire on, every return path puts TrustedInstaller back: a failed log write or flush below must not
+    // leave a service Hadron started running (or the token open). The normal path releases it explicitly at E.
+    OnExit tiBack;
     if (needTi && env.tiOn && env.ti) {
+        TiProvider* ti = env.ti;
+        std::wstring* note = &r->tiNote;
+        tiBack.f = [ti, note]() { std::wstring n; ti->Release(&n); if (!n.empty()) *note = n; };
         tiReady = env.ti->Acquire(&tiErr);
         if (env.ti->StartedService() && !put(Record({L"T", L"started"}))) return false;
     }
@@ -647,18 +800,21 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
             return put(Record({L"D", Num(seq), res, CfgText(obs), Esc(text)}));
         };
         SvcItem live;
+        bool lowering = row.after.start > row.before.start;
         if (!b.Query(row.name, &live, &err)) { if (!done(L"skip", row.before, L"vanished since the plan: " + err)) return false; continue; }
-        if (!(live.cfg.start == row.before.start && live.cfg.Delayed() == row.before.Delayed())) {
+        if (!SameStart(live.cfg, row.before) || (live.cfg.delayed == 1) != (row.before.delayed == 1)) {
+            // A dependent that is not Disabled after all keeps protecting what it depends on (M1).
+            if (lowering && live.cfg.start != 4) failedLowering.insert(Lower(row.name));
             if (!done(L"skip", live.cfg, L"changed since the plan: now " + StartLabel(live.cfg, false))) return false;
             continue;
         }
-        bool lowering = row.after.start > row.before.start;
         if (lowering) {
             std::wstring blocker;
             for (auto& o : p.rows)
                 if (failedLowering.count(Lower(o.name)))
                     for (auto& d : o.deps) if (IEq(d, row.name)) blocker = o.name;
             if (!blocker.empty()) {
+                failedLowering.insert(Lower(row.name));   // stays enabled, so it protects its own dependencies too
                 if (!done(L"skip", live.cfg, L"its dependent " + blocker + L" could not be changed")) return false;
                 continue;
             }
@@ -681,7 +837,7 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
         } else {
             ok = b.SetStart(row.name, row.op, Identity::Admin, &werr);
         }
-        if (env.crashAfterBegin == seq) { r->crashed = true; log.Close(); return false; }   // simulated power loss
+        if (env.crashAfterBegin == seq) { tiBack.f = nullptr; r->crashed = true; log.Close(); return false; }   // simulated power loss
         SvcItem after;
         std::wstring qerr;
         bool reread = b.Query(row.name, &after, &qerr);
@@ -702,8 +858,10 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     if (!put(Record({L"E", r->stamp, Num(r->ok), Num(r->skipped), Num(r->failed), r->cancelled ? L"cancelled" : L"done"})))
         return false;
     if (needTi && env.tiOn && env.ti) {
+        tiBack.f = nullptr;
+        bool started = env.ti->StartedService();   // read before Release resets it
         bool stopped = env.ti->Release(&r->tiNote);
-        if (env.ti->StartedService() && stopped) put(Record({L"T", L"stopped"}));
+        if (started && stopped) put(Record({L"T", L"stopped"}));
     }
     if (!tiErr.empty()) r->tiNote = L"TrustedInstaller: " + tiErr + (r->tiNote.empty() ? L"" : L"; " + r->tiNote);
     log.Close();
@@ -747,20 +905,63 @@ std::vector<UndoLog> LoadLogs(const Store& s, std::vector<std::wstring>* problem
         l.file = f;
         v.push_back(std::move(l));
     }
-    std::sort(v.begin(), v.end(), [](const UndoLog& a, const UndoLog& b) { return a.stamp < b.stamp; });
+    // The B record's sequence number first (clock changes can't reorder it), then the UTC stamp with its -N suffix
+    // compared as a number ("-10" after "-2"). Logs without a sequence number (older format) sort first.
+    auto key = [](const UndoLog& l) {
+        std::wstring s = l.stamp;
+        size_t dash = s.find(L'-', 9);
+        std::wstring base = dash == std::wstring::npos ? s : s.substr(0, dash);
+        int n = dash == std::wstring::npos ? 0 : _wtoi(s.c_str() + dash + 1);
+        wchar_t suf[16];
+        swprintf(suf, 16, L"%08d", n);
+        return std::make_pair(l.order, base + L"#" + suf);
+    };
+    std::stable_sort(v.begin(), v.end(), [&](const UndoLog& a, const UndoLog& b) { return key(a) < key(b); });
     return v;
 }
 
 namespace {
-bool ResolvedBy(const std::vector<UndoLog>& logs, size_t i, bool undoOnly) {
-    for (size_t j = i + 1; j < logs.size(); j++) {
-        if (!logs[j].hasE) continue;
-        if (logs[j].source == L"undo:" + logs[i].stamp) return true;
-        if (!undoOnly && logs[j].source == L"resume:" + logs[i].stamp) return true;
+int IndexOfStamp(const std::vector<UndoLog>& logs, const std::wstring& stamp) {
+    for (size_t k = 0; k < logs.size(); k++) if (logs[k].stamp == stamp) return (int)k;
+    return -1;
+}
+
+// Log i is resolved when a finished undo of it exists (or, unless undoOnly, a finished resume), in any position:
+// the order is not trusted for this. A finished resume of an undo of i also undoes i. Unless undoOnly, an
+// unfinished undo or resume of a log that is itself resolved is resolved with it.
+bool ResolvedBy(const std::vector<UndoLog>& logs, size_t i, bool undoOnly, int depth = 0) {
+    if (depth > 8) return false;
+    const std::wstring& st = logs[i].stamp;
+    for (size_t j = 0; j < logs.size(); j++) {
+        if (j == i || !logs[j].hasE) continue;
+        const std::wstring& src = logs[j].source;
+        if (src == L"undo:" + st) return true;
+        if (!undoOnly && src == L"resume:" + st) return true;
+        if (src.rfind(L"resume:", 0) == 0) {
+            int k = IndexOfStamp(logs, src.substr(7));
+            if (k >= 0 && logs[k].source == L"undo:" + st) return true;
+        }
+    }
+    if (!undoOnly && !logs[i].hasE) {
+        const std::wstring& src = logs[i].source;
+        for (const wchar_t* pre : {L"undo:", L"resume:"}) {
+            size_t n = wcslen(pre);
+            if (src.compare(0, n, pre) != 0) continue;
+            int k = IndexOfStamp(logs, src.substr(n));
+            if (k >= 0 && k != (int)i && ResolvedBy(logs, (size_t)k, false, depth + 1)) return true;
+        }
     }
     return false;
 }
 }  // namespace
+
+int UndoBase(const std::vector<UndoLog>& logs, int k) {
+    if (k < 0 || k >= (int)logs.size()) return k;
+    const std::wstring& src = logs[k].source;
+    if (src.rfind(L"undo:", 0) != 0) return k;
+    int b = IndexOfStamp(logs, src.substr(5));
+    return b >= 0 ? b : k;
+}
 
 int FindInterrupted(const std::vector<UndoLog>& logs) {
     for (int i = (int)logs.size() - 1; i >= 0; i--)
@@ -778,7 +979,8 @@ int FindUndoable(const std::vector<UndoLog>& logs) {
 }
 
 bool TiLeftRunning(const std::vector<UndoLog>& logs) {
-    return !logs.empty() && logs.back().tiStarted && !logs.back().tiStopped;
+    for (auto& l : logs) if (l.tiStarted && !l.tiStopped) return true;   // any log: a later apply doesn't hide it
+    return false;
 }
 
 std::map<std::wstring, StartCfg> LastApplied(const std::vector<UndoLog>& logs) {
@@ -790,17 +992,29 @@ std::map<std::wstring, StartCfg> LastApplied(const std::vector<UndoLog>& logs) {
     return m;
 }
 
-std::vector<RestoreRow> FirstRestoreRows(const Snapshot& first) {
+std::vector<RestoreRow> FirstRestoreRows(const Snapshot& first, const Ctx& c, std::vector<std::wstring>* skipped) {
+    // The same exclusions as Default: restore first snapshot (A2). The offline scripts never write what Hadron
+    // itself never changes: never-touch items (Boot-start, floor, filters, boot path, Critical), Boot/System start
+    // values, storage drivers, named never-in-preset items, launch-protected services, and every driver when the
+    // hardware checks couldn't run.
     std::vector<RestoreRow> v;
-    for (auto& s : first.items) {
-        if (KindOf(s.type) == Kind::UserInstance) continue;
-        v.push_back(RestoreRow{s.name, s.cfg, s.cfg.delayed >= 0});
+    for (auto& s0 : first.items) {
+        SvcItem s = s0;
+        s.kind = KindOf(s.type);
+        if (s.kind == Kind::UserInstance) continue;
+        Guard g = CheckGuard(s, c);
+        bool drop = g.neverTouch || s.cfg.start < 2 || s.protect != 0 || IsStorageDriver(s.name) ||
+                    Lookup(NeverPreset(), Lower(TemplateName(s.name, s.type))) != nullptr ||
+                    (IsDriverType(s.type) && s.cfg.start < 2 && !SysOk(s, c));
+        if (drop) { if (skipped) skipped->push_back(s.name); continue; }
+        v.push_back(RestoreRow{s.name, s.cfg, s.cfg.delayed >= 0, s.aclTi});
     }
     return v;
 }
 
-FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, const std::wstring& build,
-                                   const std::wstring& machine, Snapshot* first) {
+FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, const Ctx& c, Snapshot* first) {
+    const std::wstring& build = c.build;
+    const std::wstring& machine = c.machine;
     FirstRunResult r;
     std::wstring err;
     if (s.Exists(L"first.txt")) {
@@ -845,7 +1059,9 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
     r.wrote = true;
     std::wstring dir, zip;
     if (!s.Exists(L"recovery\\first")) {
-        if (!WriteRecovery(s, L"first", L"start types as recorded when Hadron first ran", FirstRestoreRows(parsed), &dir, &zip, &err))
+        std::vector<std::wstring> skipped;
+        std::vector<RestoreRow> rows = FirstRestoreRows(parsed, c, &skipped);
+        if (!WriteRecovery(s, L"first", L"start types as recorded when Hadron first ran", rows, &dir, &zip, &err, skipped))
             r.error = L"first.txt was written, but its recovery folder failed: " + err;
     }
     return r;

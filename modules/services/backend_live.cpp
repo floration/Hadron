@@ -166,12 +166,23 @@ bool WaitState(SC_HANDLE s, DWORD want, const std::atomic<bool>* cancel, std::ws
     SERVICE_STATUS_PROCESS ssp{};
     DWORD need = 0;
     DWORD start = GetTickCount();
+    bool moved = false;   // left the state it started in (a pending state) at least once
     for (;;) {
         if (!QueryServiceStatusEx(s, SC_STATUS_PROCESS_INFO, reinterpret_cast<BYTE*>(&ssp), sizeof(ssp), &need)) {
             *err = L"QueryServiceStatusEx: " + sys::ErrorText(GetLastError());
             return false;
         }
         if (ssp.dwCurrentState == want) return true;
+        // A start that fell back to STOPPED (or a stop that came back RUNNING) will not reach `want`: report why
+        // now instead of waiting out the cap.
+        DWORD back = want == SERVICE_RUNNING ? SERVICE_STOPPED : SERVICE_RUNNING;
+        if (ssp.dwCurrentState != back) moved = true;
+        if (ssp.dwCurrentState == back && (moved || (want == SERVICE_RUNNING && GetTickCount() - start > 1000))) {
+            DWORD code = ssp.dwWin32ExitCode == ERROR_SERVICE_SPECIFIC_ERROR ? ssp.dwServiceSpecificExitCode : ssp.dwWin32ExitCode;
+            *err = std::wstring(want == SERVICE_RUNNING ? L"the service stopped again while starting" : L"the service is running again after the stop") +
+                   (code ? L": " + sys::ErrorText(code) : L"");
+            return false;
+        }
         if (cancel && cancel->load()) { *err = L"cancelled while waiting; last state " + StateName(ssp.dwCurrentState); return false; }
         if (GetTickCount() - start > 30000) {   // overall cap (r1 §4)
             *err = L"timed out waiting; last state " + StateName(ssp.dwCurrentState);
@@ -284,18 +295,22 @@ public:
         if (!scm) { *err = L"OpenSCManager: " + sys::ErrorText(GetLastError()); return false; }
         Sc s(OpenServiceW(scm.h, name.c_str(), SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG));
         if (!s) { *err = L"OpenService: " + sys::ErrorText(GetLastError()); return false; }
-        // Start type only: every other field is SERVICE_NO_CHANGE / null (account, path, group, deps untouched).
-        if (!ChangeServiceConfigW(s.h, SERVICE_NO_CHANGE, (DWORD)w.start, SERVICE_NO_CHANGE, nullptr, nullptr, nullptr,
-                                  nullptr, nullptr, nullptr, nullptr)) {
-            *err = L"ChangeServiceConfig: " + sys::ErrorText(GetLastError());
-            return false;
-        }
+        // The delayed flag first: it is ignored unless the start type is Auto, so writing it before Start=2 is
+        // harmless, and when the SCM refuses it (a service in a load-order group can't be delayed) nothing has
+        // changed yet instead of leaving plain Auto behind.
         if (w.delayed >= 0) {
             SERVICE_DELAYED_AUTO_START_INFO d{w.delayed ? TRUE : FALSE};
             if (!ChangeServiceConfig2W(s.h, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, &d)) {
-                *err = L"start type written, but the delayed flag failed: ChangeServiceConfig2: " + sys::ErrorText(GetLastError());
+                *err = L"the delayed flag was refused, so nothing was changed: ChangeServiceConfig2: " + sys::ErrorText(GetLastError());
                 return false;
             }
+        }
+        // Start type only: every other field is SERVICE_NO_CHANGE / null (account, path, group, deps untouched).
+        if (!ChangeServiceConfigW(s.h, SERVICE_NO_CHANGE, (DWORD)w.start, SERVICE_NO_CHANGE, nullptr, nullptr, nullptr,
+                                  nullptr, nullptr, nullptr, nullptr)) {
+            *err = L"ChangeServiceConfig: " + sys::ErrorText(GetLastError()) +
+                   (w.delayed >= 0 ? L" (the delayed flag was already written; Undo puts it back)" : L"");
+            return false;
         }
         return true;
     }
@@ -327,6 +342,17 @@ public:
         if (!ControlServiceExW(s.h, SERVICE_CONTROL_STOP, SERVICE_CONTROL_STATUS_REASON_INFO, &p)) {
             DWORD e = GetLastError();
             if (e == ERROR_SERVICE_NOT_ACTIVE) return true;
+            if (e == ERROR_INVALID_PARAMETER) {
+                // The stop reason code is not documented as accepted with MAJOR_NONE/MINOR_NONE: stop without one.
+                SERVICE_STATUS ss{};
+                if (!ControlService(s.h, SERVICE_CONTROL_STOP, &ss)) {
+                    e = GetLastError();
+                    if (e == ERROR_SERVICE_NOT_ACTIVE) return true;
+                    *err = L"ControlService(stop): " + sys::ErrorText(e);
+                    return false;
+                }
+                return WaitState(s.h, SERVICE_STOPPED, cancel, err);
+            }
             *err = L"ControlServiceEx(stop): " + sys::ErrorText(e);
             return false;
         }

@@ -28,7 +28,7 @@ bool ParseSnapshot(const std::string& utf8, Snapshot* out, std::wstring* err);
 
 // ---- undo log ---------------------------------------------------------------------------------------
 // HXSVC 1 undo
-// B  stamp  source  count  machine  build          (begin)
+// B  stamp  source  count  machine  build  order   (begin; order: 1 + the highest order of the logs before it)
 // P  seq  name  start  before  after  identity     (every plan row, up front)
 // T  started|stopped                               (TrustedInstaller service started / stopped by Hadron)
 // I  seq  observed  identity-verified              (flushed BEFORE the SCM call)
@@ -46,7 +46,7 @@ struct UndoRow {
 };
 struct UndoLog {
     std::wstring file, stamp, source, machine, build;
-    int count = 0, badRecords = 0;
+    int count = 0, badRecords = 0, order = 0;
     bool hasB = false, hasE = false, tiStarted = false, tiStopped = false;
     std::vector<UndoRow> rows;
     UndoRow* Row(int seq);
@@ -92,9 +92,21 @@ public:
     bool Valid() const { return !root_.empty(); }
 
     static std::wstring DefaultRoot(std::wstring* err);    // %ProgramData%\Hadron\services
-    // Creates the root (and parents). secure: set the DACL to Administrators + SYSTEM full control,
-    // inheritable, protected (only when this call created the folder or it has no protected DACL yet).
+    // Creates the root (and missing parents, up to the volume or share root). secure: the root gets a protected
+    // DACL, Administrators + SYSTEM full control, inherited. On every call (the folder may have been made by
+    // someone else): the root and each parent must not be a reparse point; with secure, the root's owner must be
+    // Administrators or SYSTEM and the protected DACL is (re)applied. Any failure: false, with the reason, and
+    // the caller writes nothing there.
     bool EnsureRoot(bool secure, std::wstring* err);
+    // The path without a \\?\ prefix (\\?\UNC\x -> \\x), for display and for the README.
+    static std::wstring Plain(const std::wstring& path);
+    // Selftest under Wine only: Wine ignores the owner in a security descriptor (every file is owned by the
+    // user running Wine), so there the selftest lets this process's own user pass the owner check. The module
+    // never sets it; on Windows the selftest runs the strict check.
+    static bool& AcceptTokenUserAsOwner();
+    // Selftest only, where the system can't make a reparse point (Wine): EnsureRoot treats this exact path (no
+    // \\?\ prefix) as one. Empty, the default, injects nothing.
+    static std::wstring& InjectedReparsePoint();
     std::wstring Path(const std::wstring& rel) const;
     bool Exists(const std::wstring& rel) const;
     bool MakeDir(const std::wstring& rel, std::wstring* err);
@@ -105,7 +117,7 @@ public:
     // Renames a corrupt file aside ("<rel>.corrupt-<stamp>"), never deleting or overwriting it.
     bool RenameAside(const std::wstring& rel, std::wstring* newRel, std::wstring* err);
     std::vector<std::wstring> List(const std::wstring& pattern) const;   // file names, sorted
-    // yyyyMMdd-HHmmss local time, with -N when any snap-/undo-/recovery file with that stamp exists.
+    // yyyyMMdd-HHmmss UTC, with -N when any snap-/undo-/recovery file with that stamp exists.
     std::wstring NewStamp() const;
     std::wstring fixedStamp;   // selftest: deterministic stamps (then -N suffixes)
 

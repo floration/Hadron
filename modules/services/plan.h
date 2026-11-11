@@ -52,6 +52,8 @@ struct PlanRow {
     bool include = true, canToggle = true;
     std::wstring blocked;              // non-empty: shown for information, never applied
     std::wstring reason, basis, basisNote, evidence, warning, contested;
+    std::wstring depWarning;           // DependencyCheck's own warning, recomputed on every toggle
+    bool depUnticked = false;          // DependencyCheck unticked it (ticked again when the reason goes)
     bool needsTi = false;
     int seq = 0;                       // undo/resume: the original log sequence
     Op ctl = Op::Stop;                 // control plans: the operation for this row
@@ -77,13 +79,20 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
 Plan BuildSingle(const SvcItem& item, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c);
 // Stop / Start / Restart a service (spec §5.2): dependents that will stop are listed first.
 Plan BuildControl(const SvcItem& item, int what /*0 start, 1 stop, 2 restart*/, Backend& b, const std::vector<SvcItem>& items);
+// Undo and Resume refuse a log whose machine GUID or build differs from the PC's (empty plan, the reason as a
+// note), and run every row through the same guards as a plan (CheckGuard on the live item, no Boot start, no
+// Boot/System on a service, System-start drivers only with sysok): a log has a CRC, not an author.
 Plan BuildUndo(const UndoLog& log, Backend& b, const Ctx& c);
 Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items, const Ctx& c);
 // Marks rows whose admin write is refused (CanWrite) as "needs TrustedInstaller"; with the toggle off they
 // are excluded with the reason shown. The TrustedInstaller service itself is blocked while the toggle is on.
 void MarkTi(Plan* p, Backend& b, bool tiOn);
-// Disabling X while a not-disabled item depends on X: warning, row unticked (spec §5.3).
-void DependencyCheck(Plan* p, const std::vector<SvcItem>& items);
+// Spec §5.3, both directions, against the start every item ends with if the ticked rows are applied:
+// disabling X while an item that stays enabled depends on X, or raising X while a dependency of X stays
+// Disabled: warning, row unticked. Iterates to a fixed point. Run again after every toggle (toggled = that
+// row): warnings are recomputed, rows it unticked come back when their reason goes, the toggled row is the
+// user's choice.
+void DependencyCheck(Plan* p, const std::vector<SvcItem>& items, int toggled = -1);
 std::string DumpPlan(const Plan& p);   // the golden text form
 // Included rows in apply order: lowering rows dependents-first, then raising rows dependencies-first.
 std::vector<size_t> ApplyOrder(const Plan& p);
@@ -96,7 +105,7 @@ public:
     virtual bool StartedService() const = 0;            // Acquire started the TrustedInstaller service
     virtual bool Impersonate(std::wstring* identity, std::wstring* err) = 0;   // verified TI identity text
     virtual void Revert() = 0;
-    virtual bool Release(std::wstring* note) = 0;       // stop TI only if Acquire started it
+    virtual bool Release(std::wstring* note) = 0;       // stop TI only if Acquire started it; resets StartedService
 };
 
 // ---- apply ---------------------------------------------------------------------------------------------
@@ -126,7 +135,10 @@ bool RunControl(const Plan& p, const ApplyEnv& env, ApplyResult* r);
 
 // ---- logs, interrupted applies, drift ------------------------------------------------------------------
 std::vector<UndoLog> LoadLogs(const Store& s, std::vector<std::wstring>* problems);
-int FindInterrupted(const std::vector<UndoLog>& logs);   // newest B-without-E log not resolved by a later undo/resume
+int FindInterrupted(const std::vector<UndoLog>& logs);   // newest B-without-E log not resolved by a finished undo/resume
+// The log an Undo of logs[k] should start from: for an interrupted "undo:X" log that is X itself (undoing the
+// undo would re-apply X), otherwise k.
+int UndoBase(const std::vector<UndoLog>& logs, int k);
 int FindUndoable(const std::vector<UndoLog>& logs);      // newest finished log with changes, not undone yet
 bool TiLeftRunning(const std::vector<UndoLog>& logs);    // a log says Hadron started TI and never stopped it
 // name (lower case) -> the value Hadron last wrote and verified, from finished logs in order.
@@ -134,8 +146,10 @@ std::map<std::wstring, StartCfg> LastApplied(const std::vector<UndoLog>& logs);
 
 // First-run snapshot (spec §5.4): written once, atomically, read back; plus recovery\first and its zip.
 struct FirstRunResult { bool wrote = false, existed = false, corrupt = false, foreign = false; std::wstring error, note; };
-FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, const std::wstring& build,
-                                   const std::wstring& machine, Snapshot* first);
-std::vector<RestoreRow> FirstRestoreRows(const Snapshot& first);
+// c: the KB, hardware, build and machine GUID, for the guards FirstRestoreRows applies.
+FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, const Ctx& c, Snapshot* first);
+// The rows recovery\first restores: the same exclusions as Default: restore first snapshot. *skipped gets the
+// names left out (README section F).
+std::vector<RestoreRow> FirstRestoreRows(const Snapshot& first, const Ctx& c, std::vector<std::wstring>* skipped);
 
 }  // namespace hx::services

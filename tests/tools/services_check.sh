@@ -21,7 +21,9 @@ echo "ok: services.db is what genkb.py generates"
 echo "== fixture"
 python3 -I "$HERE/tests/fixtures/services/make_services_fixture.py" "$TMP/fix" > /dev/null
 for f in snapshot.txt hw.txt first.txt interrupted/snapshot.txt interrupted/hw.txt interrupted/first.txt \
-         interrupted/undo-20261110-213012.log; do
+         interrupted/undo-20261110-213012.log delayedlinger/snapshot.txt delayedlinger/hw.txt delayedlinger/first.txt \
+         forged/snapshot.txt forged/hw.txt forged/first.txt forged/undo-20261110-210000.log \
+         multi/snapshot.txt multi/hw.txt multi/first.txt multi/undo-20261110-210000.log multi/undo-20261110-220000.log; do
     cmp "$TMP/fix/$f" "$HERE/tests/fixtures/services/$f"
 done
 echo "ok: the committed fixture is what make_services_fixture.py writes"
@@ -45,7 +47,10 @@ for tab in services drivers; do
         cmp "$TMP/plan-$tab-$lvl.txt" "$HERE/tests/golden/services/plan-$tab-$lvl.txt"
     done
 done
-echo "ok: 8 plans match tests/golden/services"
+# A7 regression: a lingering DelayedAutostart=1 under Manual, restored to plain Auto.
+wine "$BUILD/HadronServices.exe" --dump-plan default --tab services --fixture "$FIX/delayedlinger" --out "$TMP/plan-delayedlinger.txt"
+cmp "$TMP/plan-delayedlinger.txt" "$HERE/tests/golden/services/plan-services-default-delayedlinger.txt"
+echo "ok: 8 plans and the delayedlinger plan match tests/golden/services"
 wswait
 
 shot() {   # name exe args...
@@ -61,6 +66,8 @@ shot services-detail-kb "$S" --fixture "$FIX" --select DiagTrack
 shot services-detail-protected "$S" --fixture "$FIX" --select RpcSs
 shot services-plan-stripped "$S" --fixture "$FIX" --plan stripped
 shot services-interrupted "$S" --fixture "$FIX/interrupted"
+shot services-forged-undo "$S" --fixture "$FIX/forged" --plan undo-last
+shot services-multi "$S" --fixture "$FIX/multi"
 shot services-ti-on "$S" --fixture "$FIX" --ti on --plan stripped --select dmwappushservice
 shot services-ti-list "$S" --fixture "$FIX" --ti on --select dmwappushservice
 shot services-light "$S" --fixture "$FIX" --theme light --select WSearch

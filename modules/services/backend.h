@@ -66,6 +66,7 @@ public:
     void SetHw(const HwInfo& hw) { hw_ = hw; }
     void SetBuild(const std::wstring& b) { build_ = b; }
     const std::vector<SvcItem>& Items() const { return items_; }
+    void SetState(const std::wstring& name, DWORD state) { if (SvcItem* i = Find(name)) i->state = state; }   // "someone else" did it
     FakeFaults faults;
     std::vector<std::wstring> controlLog;   // "stop X", "start X"
 

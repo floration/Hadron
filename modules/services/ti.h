@@ -14,6 +14,22 @@ namespace hx::services {
 // The TrustedInstaller service SID (NT SERVICE\TrustedInstaller).
 extern const wchar_t kTiSid[];
 
+// The TrustedInstaller *service* half of the live provider, through the Backend only (testable on the fake).
+// Ensure starts the service only when it is STOPPED, and claims it ("Hadron started it") only when that start
+// succeeded; START_PENDING is someone else's start: waited for, never claimed. StopIfStarted stops it only when
+// claimed. Both drop the claim, so one apply's start is never carried into the next apply.
+class TiService {
+public:
+    explicit TiService(Backend* b) : b_(b) {}
+    bool Ensure(SvcItem* ti, std::wstring* err);   // true when TrustedInstaller is RUNNING
+    bool Started() const { return started_; }
+    bool StopIfStarted(std::wstring* note);        // true only when it was claimed and the stop succeeded
+    DWORD waitMs = 30000, pollMs = 250;            // the START_PENDING wait
+private:
+    Backend* b_;
+    bool started_ = false;
+};
+
 // Live provider: Acquire takes the token once per apply (SeDebug on the thread, SYSTEM from winlogon in this
 // session, TI's process token duplicated as an impersonation token). Impersonate swaps it onto the calling
 // thread and verifies SecurityImpersonation and the TI SID group before any write.

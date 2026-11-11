@@ -135,7 +135,7 @@ int HwEvidence(const HwInfo& hw, const std::wstring& hint, const std::wstring& i
     if (hint.rfind(L"class:", 0) == 0) cls = Lower(hint.substr(6));
     else if (hint.rfind(L"svc:", 0) == 0) svc = Lower(hint.substr(4));
     else if (hint == L"self") svc = Lower(itemName);
-    else { *ev = L"unknown hardware hint '" + hint + L"': kept"; return 3; }
+    else { *ev = L"unknown hardware hint '" + hint + L"': kept"; return 0; }   // fail closed
     const DevNode* present = nullptr;
     const DevNode* phantom = nullptr;
     for (auto& n : hw.nodes) {
@@ -244,14 +244,21 @@ std::wstring BootDiskId(std::wstring* err) {
 
 bool ReadLiveHw(HwInfo* out) {
     *out = HwInfo{};
-    ULONG len = 0;
-    if (CM_Get_Device_ID_List_SizeW(&len, nullptr, CM_GETIDLIST_FILTER_NONE) != CR_SUCCESS || !len) {
-        out->error = L"CM_Get_Device_ID_List_Size failed";
-        return false;
+    // A device can arrive between the size and the list call: retry on CR_BUFFER_SMALL.
+    std::vector<wchar_t> ids;
+    CONFIGRET cr = CR_BUFFER_SMALL;
+    for (int tries = 0; tries < 5 && cr == CR_BUFFER_SMALL; tries++) {
+        ULONG len = 0;
+        cr = CM_Get_Device_ID_List_SizeW(&len, nullptr, CM_GETIDLIST_FILTER_NONE);
+        if (cr != CR_SUCCESS || !len) {
+            out->error = L"CM_Get_Device_ID_List_Size failed (CONFIGRET " + std::to_wstring(cr) + L")";
+            return false;
+        }
+        ids.assign(len + 2, 0);
+        cr = CM_Get_Device_ID_ListW(nullptr, ids.data(), len, CM_GETIDLIST_FILTER_NONE);
     }
-    std::vector<wchar_t> ids(len + 2, 0);
-    if (CM_Get_Device_ID_ListW(nullptr, ids.data(), len, CM_GETIDLIST_FILTER_NONE) != CR_SUCCESS) {
-        out->error = L"CM_Get_Device_ID_List failed";
+    if (cr != CR_SUCCESS) {
+        out->error = L"CM_Get_Device_ID_List failed (CONFIGRET " + std::to_wstring(cr) + L")";
         return false;
     }
     std::set<std::wstring> guids;

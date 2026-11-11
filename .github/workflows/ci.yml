@@ -153,7 +153,32 @@ jobs:
               }
             }
           }
-          "ok: 8 plans match tests/golden/services"
+          # A7 regression: a lingering DelayedAutostart=1 under Manual, restored to plain Auto.
+          $out = "svcplans\plan-delayedlinger.txt"
+          $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow `
+            -ArgumentList '--dump-plan','default','--tab','services','--fixture','tests\fixtures\services\delayedlinger','--out',$out
+          if ($p.ExitCode) { throw "dump-plan delayedlinger exited $($p.ExitCode)" }
+          if ((Get-FileHash $out).Hash -ne (Get-FileHash "tests\golden\services\plan-services-default-delayedlinger.txt").Hash) {
+            throw "plan-services-default-delayedlinger.txt differs from tests\golden\services"
+          }
+          "ok: 8 plans and the delayedlinger plan match tests/golden/services"
+      # Wine's cmd tolerates what real cmd.exe rejects (a ")" in a name closing an IF block), so the generated
+      # restore.cmd runs here on the real one. restore-dryrun.cmd is the golden script with every reg call echoed
+      # (call :dry), Select\Current read as 1 and an extra "Intel(R) Dry Run (x86)" row fed to :put: nothing
+      # touches the registry. It must reach "Done:" with every row restored and no syntax error.
+      - name: Services restore.cmd on real cmd.exe (echo only)
+        shell: pwsh
+        run: |
+          $lines = & cmd.exe /d /c "tests\golden\services\restore-dryrun.cmd C: 2>&1"
+          $code = $LASTEXITCODE
+          $lines | ForEach-Object { $_ }
+          $text = $lines -join "`n"
+          if ($text -match 'was unexpected at this time') { throw "cmd.exe reported a syntax error in restore.cmd" }
+          if ($code) { throw "restore-dryrun.cmd exited $code" }
+          if ($text -notmatch 'restored "Intel\(R\) Dry Run \(x86\)" Start=3') { throw "the (R) row did not get through :put" }
+          if ($text -notmatch 'Done: 5 restored, 0 not on this Windows, 0 failed\.') { throw "restore-dryrun.cmd did not reach the end" }
+          if ($text -notmatch 'DRYRUN reg unload HKLM\\HXOFF') { throw "the unload line was not reached" }
+          "ok: the generated restore.cmd runs to the end on real cmd.exe"
       # The one test that writes a real service: a throwaway HadronTestSvc this step creates and deletes.
       # Hadron sets its start type, verifies, undoes and verifies (--live-test refuses any other name).
       - name: Services live test (dummy service)
@@ -231,6 +256,8 @@ jobs:
           build\HadronServices.exe --fixture $sf --select RpcSs --screenshot "shots\services-detail-protected.png"
           build\HadronServices.exe --fixture $sf --plan stripped --screenshot "shots\services-plan-stripped.png"
           build\HadronServices.exe --fixture "$sf\interrupted" --screenshot "shots\services-interrupted.png"
+          build\HadronServices.exe --fixture "$sf\forged" --plan undo-last --screenshot "shots\services-forged-undo.png"
+          build\HadronServices.exe --fixture "$sf\multi" --screenshot "shots\services-multi.png"
           build\HadronServices.exe --fixture $sf --ti on --plan stripped --select dmwappushservice --screenshot "shots\services-ti-on.png"
           build\Hadron.exe --module services --fixture $sf --screenshot "shots\services-suite.png"
       - uses: actions/upload-artifact@v4

@@ -43,6 +43,7 @@ namespace {
 
 constexpr UINT WM_SVC_LOADED = WM_MODULE_BASE + 1;    // load worker -> view
 constexpr UINT WM_SVC_APPLIED = WM_MODULE_BASE + 2;   // apply worker -> view
+constexpr UINT WM_SVC_PLANNED = WM_MODULE_BASE + 3;   // plan worker -> view
 constexpr UINT_PTR kProgressTimer = 1;
 const wchar_t* const kViewClass = L"Hadron.services.View";
 const wchar_t* const kAppTitle = L"Services and drivers";
@@ -107,8 +108,9 @@ struct PlanReq {
 };
 
 struct LoadOut {
-    bool ok = false;
+    bool ok = false, storeRefused = false;
     std::wstring err, storeErr;
+    std::map<std::wstring, int> access;   // CanWrite per name (lower case): 0 admin can write, 1 refused, -1 unknown
     std::vector<SvcItem> items;
     HwInfo hw;
     std::wstring build, machine;
@@ -117,6 +119,19 @@ struct LoadOut {
     FirstRunResult fr;
     std::vector<UndoLog> logs;
     std::vector<std::wstring> logProblems;
+};
+
+// Everything a plan is built from, copied, so the plan worker never reads what the UI thread may replace.
+struct PlanJob {
+    PlanReq req;
+    std::vector<SvcItem> items;
+    std::vector<UndoLog> logs;
+    HwInfo hw;
+    bool hasFirst = false;
+    Snapshot first;
+    std::wstring build, machine;
+    bool tiOn = false;
+    Plan out;
 };
 
 struct Job {
@@ -149,8 +164,8 @@ public:
     }
     void Shutdown() override {
         cancelApply_.store(true);
-        loadW_.Cancel(); applyW_.Cancel();
-        loadW_.Join(); applyW_.Join();
+        loadW_.Cancel(); applyW_.Cancel(); planW_.Cancel();
+        loadW_.Join(); applyW_.Join(); planW_.Join();
         if (hwnd_) KillTimer(hwnd_, kProgressTimer);
     }
     int RunCli(int argc, wchar_t** argv) override;
@@ -183,8 +198,9 @@ private:
 
     // plans
     void OpenPlan(const PlanReq& r);
-    Plan BuildFrom(const PlanReq& r);
-    void ClosePlan() { mode_ = Mode::List; planReq_ = PlanReq{}; focus_ = Focus::List; }
+    void OnPlanned();
+    static Plan BuildFrom(PlanJob& j, Backend* b, const Kb* kb);
+    void ClosePlan() { mode_ = Mode::List; planReq_ = PlanReq{}; focus_ = Focus::List; replan_ = false; }
     void RefreshPlanList();
     void TogglePlanRow(int row);
     void StartApply();
@@ -217,7 +233,7 @@ private:
     std::unique_ptr<FakeBackend> fake_;
     std::unique_ptr<TiProvider> ti_;
     Store store_;
-    bool fixture_ = false, readOnly_ = false, elevated_ = true, loaded_ = false, writesOff_ = false;
+    bool fixture_ = false, readOnly_ = false, elevated_ = true, loaded_ = false, writesOff_ = false, storeRefused_ = false;
     std::wstring fixtureDir_, loadErr_, storeNote_;
     std::vector<SvcItem> items_;
     HwInfo hw_;
@@ -255,9 +271,11 @@ private:
     PlanReq planReq_;
     ListView plist_;
     std::wstring planErr_;
+    bool planBusy_ = false, replan_ = false;   // the plan worker is reading the live state; a newer request waits
 
     // workers
-    sys::Worker loadW_, applyW_;
+    sys::Worker loadW_, applyW_, planW_;
+    PlanJob planJob_;
     LoadOut loadOut_;
     Job job_;
     std::atomic<bool> cancelApply_{false};
@@ -333,6 +351,7 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_SVC_LOADED: OnLoaded(); return 0;
     case WM_SVC_APPLIED: OnApplied(); return 0;
+    case WM_SVC_PLANNED: OnPlanned(); return 0;
     case WM_RBUTTONDOWN: SetFocus(h); return 0;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
@@ -367,7 +386,7 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
                 case 0: return !r.blocked.empty() ? L"2" : (r.include ? L"0" : L"1");
                 case 2: return std::to_wstring(r.before.start);
                 case 3: return std::to_wstring(r.after.start);
-                case 4: return Lower(!r.blocked.empty() ? r.blocked : !r.warning.empty() ? r.warning : r.reason);
+                case 4: return Lower(!r.blocked.empty() ? r.blocked : !r.warning.empty() ? r.warning : !r.depWarning.empty() ? r.depWarning : r.reason);
             }
             return Lower(r.name);
         };
@@ -402,10 +421,11 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
     if (ArgValue(cl.rest, L"--tab") == L"drivers") tab_ = TAB_DRIVERS;
     argSelect_ = ArgValue(cl.rest, L"--select");
     argPlan_ = ArgValue(cl.rest, L"--plan");
-    if (ArgValue(cl.rest, L"--ti") == L"on") tiOn_ = true;
     readOnly_ = HasArg(cl.rest, L"--readonly");
     std::wstring dataDir = ArgValue(cl.rest, L"--data-dir");
     fixture_ = !cl.screenshot.empty() || cl.selftest || !cl.fixture.empty();
+    // --ti on is for fixture renders only: on live services the toggle is off at every launch (spec 5.6).
+    if (fixture_ && ArgValue(cl.rest, L"--ti") == L"on") tiOn_ = true;
     if (fixture_) {
         // Fixture mode: the fake backend, the fixture folder as a read-only data dir. Nothing is written,
         // nothing touches real services or %ProgramData%. --screenshot loads through LoadFixture (host).
@@ -417,7 +437,8 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
     sortAsc_ = host.Prefs().GetBool(L"sortAsc", true);
     search_.SetText(host.Prefs().GetStr(L"filter", L""));
     backend_ = MakeLiveBackend();
-    if (!dataDir.empty()) store_.SetRoot(sys::ToExtended(dataDir));
+    // The full path without a \\?\ prefix: the README shows it, and Store adds the prefix for each call.
+    if (!dataDir.empty()) store_.SetRoot(Store::Plain(sys::ToExtended(dataDir)));
     else if (!readOnly_) {
         std::wstring err;
         std::wstring root = Store::DefaultRoot(&err);
@@ -441,26 +462,52 @@ void ServicesModule::StartLoad() {
     Store st = store_;
     bool mayWrite = !readOnly_ && st.Valid();
     LoadOut* out = &loadOut_;
-    bool started = loadW_.Start(hwnd_, WM_SVC_LOADED, [b, st, mayWrite, out]() mutable {
+    const Kb* kb = kbOk_ ? &kb_ : nullptr;
+    sys::Worker* w = &loadW_;
+    bool started = loadW_.Start(hwnd_, WM_SVC_LOADED, [b, st, mayWrite, out, kb, w]() mutable {
         *out = LoadOut{};
         std::wstring err;
+        auto cancelled = [&]() { if (w->Cancelled()) { out->err = L"Loading was cancelled."; return true; } return false; };
         if (!b->Enumerate(&out->items, &err)) { out->err = L"Could not read the services: " + err; return; }
-        for (auto& i : out->items) i.company = FileCompany(i);
+        for (auto& i : out->items) {
+            if (cancelled()) return;
+            i.company = FileCompany(i);
+        }
         b->ReadHw(&out->hw);
         out->build = b->Build();
         out->machine = b->MachineGuid();
         FoldInstances(&out->items);
+        // Write access per item here, on the worker: the detail pane never calls the SCM from paint.
+        for (auto& i : out->items) {
+            if (cancelled()) return;
+            if (i.kind == Kind::UserInstance) continue;
+            bool denied = false;
+            std::wstring e;
+            out->access[Lower(i.name)] = b->CanWrite(i.name, &denied, &e) ? 0 : (denied ? 1 : -1);
+        }
+        if (cancelled()) return;
         if (st.Valid()) {
             if (mayWrite) {
-                if (!st.EnsureRoot(true, &err)) out->storeErr = L"Could not create the data folder: " + err;
-                else {
-                    out->fr = EnsureFirstSnapshot(st, out->items, out->build, out->machine, &out->first);
-                    out->hasFirst = (out->fr.wrote || out->fr.existed) && !out->fr.foreign;
+                if (!st.EnsureRoot(true, &err)) {
+                    // Nothing is read from or written to a folder Hadron can't trust: no first.txt, no undo logs.
+                    out->storeRefused = true;
+                    out->storeErr = L"The data folder can't be used, so changes are off: " + err;
+                    out->ok = true;
+                    return;
                 }
+                Ctx c;
+                c.kb = kb;
+                c.hw = out->hw.ok ? &out->hw : nullptr;
+                c.build = out->build;
+                c.machine = out->machine;
+                c.Prepare();
+                out->fr = EnsureFirstSnapshot(st, out->items, c, &out->first);
+                out->hasFirst = (out->fr.wrote || out->fr.existed) && !out->fr.foreign;
             } else if (st.Exists(L"first.txt")) {
                 std::string text;
                 if (st.Read(L"first.txt", &text, &err) && ParseSnapshot(text, &out->first, &err)) out->hasFirst = true;
             }
+            if (cancelled()) return;
             out->logs = LoadLogs(st, &out->logProblems);
         }
         out->ok = true;
@@ -482,13 +529,27 @@ void ServicesModule::OnLoaded() {
     hasFirst_ = o.hasFirst;
     first_ = std::move(o.first);
     logs_ = std::move(o.logs);
-    if (!o.storeErr.empty()) notices_.push_back(o.storeErr);
+    writeAccess_ = std::move(o.access);
+    if (o.storeRefused) {
+        storeRefused_ = true;
+        writesOff_ = true;
+        storeNote_ = o.storeErr;   // a lasting banner, not a dismissable notice
+    } else {
+        if (storeRefused_) {   // fixed since the last load (Refresh)
+            storeRefused_ = false;
+            storeNote_.clear();
+            writesOff_ = readOnly_ || !store_.Valid();
+        }
+        if (!o.storeErr.empty()) notices_.push_back(o.storeErr);
+    }
     if (!o.fr.error.empty()) notices_.push_back(L"First-run snapshot: " + o.fr.error);
     if (!o.fr.note.empty()) notices_.push_back(o.fr.note);
     if (o.fr.wrote && !o.fr.corrupt)
         notices_.push_back(L"Recorded this PC's start types in first.txt, with a recovery folder and zip, before any change.");
     for (auto& p : o.logProblems) notices_.push_back(L"Undo log skipped: " + p);
+    auto keep = std::move(writeAccess_);
     TakeData(std::move(o.items), o.hw, o.build, o.machine);
+    writeAccess_ = std::move(keep);
     if (planReq_.type != PlanReq::None && !applyW_.Running()) OpenPlan(planReq_);
 }
 
@@ -555,6 +616,11 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
     HwInfo hw;
     fake_->ReadHw(&hw);
     TakeData(std::move(items), hw, fake_->Build(), fake_->MachineGuid());
+    for (auto& s : items_) {
+        bool denied = false;
+        std::wstring e;
+        writeAccess_[Lower(s.name)] = fake_->CanWrite(s.name, &denied, &e) ? 0 : (denied ? 1 : -1);
+    }
     if (!argSelect_.empty()) SelectName(argSelect_);
     if (!argPlan_.empty()) {
         int lv = LevelFromName(argPlan_);
@@ -563,7 +629,8 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
         if (lv >= 0) { r.type = PlanReq::Preset; r.level = lv; }
         else if (lv == LEVEL_DEFAULT) r.type = PlanReq::Default;
         else if (lv == -2) r.type = PlanReq::Stock;
-        else if (argPlan_ == L"undo" && FindInterrupted(logs_) >= 0) { r.type = PlanReq::Undo; r.logIndex = FindInterrupted(logs_); }
+        else if (argPlan_ == L"undo" && FindInterrupted(logs_) >= 0) { r.type = PlanReq::Undo; r.logIndex = UndoBase(logs_, FindInterrupted(logs_)); }
+        else if (argPlan_ == L"undo-last" && FindUndoable(logs_) >= 0) { r.type = PlanReq::Undo; r.logIndex = FindUndoable(logs_); }
         else if (argPlan_ == L"resume" && FindInterrupted(logs_) >= 0) { r.type = PlanReq::Resume; r.logIndex = FindInterrupted(logs_); }
         if (r.type != PlanReq::None) OpenPlan(r);
     }
@@ -622,10 +689,14 @@ void ServicesModule::Refilter() {
         return Lower(s.name);
     };
     bool asc = sortCol_ < 0 ? true : sortAsc_;
+    // Keys once per row (the Hadron column runs CheckGuard), not once per comparison.
+    std::vector<std::pair<std::wstring, std::wstring>> keys(items_.size());
+    for (int i : V_) keys[i] = {text(items_[i]), Lower(items_[i].name)};
     std::stable_sort(V_.begin(), V_.end(), [&](int a, int b) {
-        std::wstring ka = text(items_[a]), kb = text(items_[b]);
-        if (ka == kb) return Lower(items_[a].name) < Lower(items_[b].name);
-        return asc ? ka < kb : kb < ka;
+        const auto& ka = keys[a];
+        const auto& kb = keys[b];
+        if (ka.first == kb.first) return ka.second < kb.second;
+        return asc ? ka.first < kb.first : kb.first < ka.first;
     });
     std::vector<std::vector<std::wstring>> rows;
     rows.reserve(V_.size());
@@ -677,18 +748,9 @@ void ServicesModule::SelectName(const std::wstring& name) {
 }
 
 int ServicesModule::WriteAccess(const std::wstring& name) const {
+    // Read on the load worker (or from the fake); paint never calls the SCM.
     auto it = writeAccess_.find(Lower(name));
-    if (it != writeAccess_.end()) return it->second;
-    Backend* b = fake_ ? (Backend*)fake_.get() : backend_.get();
-    int r = -1;
-    if (b && !applyW_.Running()) {
-        bool denied = false;
-        std::wstring err;
-        if (b->CanWrite(name, &denied, &err)) r = 0;
-        else if (denied) r = 1;
-    }
-    writeAccess_[Lower(name)] = r;
-    return r;
+    return it != writeAccess_.end() ? it->second : -1;
 }
 
 bool ServicesModule::CanApply(std::wstring* why) const {
@@ -696,6 +758,8 @@ bool ServicesModule::CanApply(std::wstring* why) const {
     if (!elevated_) { *why = L"Not running as administrator: read-only."; return false; }
     if (readOnly_) { *why = L"Read-only mode (--readonly)."; return false; }
     if (!store_.Valid()) { *why = L"No data folder for the undo log: changes are off."; return false; }
+    if (storeRefused_) { *why = L"The data folder can't be used: changes are off (see the banner)."; return false; }
+    if (planBusy_) { *why = L"Reading the live state for this plan."; return false; }
     if (applyW_.Running() || loadW_.Running()) { *why = L"Busy."; return false; }
     return true;
 }
@@ -703,40 +767,91 @@ bool ServicesModule::CanApply(std::wstring* why) const {
 // ============================================================================================
 // Plans
 
-Plan ServicesModule::BuildFrom(const PlanReq& r) {
-    PrepareCtx();
-    Backend* b = fake_ ? (Backend*)fake_.get() : backend_.get();
+// Runs on the plan worker for live services (MarkTi's write checks, Undo/Resume re-reads and Dependents are SCM
+// calls), on the UI thread for the fake. Reads only the job's own copies.
+Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
+    Ctx c;
+    c.kb = kb;
+    c.hw = j.hw.ok ? &j.hw : nullptr;
+    c.first = j.hasFirst ? &j.first : nullptr;
+    c.build = j.build;
+    c.machine = j.machine;
+    c.tiOn = j.tiOn;
+    c.Prepare();
+    const PlanReq& r = j.req;
     Plan p;
     const SvcItem* it = nullptr;
-    for (auto& s : items_) if (IEq(s.name, r.item)) it = &s;
+    for (auto& s : j.items) if (IEq(s.name, r.item)) it = &s;
     switch (r.type) {
-        case PlanReq::Preset: p = BuildPreset(r.level, r.tab, items_, ctx_); break;
-        case PlanReq::Default: p = BuildDefault(false, r.tab, items_, ctx_); break;
-        case PlanReq::Stock: p = BuildDefault(true, r.tab, items_, ctx_); break;
+        case PlanReq::Preset: p = BuildPreset(r.level, r.tab, j.items, c); break;
+        case PlanReq::Default: p = BuildDefault(false, r.tab, j.items, c); break;
+        case PlanReq::Stock: p = BuildDefault(true, r.tab, j.items, c); break;
         case PlanReq::Single:
-            if (it) p = BuildSingle(*it, r.target, items_, ctx_);
+            if (it) p = BuildSingle(*it, r.target, j.items, c);
             break;
         case PlanReq::Control:
-            if (it && b) p = BuildControl(*it, r.what, *b, items_);
+            if (it && b) p = BuildControl(*it, r.what, *b, j.items);
             break;
         case PlanReq::Undo:
-            if (b && r.logIndex >= 0 && r.logIndex < (int)logs_.size()) p = BuildUndo(logs_[r.logIndex], *b, ctx_);
+            if (b && r.logIndex >= 0 && r.logIndex < (int)j.logs.size()) p = BuildUndo(j.logs[r.logIndex], *b, c);
             break;
         case PlanReq::Resume:
-            if (b && r.logIndex >= 0 && r.logIndex < (int)logs_.size()) p = BuildResume(logs_[r.logIndex], *b, items_, ctx_);
+            if (b && r.logIndex >= 0 && r.logIndex < (int)j.logs.size()) p = BuildResume(j.logs[r.logIndex], *b, j.items, c);
             break;
         case PlanReq::None: break;
     }
-    if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, tiOn_);
+    if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, j.tiOn);
     return p;
 }
 
 void ServicesModule::OpenPlan(const PlanReq& r) {
     planReq_ = r;
-    plan_ = BuildFrom(r);
     mode_ = Mode::Plan;
     focus_ = Focus::List;
     detSb_.SetOffset(0);
+    if (planBusy_) { replan_ = true; Invalidate(); return; }   // the running build finishes first, then this one
+    PlanJob j;
+    j.req = r;
+    j.items = items_;
+    j.logs = logs_;
+    j.hw = hw_;
+    j.hasFirst = hasFirst_;
+    j.first = first_;
+    j.build = build_;
+    j.machine = machine_;
+    j.tiOn = tiOn_;
+    const Kb* kb = kbOk_ ? &kb_ : nullptr;
+    if (fake_ || !backend_) {   // the fake answers at once: build here
+        plan_ = BuildFrom(j, fake_.get(), kb);
+        OnPlanned();
+        return;
+    }
+    planJob_ = std::move(j);
+    planBusy_ = true;
+    plan_ = Plan{};
+    plan_.title = L"reading the live state…";
+    RefreshPlanList();
+    PlanJob* job = &planJob_;
+    Backend* b = backend_.get();
+    if (!planW_.Start(hwnd_, WM_SVC_PLANNED, [job, b, kb]() { job->out = BuildFrom(*job, b, kb); })) {
+        planBusy_ = false;
+        plan_.title = L"could not start the worker thread";
+        Status(L"Services: could not start the worker thread: " + sys::ErrorText(GetLastError()));
+    }
+    Invalidate();
+}
+
+void ServicesModule::OnPlanned() {
+    if (planBusy_) {
+        planW_.Join();
+        planBusy_ = false;
+        plan_ = std::move(planJob_.out);
+        if (replan_) {
+            replan_ = false;
+            if (mode_ == Mode::Plan && planReq_.type != PlanReq::None) { OpenPlan(planReq_); return; }
+        }
+    }
+    if (mode_ != Mode::Plan) return;   // closed while it was being built
     RefreshPlanList();
     // Start on the item selected in the list when the plan has it, so the row detail answers "what about this one?".
     int k0 = 0;
@@ -751,7 +866,7 @@ void ServicesModule::RefreshPlanList() {
     std::vector<std::vector<std::wstring>> rows;
     for (auto& r : plan_.rows) {
         std::wstring box = !r.blocked.empty() ? L"[-]" : (r.include ? L"[x]" : L"[ ]");
-        std::wstring note = !r.blocked.empty() ? r.blocked : !r.warning.empty() ? r.warning : r.reason;
+        std::wstring note = !r.blocked.empty() ? r.blocked : !r.warning.empty() ? r.warning : !r.depWarning.empty() ? r.depWarning : r.reason;
         if (plan_.kind == PlanKind::Control)
             rows.push_back({box, r.name, r.ctl == Op::Stop ? L"stop" : L"start", L"", note});
         else
@@ -768,6 +883,9 @@ void ServicesModule::TogglePlanRow(int row) {
         return;
     }
     r.include = !r.include;
+    // Dependencies again, for every row: unticking a dependent can leave what it depends on with an enabled
+    // dependent, and ticking one can clear another row's warning.
+    if (plan_.kind != PlanKind::Control) DependencyCheck(&plan_, items_, row);
     RefreshPlanList();
 }
 
@@ -879,7 +997,8 @@ void ServicesModule::OnClickId(int id) {
     if (id == ID_INT_UNDO || id == ID_INT_RESUME) {
         PlanReq r;
         r.type = id == ID_INT_UNDO ? PlanReq::Undo : PlanReq::Resume;
-        r.logIndex = interrupted_;
+        // Undo of an interrupted undo restarts that undo from the original apply's log, never "undoes the undo".
+        r.logIndex = id == ID_INT_UNDO ? UndoBase(logs_, interrupted_) : interrupted_;
         OpenPlan(r);
         return;
     }
@@ -1118,7 +1237,13 @@ std::vector<Banner> ServicesModule::Banners() const {
                      L"nothing is written, not even the first-run snapshot.", 1, {}});
     else if (!fixture_ && readOnly_)
         v.push_back({L"Read-only mode (--readonly): nothing is written and nothing can be applied.", 0, {}});
-    if (!storeNote_.empty()) v.push_back({storeNote_, 1, {}});
+    if (!storeNote_.empty()) v.push_back({storeNote_, storeRefused_ ? 2 : 1, {}});
+    if (loaded_ && loadErr_.empty() && (!hw_.ok || hw_.bootDisk.empty()))
+        v.push_back({std::wstring(!hw_.ok ? L"The device list could not be read" : L"The boot disk could not be found") +
+                         (hw_.error.empty() ? L"" : L" (" + hw_.error + L")") +
+                         L". The filter and boot-path checks can't run without it, so every driver is kept: none is offered in a plan "
+                         L"or as a single change.",
+                     1, {}});
     if (applyW_.Running()) {
         uint64_t k = applyW_.progress.load();
         std::wstring t = (resultControl_ ? L"Running " : L"Applying ") + resultTitle_ + L": item " +
@@ -1130,10 +1255,14 @@ std::vector<Banner> ServicesModule::Banners() const {
         const UndoLog& lg = logs_[interrupted_];
         int done = 0, begun = 0;
         for (auto& r : lg.rows) { if (r.hasD) done++; if (r.hasI) begun++; }
-        std::wstring t = L"An apply did not finish (" + lg.stamp + L", " + Unesc(lg.source) + L"): " + std::to_wstring(done) +
-                         L" of " + std::to_wstring(lg.count) + L" changes were recorded as done" +
-                         (begun > done ? L" and 1 was in progress" : L"") +
-                         L". Undo puts back what it changed; Resume re-plans the rest against the live state.";
+        bool undoOf = lg.source.rfind(L"undo:", 0) == 0;
+        std::wstring t = std::wstring(undoOf ? L"An undo did not finish (" : L"An apply did not finish (") + lg.stamp + L", " +
+                         Unesc(lg.source) + L"): " + std::to_wstring(done) + L" of " + std::to_wstring(lg.count) +
+                         L" changes were recorded as done" + (begun > done ? L" and 1 was in progress" : L"") +
+                         (undoOf ? L". Undo and Resume both finish undoing " + lg.source.substr(5) + L": Undo from that apply's log, "
+                                   L"Resume from this one."
+                                 : L". Undo puts back what it changed; Resume re-plans the rest against the live state.");
+        if (lg.badRecords) t += L" " + std::to_wstring(lg.badRecords) + L" record(s) in its log failed their check and were ignored.";
         bool can = !fixture_ && elevated_ && !readOnly_ && store_.Valid();
         if (can || fixture_) v.push_back({t, 1, {{ID_INT_UNDO, L"Undo"}, {ID_INT_RESUME, L"Resume"}}});
         else v.push_back({t, 1, {}});
@@ -1488,6 +1617,7 @@ std::vector<Para> ServicesModule::PlanRowDoc(const PlanRow& r) const {
     kv(L"Contested", r.contested, p.warn);
     kv(L"Evidence", r.evidence);
     kv(L"Warning", r.warning, p.warn);
+    kv(L"Dependencies", r.depWarning, p.warn);
     if (r.needsTi) kv(L"Identity", L"needs TrustedInstaller: Windows refuses this write to administrators", p.warn);
     const KbEntry* e = kbOk_ ? kb_.Find(r.name) : nullptr;
     if (e) {

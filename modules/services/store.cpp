@@ -3,6 +3,7 @@
 #include "core/sys/sys.h"
 #include <shlobj.h>
 #include <sddl.h>
+#include <aclapi.h>
 #include <algorithm>
 #include <set>
 
@@ -140,6 +141,7 @@ bool ParseUndoLog(const std::string& utf8, UndoLog* out, std::wstring* err) {
             out->hasB = true; out->stamp = f[1]; out->source = Unesc(f[2]); out->count = _wtoi(f[3].c_str());
             if (f.size() >= 5) out->machine = f[4];
             if (f.size() >= 6) out->build = f[5];
+            if (f.size() >= 7) out->order = _wtoi(f[6].c_str());
         } else if (k == L"P" && f.size() >= 7) {
             UndoRow r;
             r.seq = _wtoi(f[1].c_str());
@@ -262,36 +264,153 @@ bool Store::Exists(const std::wstring& rel) const {
     return GetFileAttributesW(sys::ToExtended(Path(rel)).c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
+std::wstring Store::Plain(const std::wstring& path) { return sys::ToShell(path); }
+
+bool& Store::AcceptTokenUserAsOwner() {
+    static bool accept = false;
+    return accept;
+}
+
+std::wstring& Store::InjectedReparsePoint() {
+    static std::wstring path;
+    return path;
+}
+
+namespace {
+// Length of the volume or share root of a full path without a \\?\ prefix: "C:\" -> 3, "\\srv\share\" -> its
+// length. 0 when the path has no root Hadron recognises.
+size_t VolumeRootLen(const std::wstring& p) {
+    if (p.size() >= 3 && p[1] == L':' && p[2] == L'\\') return 3;
+    if (p.size() > 2 && p[0] == L'\\' && p[1] == L'\\') {
+        size_t a = p.find(L'\\', 2);
+        if (a == std::wstring::npos || a == 2) return 0;
+        size_t b = p.find(L'\\', a + 1);
+        return b == std::wstring::npos ? p.size() : b + 1;
+    }
+    return 0;
+}
+
+// Owner Administrators, protected DACL: Administrators and SYSTEM full control, inherited by files and subfolders.
+const wchar_t kRootSddl[] = L"O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
+
+bool IsTokenUser(PSID sid) {
+    HANDLE tok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+    std::vector<BYTE> buf(256);
+    DWORD need = 0;
+    bool same = false;
+    if (GetTokenInformation(tok, TokenUser, buf.data(), (DWORD)buf.size(), &need) ||
+        (GetLastError() == ERROR_INSUFFICIENT_BUFFER && (buf.resize(need), GetTokenInformation(tok, TokenUser, buf.data(), need, &need))))
+        same = EqualSid(reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, sid) != FALSE;
+    CloseHandle(tok);
+    return same;
+}
+
+std::wstring SidText(PSID sid) {
+    wchar_t name[256], dom[256];
+    DWORD n = 256, d = 256;
+    SID_NAME_USE use;
+    if (LookupAccountSidW(nullptr, sid, name, &n, dom, &d, &use)) return (d > 0 && dom[0] ? std::wstring(dom) + L"\\" : L"") + name;
+    LPWSTR s = nullptr;
+    if (ConvertSidToStringSidW(sid, &s)) { std::wstring r = s; LocalFree(s); return r; }
+    return L"(unknown)";
+}
+}  // namespace
+
 bool Store::EnsureRoot(bool secure, std::wstring* err) {
     if (root_.empty()) { *err = L"no data folder"; return false; }
     if (ImpersonationFlag::Active()) { *err = L"refused: a Hadron file write while impersonating"; return false; }
-    std::wstring ext = sys::ToExtended(root_);
-    DWORD a = GetFileAttributesW(ext.c_str());
-    if (a != INVALID_FILE_ATTRIBUTES) {
-        if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { *err = root_ + L" exists and is not a folder"; return false; }
-        return true;
+    const std::wstring plain = sys::ToShell(sys::ToExtended(root_));   // full path, no \\?\ prefix
+    const size_t rl = VolumeRootLen(plain);
+    if (rl == 0 || rl >= plain.size()) { *err = L"the data folder must be a full path below a drive or share: " + root_; return false; }
+    // Every component below the volume or share root, top down: an existing one must be a real folder, never a
+    // reparse point (junction, mount point, symlink), so nothing is followed into a folder someone planted. Missing
+    // ones are created: parents with their inherited ACLs, the root with kRootSddl.
+    std::vector<std::wstring> chain;
+    for (size_t pos = rl; pos < plain.size();) {
+        size_t n = plain.find(L'\\', pos);
+        if (n == std::wstring::npos) n = plain.size();
+        if (n > pos) chain.push_back(plain.substr(0, n));
+        pos = n + 1;
     }
-    // Parents first (they inherit their normal ACLs), then the root itself with its own protected DACL.
-    size_t cut = root_.find_last_of(L'\\');
-    if (cut != std::wstring::npos && cut > 2) {
-        Store parent(root_.substr(0, cut));
-        if (!parent.EnsureRoot(false, err)) return false;
-    }
-    PSECURITY_DESCRIPTOR sd = nullptr;
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
-    if (secure) {
-        // Protected DACL: Administrators and SYSTEM full control, inherited by files and subfolders.
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)",
-                                                                  SDDL_REVISION_1, &sd, nullptr)) {
-            *err = L"Could not build the data folder's DACL: " + sys::ErrorText(GetLastError());
+    for (size_t i = 0; i < chain.size(); i++) {
+        const bool last = i + 1 == chain.size();
+        const std::wstring ext = sys::ToExtended(chain[i]);
+        DWORD a = GetFileAttributesW(ext.c_str());
+        if (a == INVALID_FILE_ATTRIBUTES) {
+            DWORD e = GetLastError();
+            if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND) {
+                *err = L"Could not read " + chain[i] + L": " + sys::ErrorText(e);
+                return false;
+            }
+            PSECURITY_DESCRIPTOR sd = nullptr;
+            SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
+            if (last && secure) {
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kRootSddl, SDDL_REVISION_1, &sd, nullptr)) {
+                    *err = L"Could not build the data folder's DACL: " + sys::ErrorText(GetLastError());
+                    return false;
+                }
+                sa.lpSecurityDescriptor = sd;
+            }
+            BOOL ok = CreateDirectoryW(ext.c_str(), sd ? &sa : nullptr);
+            e = GetLastError();
+            if (sd) LocalFree(sd);
+            if (!ok && e != ERROR_ALREADY_EXISTS) { *err = L"Could not create " + chain[i] + L": " + sys::ErrorText(e); return false; }
+            a = GetFileAttributesW(ext.c_str());
+            if (a == INVALID_FILE_ATTRIBUTES) { *err = L"Could not read " + chain[i] + L": " + sys::ErrorText(GetLastError()); return false; }
+        }
+        if ((a & FILE_ATTRIBUTE_REPARSE_POINT) || (!InjectedReparsePoint().empty() && IEq(chain[i], InjectedReparsePoint()))) {
+            *err = chain[i] + L" is a link (a junction, mount point or symbolic link). Hadron never writes through one, so changes "
+                              L"are off. Remove the link as an administrator, or give Hadron another --data-dir.";
             return false;
         }
-        sa.lpSecurityDescriptor = sd;
+        if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { *err = chain[i] + L" exists and is not a folder"; return false; }
     }
-    BOOL ok = CreateDirectoryW(ext.c_str(), secure ? &sa : nullptr);
-    DWORD e = GetLastError();
-    if (sd) LocalFree(sd);
-    if (!ok && e != ERROR_ALREADY_EXISTS) { *err = L"Could not create " + root_ + L": " + sys::ErrorText(e); return false; }
+    if (!secure) return true;
+
+    // The root itself, opened as itself (never what a reparse point names): check again, then its owner, then
+    // put the protected DACL back, whoever made the folder.
+    HANDLE h = CreateFileW(sys::ToExtended(plain).c_str(), READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { *err = L"Could not open " + plain + L" to check its owner: " + sys::ErrorText(GetLastError()); return false; }
+    std::wstring fail;
+    BY_HANDLE_FILE_INFORMATION bi{};
+    if (!GetFileInformationByHandle(h, &bi)) fail = L"Could not read " + plain + L": " + sys::ErrorText(GetLastError());
+    else if (bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) fail = plain + L" is a link (a reparse point). Hadron never writes through one.";
+    else if (!(bi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) fail = plain + L" is not a folder.";
+    if (fail.empty()) {
+        PSID owner = nullptr;
+        PSECURITY_DESCRIPTOR osd = nullptr;
+        DWORD e = GetSecurityInfo(h, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &osd);
+        if (e != ERROR_SUCCESS || !owner) fail = L"Could not read the owner of " + plain + L": " + sys::ErrorText(e);
+        else if (!IsWellKnownSid(owner, WinBuiltinAdministratorsSid) && !IsWellKnownSid(owner, WinLocalSystemSid) &&
+                 !(AcceptTokenUserAsOwner() && IsTokenUser(owner)))
+            fail = plain + L" is owned by " + SidText(owner) +
+                   L", not by Administrators or SYSTEM, so another program may have made it and could change what Hadron "
+                   L"writes there. Changes are off. Rename it aside as an administrator and restart Hadron, or give it another --data-dir.";
+        if (osd) LocalFree(osd);
+    }
+    if (fail.empty()) {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kRootSddl, SDDL_REVISION_1, &sd, nullptr)) {
+            fail = L"Could not build the data folder's DACL: " + sys::ErrorText(GetLastError());
+        } else {
+            BOOL present = FALSE, defaulted = FALSE;
+            PACL dacl = nullptr;
+            if (!GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) || !present || !dacl)
+                fail = L"Could not read the data folder's DACL: " + sys::ErrorText(GetLastError());
+            else {
+                DWORD e = SetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                          nullptr, nullptr, dacl, nullptr);
+                if (e != ERROR_SUCCESS)
+                    fail = L"Could not set the Administrators-and-SYSTEM-only permissions on " + plain + L": " + sys::ErrorText(e);
+            }
+            LocalFree(sd);
+        }
+    }
+    CloseHandle(h);
+    if (!fail.empty()) { *err = fail; return false; }
     return true;
 }
 
@@ -380,7 +499,7 @@ std::wstring Store::NewStamp() const {
     std::wstring base = fixedStamp;
     if (base.empty()) {
         SYSTEMTIME t;
-        GetLocalTime(&t);
+        GetSystemTime(&t);   // UTC: a DST change can't make a later stamp sort earlier
         wchar_t b[32];
         swprintf(b, 32, L"%04u%02u%02u-%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
         base = b;

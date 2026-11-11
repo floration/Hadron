@@ -4,8 +4,12 @@
     python3 -I tests/fixtures/services/make_services_fixture.py <out-dir>
 
 Writes <out-dir>/{snapshot.txt, hw.txt, first.txt} and <out-dir>/interrupted/{snapshot.txt, hw.txt, first.txt,
-undo-20261110-213012.log}. The committed copies in tests/fixtures/services/ are this script's output; CI regenerates
-them into a temp folder and compares (`cmp`), so edit this script, not the text files.
+undo-20261110-213012.log}, plus three regression fixtures from the Analyze round (docs/pipeline/svcdrv/4-analyze.md):
+  delayedlinger/  Spooler is Manual with a lingering DelayedAutostart=1, first.txt says plain Auto (A7);
+  forged/         a finished undo log with valid CRCs that would set stornvme/disk/RpcSs to Disabled (A4);
+  multi/          an interrupted apply and an interrupted undo of it (the undo must not hide the apply).
+The committed copies in tests/fixtures/services/ are this script's output; CI regenerates them into a temp folder and
+compares (`cmp`), so edit this script, not the text files.
 
 The machine is a small, hand-written picture of a Windows 10 22H2 (19045) desktop: every KB entry, the floor items the
 guards protect, a boot disk chain, class and device filters, per-user templates with instances and a few third-party
@@ -341,6 +345,30 @@ def interrupted_log():
     return stamp, out
 
 
+def forged_log():
+    """A3/A4 repro (sniffer #3): a finished log, CRCs valid, machine and build matching the fixture, whose Undo would
+    write Disabled to the boot NVMe controller, the disk class driver and RpcSs. Every row must come out blocked."""
+    stamp = '20261110-210000'
+    out = UNDO_HDR + '\n' + record(['B', stamp, 'preset:bloat:services', '3', META['machine'], '19045'])
+    for n, (name, before, after) in enumerate((('stornvme', '4/-', '0/-'), ('RpcSs', '4/-', '2/-'), ('disk', '4/-', '0/-')), 1):
+        out += record(['P', str(n), name, 'start', before, after, 'admin'])
+        out += record(['I', str(n), before, 'admin'])
+        out += record(['D', str(n), 'ok', after, 'admin'])
+    out += record(['E', stamp, '3', '0', '0', 'done'])
+    return stamp, out
+
+
+def multi_logs():
+    """Sniffer #10: an apply interrupted at row 1, then an undo of it also interrupted. The banner must lead back to
+    undoing the apply, never to undoing the undo (which would re-apply it)."""
+    a, u = '20261110-210000', '20261110-220000'
+    la = UNDO_HDR + '\n' + record(['B', a, 'preset:bloat:services', '1', META['machine'], '19045', '1'])
+    la += record(['P', '1', 'MapsBroker', 'start', '2/1', '4/1', 'admin']) + record(['I', '1', '2/1', 'admin'])
+    lu = UNDO_HDR + '\n' + record(['B', u, 'undo:' + a, '1', META['machine'], '19045', '2'])
+    lu += record(['P', '1', 'MapsBroker', 'start', '4/1', '2/1', 'admin']) + record(['I', '1', '4/1', 'admin'])
+    return {a: la, u: lu}
+
+
 def write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
@@ -369,6 +397,26 @@ def main(argv):
     write(os.path.join(idir, 'hw.txt'), hw)
     write(os.path.join(idir, 'first.txt'), snapshot(first_meta, {'DiagTrack': '2/-', 'WSearch': '2/1', 'XblGameSave': '3/-'}))
     write(os.path.join(idir, 'undo-%s.log' % stamp), log)
+    # A7 (sniffer #5): Spooler Manual with DelayedAutostart=1 left over; first.txt has plain Auto (2/-). Restore first
+    # snapshot must write DelayedAutostart=0 with Start=2, not leave the 1 (which would make it Auto (delayed)).
+    ddir = os.path.join(out, 'delayedlinger')
+    first = snapshot(first_meta, {'DiagTrack': '2/-', 'WSearch': '2/1', 'XblGameSave': '3/-'})
+    write(os.path.join(ddir, 'snapshot.txt'), snapshot(META, {'DiagTrack': '4/-', 'WSearch': '3/-', 'XblGameSave': '4/-',
+                                                              'Spooler': '3/1'}))
+    write(os.path.join(ddir, 'hw.txt'), hw)
+    write(os.path.join(ddir, 'first.txt'), first)
+    fstamp, flog = forged_log()
+    fdir = os.path.join(out, 'forged')
+    write(os.path.join(fdir, 'snapshot.txt'), snap)
+    write(os.path.join(fdir, 'hw.txt'), hw)
+    write(os.path.join(fdir, 'first.txt'), first)
+    write(os.path.join(fdir, 'undo-%s.log' % fstamp), flog)
+    mdir = os.path.join(out, 'multi')
+    write(os.path.join(mdir, 'snapshot.txt'), snap)
+    write(os.path.join(mdir, 'hw.txt'), hw)
+    write(os.path.join(mdir, 'first.txt'), first)
+    for st, text in multi_logs().items():
+        write(os.path.join(mdir, 'undo-%s.log' % st), text)
     return 0
 
 
