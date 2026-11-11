@@ -4,6 +4,7 @@
 #include "modules/services/cli.h"
 #include "modules/services/collect.h"
 #include "modules/services/plan.h"
+#include "modules/services/regfallback.h"
 #include "modules/services/store.h"
 #include <set>
 
@@ -211,11 +212,143 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
           L"visibility: --dump-list-live TSV has the mask, raw count, per-tab/kind/start counts and one line per row with its source");
 }
 
-}  // namespace hx::services
-
-namespace hx::services {
+// ============================================================================================
+// The protected-items override (DECISIONS 2026-11-11, owner), on the fake backend and temp data folders.
 void RunOverrideSelftest(const std::wstring& fixture, const Kb& kb, const std::function<std::wstring(const std::wstring&)>& newTempDir,
                          const SelftestCheck& check, const SelftestInfo& info) {
-    (void)fixture; (void)kb; (void)newTempDir; (void)check; (void)info;
+    FixtureData fx;
+    std::wstring err;
+    if (!LoadFixtureDir(fixture, &fx, &err)) { check(false, L"override: fixture loads: " + err); return; }
+    FakeBackend& b = fx.backend;
+    HwInfo hw;
+    b.ReadHw(&hw);
+    Ctx off;
+    off.kb = &kb;
+    off.hw = hw.ok ? &hw : nullptr;
+    off.first = fx.hasFirst ? &fx.first : nullptr;
+    off.build = b.Build();
+    off.machine = b.MachineGuid();
+    off.Prepare();
+    Ctx on = off;
+    on.overrideProtected = true;
+    std::vector<SvcItem> items;
+    CollectStats cst;
+    CollectItems(b, nullptr, false, nullptr, &items, &cst, &err);
+    FoldInstances(&items);
+
+    // A never-touch service (the floor) and a Boot-start driver, both readable and not launch-protected.
+    const SvcItem* floorSvc = nullptr;
+    const SvcItem* bootDrv = nullptr;
+    for (auto& s : items) {
+        if (s.RegOnly() || s.cfgUnknown || s.protect || s.kind == Kind::UserInstance) continue;
+        Guard g = CheckGuard(s, off);
+        if (!floorSvc && !IsDriverType(s.type) && g.neverTouch && s.cfg.start >= 2 && s.cfg.start < 4) floorSvc = &s;
+        if (!bootDrv && IsDriverType(s.type) && s.cfg.start == 0 && g.neverTouch) bootDrv = &s;
+    }
+    check(floorSvc && bootDrv, L"override: the fixture has a never-touch service and a Boot-start driver (" +
+                                   std::wstring(floorSvc ? floorSvc->name : L"-") + L", " + (bootDrv ? bootDrv->name : L"-") + L")");
+    if (!floorSvc || !bootDrv) return;
+
+    // 1. Off by default: a Ctx starts with it off, and a protected row stays blocked.
+    Plan s0 = BuildSingle(*floorSvc, StartCfg{4, -1}, items, off);
+    check(!Ctx{}.overrideProtected && s0.rows.size() == 1 && !s0.rows[0].blocked.empty() && !s0.rows[0].protectedRow,
+          L"override: off by default; a never-touch service stays blocked as a single change");
+    // 2. On: offered unticked, marked, with its guard reason, and a plan note.
+    Plan s1 = BuildSingle(*floorSvc, StartCfg{4, -1}, items, on);
+    Plan d1 = BuildSingle(*bootDrv, StartCfg{4, -1}, items, on);
+    check(s1.rows.size() == 1 && s1.rows[0].blocked.empty() && s1.rows[0].protectedRow && !s1.rows[0].include && s1.rows[0].canToggle &&
+              !s1.rows[0].protReason.empty() && d1.rows.size() == 1 && d1.rows[0].protectedRow && d1.rows[0].blocked.empty() &&
+              !s1.notes.empty() && s1.notes[0].find(L"PROTECTED") != std::wstring::npos && OverrideOffered(s1) && s1.Protected() == 0,
+          L"override: on, a never-touch service and a Boot-start driver become tickable rows, unticked, marked PROTECTED with the guard reason");
+
+    // 3. Built-in presets, Default and Stock: byte-identical with it on.
+    bool same = true;
+    for (int tab : {TAB_SERVICES, TAB_DRIVERS}) {
+        for (int lv = 0; lv < LV_COUNT; lv++) same = same && DumpPlan(BuildPreset(lv, tab, items, off)) == DumpPlan(BuildPreset(lv, tab, items, on));
+        same = same && DumpPlan(BuildDefault(false, tab, items, off)) == DumpPlan(BuildDefault(false, tab, items, on));
+        same = same && DumpPlan(BuildDefault(true, tab, items, off)) == DumpPlan(BuildDefault(true, tab, items, on));
+    }
+    check(same && !OverrideOffered(BuildPreset(LV_STRIPPED, TAB_SERVICES, items, on)) && !OverrideOffered(BuildDefault(true, TAB_DRIVERS, items, on)),
+          L"override: built-in presets, Default and Stock are the same plans with it on, and never offer it");
+
+    // 4. Refused even with it on: launch-protected, registry only, an unreadable configuration, Boot/System targets.
+    const SvcItem* lp = FindIn(items, L"WinDefend");
+    const SvcItem* reg = FindIn(items, L"Fs_Rec");
+    SvcItem unk = *floorSvc;
+    unk.cfgUnknown = true;
+    unk.readError = std::wstring(kCfgUnreadable) + L": test";
+    Plan lpP = lp ? BuildSingle(*lp, StartCfg{4, -1}, items, on) : Plan{};
+    Plan regP = reg ? BuildSingle(*reg, StartCfg{4, -1}, items, on) : Plan{};
+    Plan unkP = BuildSingle(unk, StartCfg{4, -1}, items, on);
+    Plan sysUp = BuildSingle(*floorSvc, StartCfg{1, -1}, items, on);
+    auto blockedRow = [](const Plan& p) { return p.rows.size() == 1 && !p.rows[0].blocked.empty() && !p.rows[0].protectedRow; };
+    check(lp && blockedRow(lpP) && lpP.rows[0].blocked.find(L"Windows itself refuses") != std::wstring::npos && reg && blockedRow(regP) &&
+              blockedRow(unkP) && !sysUp.rows.empty() && !sysUp.rows[0].blocked.empty(),
+          L"override: launch-protected (Windows itself refuses), registry-only and unreadable items stay refused, and Boot/System targets too");
+    CustomPreset cp;
+    cp.name = L"prot";
+    cp.tab = TAB_SERVICES;
+    cp.items = {{floorSvc->name, StartCfg{4, -1}}, {L"WinDefend", StartCfg{4, -1}}};
+    Plan c0 = BuildCustom(cp, items, off), c1 = BuildCustom(cp, items, on);
+    const PlanRow* cr = nullptr;
+    for (auto& r : c1.rows) if (IEq(r.name, floorSvc->name)) cr = &r;
+    bool wdDropped = false;
+    for (auto& n : c1.notes) if (n.find(L"WinDefend") != std::wstring::npos && n.find(L"Windows itself refuses") != std::wstring::npos) wdDropped = true;
+    check(c0.rows.empty() && cr && cr->protectedRow && !cr->include && wdDropped && OverrideOffered(c1),
+          L"override: a custom preset offers its protected rows unticked with it on, drops them with it off, and still drops launch-protected ones");
+
+    // 5. The registry fallback never takes a protected row.
+    {
+        FakeBackend rb = b;
+        std::vector<SvcItem> all = rb.Items();
+        for (auto& i : all) if (IEq(i.name, floorSvc->name)) i.aclTi = true;   // the SCM refuses administrators
+        rb.SetItems(all);
+        Plan rp = BuildSingle(*floorSvc, StartCfg{4, -1}, items, on);
+        MarkRegFallback(&rp, rb, true, false, items, on);
+        check(rp.rows.size() == 1 && !rp.rows[0].viaReg && rp.rows[0].regRefused.find(L"protected row") != std::wstring::npos,
+              L"override: a protected row is never written through the registry fallback (SCM path only)");
+    }
+
+    // 6. Apply and undo a protected row with it on: the Boot-start driver to Disabled and back to Boot, through the same
+    //    snapshot, flushed undo log and recovery zip as every apply.
+    FakeBackend ab = b;
+    Store st(newTempDir(L"override"));
+    ApplyEnv env;
+    env.backend = &ab;
+    env.store = &st;
+    env.lockName = L"Local\\Hadron.services.selftest.override." + std::to_wstring(GetCurrentProcessId());
+    env.build = b.Build();
+    env.machine = b.MachineGuid();
+    env.requireFirst = false;
+    Plan ap = BuildSingle(*bootDrv, StartCfg{4, -1}, items, on);
+    if (ap.rows.size() == 1) ap.rows[0].include = true;   // the user's tick
+    ApplyResult ar;
+    bool applied = ap.rows.size() == 1 && RunApply(ap, env, &ar);
+    SvcItem now;
+    ab.Query(bootDrv->name, &now, &err);
+    check(applied && ar.ok == 1 && now.cfg.start == 4 && !ar.zipPath.empty() && !ar.logPath.empty() && !ar.snapPath.empty(),
+          L"override: a ticked protected row is applied (" + bootDrv->name + L" Boot -> Disabled) with the snapshot, undo log and recovery zip" +
+              (ar.error.empty() ? L"" : L": " + ar.error));
+    std::vector<SvcItem> afterItems;
+    ab.Enumerate(&afterItems, &err);
+    FoldInstances(&afterItems);
+    auto logs = LoadLogs(st, nullptr);
+    int k = FindUndoable(logs);
+    Plan u0 = k >= 0 ? BuildUndo(logs[(size_t)k], ab, afterItems, off) : Plan{};
+    Plan u1 = k >= 0 ? BuildUndo(logs[(size_t)k], ab, afterItems, on) : Plan{};
+    check(u0.rows.size() == 1 && !u0.rows[0].blocked.empty() && u1.rows.size() == 1 && u1.rows[0].protectedRow && u1.rows[0].blocked.empty() &&
+              u1.rows[0].after.start == 0 && OverrideOffered(u1),
+          L"override: its undo is refused with the override off and offered (a PROTECTED row back to Boot) with it on");
+    bool undone = false;
+    if (u1.rows.size() == 1) {
+        u1.rows[0].include = true;
+        ApplyResult ur;
+        undone = RunApply(u1, env, &ur) && ur.ok == 1;
+        ab.Query(bootDrv->name, &now, &err);
+    }
+    check(undone && now.cfg.start == 0, L"override: the undo puts the Boot-start driver back to Boot");
+    info(L"override: applied and undone " + bootDrv->name + L" in " + st.Root());
 }
+
 }  // namespace hx::services
+

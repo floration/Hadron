@@ -79,6 +79,9 @@ enum ClickId {
     ID_FOCUS_LIST = 900, ID_FOCUS_DETAIL, ID_FOCUS_DETAIL_L,   // tab stops that are not click targets (L: Console's left column)
     ID_CONKEY = 400,   // + a Console action (CA_*), the F-key bar's click targets
 };
+constexpr int ID_PROT = 961;       // the protected-items override checkbox (plan screen only; DECISIONS 2026-11-11, owner)
+constexpr int ID_PROT_GO = 962;    // the second confirmation: apply including the ticked protected rows
+constexpr int ID_PROT_BACK = 963;  // the second confirmation: back to the plan
 constexpr int ID_REG = 960;   // the registry fallback's per-apply switch (regfallback.h), on the plan screen only
 // Keyboard focus. Control = a chip or button (focusId_), reached with Tab/Shift+Tab in reading order and
 // activated with Enter or Space. Apply is never a tab stop: a plan is applied by a mouse click only.
@@ -269,6 +272,7 @@ struct PlanJob {
     std::wstring build, machine;
     bool tiOn = false;
     bool regOn = false;   // the registry fallback's per-apply toggle
+    bool protOn = false;  // the protected-items override
     std::shared_ptr<const SxsStock> sxs;   // immutable once read: shared, never copied
     bool sxsPending = false;
     Plan out;
@@ -402,7 +406,7 @@ private:
     void OnSxs();
     static Plan BuildFrom(PlanJob& j, Backend* b, const Kb* kb);
     // The registry fallback switch is per apply: closing a plan turns it off.
-    void ClosePlan() { mode_ = Mode::List; planReq_ = PlanReq{}; focus_ = Focus::List; replan_ = false; saving_ = false; fromPlan_ = false; regOn_ = false; }
+    void ClosePlan() { mode_ = Mode::List; planReq_ = PlanReq{}; focus_ = Focus::List; replan_ = false; saving_ = false; fromPlan_ = false; regOn_ = false; protOn_ = false; protAsk_ = false; }
     void RefreshPlanList();
     void TogglePlanRow(int row);
     void StartApply();
@@ -547,6 +551,13 @@ private:
     bool tiReloadPending_ = false;   // the TI toggle flipped during a load: read again when it ends
     std::wstring loadNote_;   // the last load's registry cross-check and TrustedInstaller sentence (collect.h), "" or ending in a space
     bool regOn_ = false;  // the registry fallback: never persisted, off at every launch, after every apply and plan close
+    // The protected-items override (DECISIONS 2026-11-11, owner): like "Allow BIOS writes", never persisted, off at every
+    // launch, reset when the plan closes (ClosePlan, which every apply ends with) or another plan opens. protAsk_: Apply
+    // was pressed with ticked protected rows and the second confirmation is showing.
+    bool protOn_ = false, protAsk_ = false;
+    bool ProtOffered() const { return mode_ == Mode::Plan && OverrideOffered(plan_) && !planBusy_; }
+    std::wstring ProtAskText() const;
+    int ProtCheckbox(HDC dc, int x, int y, int right, bool console);
     std::set<std::wstring> regApplied_;   // items whose last verified write went through the registry (LastAppliedViaReg)
     EvidencePasses ev_;   // signer and event 7040 (evidence_view.h)
     UINT seenDpi_ = 96;   // the DPI the scroll offsets are in (OnDpiChanged rescales them)
@@ -643,7 +654,7 @@ private:
     FileJob fileJob_;
 
     // --screenshot / --fixture arguments applied after the fixture loads
-    std::wstring argSelect_, argPlan_, argKeys_, argImport_, argSave_;
+    std::wstring argSelect_, argPlan_, argKeys_, argImport_, argSave_, argProt_;
     bool argPresets_ = false, argMeasure_ = false;
 };
 
@@ -819,6 +830,9 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
     if (fixture_ && ArgValue(cl.rest, L"--ti") == L"on") tiOn_ = true;
     // --regfallback on likewise: fixture renders of the fallback plan only. Live, the switch is off until clicked.
     if (fixture_ && ArgValue(cl.rest, L"--regfallback") == L"on") regOn_ = true;
+    // --protected on|ask: fixture renders of the protected-items override (ask: the protected rows ticked and the second
+    // confirmation showing). Live, the checkbox is off at every launch and on every new plan.
+    if (fixture_) argProt_ = ArgValue(cl.rest, L"--protected");
     if (fixture_) {
         // Fixture mode: the fake backend, the fixture folder as a read-only data dir. Nothing is written,
         // nothing touches real services or %ProgramData%. --screenshot loads through LoadFixture (host).
@@ -1238,8 +1252,19 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
         else if (argPlan_ == L"ti-stop") { r.type = PlanReq::Control; r.item = L"TrustedInstaller"; r.what = 1; r.tiStop = true; }
         else if (argPlan_.rfind(L"custom:", 0) == 0) {   // a saved custom preset of the fixture, by name
             for (auto& cp : presets_) if (IEq(cp.name, argPlan_.substr(7))) { r.type = PlanReq::Custom; r.preset = cp; }
+        } else if (argPlan_.rfind(L"single:", 0) == 0) {   // single:<name>:<start 2..4>, a single change from the detail pane
+            size_t c2 = argPlan_.rfind(L':');
+            if (c2 > 7) { r.type = PlanReq::Single; r.item = argPlan_.substr(7, c2 - 7); r.target = StartCfg{_wtoi(argPlan_.c_str() + c2 + 1), -1}; }
         }
         if (r.type != PlanReq::None) OpenPlan(r);
+        if (mode_ == Mode::Plan && (argProt_ == L"on" || argProt_ == L"ask")) {
+            OnClickId(ID_PROT);
+            if (argProt_ == L"ask") {
+                for (int k = 0; k < (int)plan_.rows.size(); k++)
+                    if (plan_.rows[k].protectedRow && plan_.rows[k].blocked.empty() && !plan_.rows[k].include) TogglePlanRow(k);
+                protAsk_ = plan_.Protected() > 0;   // what Apply shows (fixture mode never applies)
+            }
+        }
     }
     if (!argImport_.empty()) {   // the same parser and plan path as the Import button, without its dialog
         CustomPreset cp;
@@ -1504,6 +1529,7 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
     c.build = j.build;
     c.machine = j.machine;
     c.tiOn = j.tiOn;
+    c.overrideProtected = j.protOn;
     c.sxs = j.sxs.get();
     c.sxsPending = j.sxsPending;
     c.Prepare();
@@ -1534,11 +1560,14 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
     if (b && p.kind != PlanKind::Control) MarkRegFallback(&p, *b, j.regOn, j.tiOn, j.items, c);
     if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, j.tiOn, j.items);   // re-runs the dependency check
     if (r.tiStop) MarkTiStop(&p, j.logs, j.items);   // R4: the claimed process, and the reason from data
+    p.overrideOn = j.protOn && OverrideOffered(p);
     return p;
 }
 
 void ServicesModule::OpenPlan(const PlanReq& r, bool rebuild) {
+    protAsk_ = false;   // any rebuild or new plan: the second confirmation is asked again
     if (!rebuild) {   // a new plan: its own defaults, nothing carried over from the last one
+        protOn_ = false;   // the override never carries into another plan
         userTicks_.clear();
         conPlanSort_ = -1;
         keepPlanSel_.clear();
@@ -1568,6 +1597,7 @@ void ServicesModule::OpenPlan(const PlanReq& r, bool rebuild) {
     j.machine = machine_;
     j.tiOn = tiOn_;
     j.regOn = regOn_;
+    j.protOn = protOn_;
     j.sxs = sxs_;
     j.sxsPending = sxsPending_;
     const Kb* kb = kbOk_ ? &kb_ : nullptr;
@@ -1640,6 +1670,7 @@ void ServicesModule::RefreshPlanList() {
             else if (k == L"now") cells.push_back(StartLabel(r.before, false));
             else if (k == L"after") cells.push_back(L"\u2192 " + StartLabel(r.after, false));
             else if (k == L"basis") cells.push_back(r.basis == L"owner-measured" ? std::wstring(L"measured") : r.basis);
+            else if (r.protectedRow && r.blocked.empty()) cells.push_back(L"PROTECTED: " + r.protReason);
             else cells.push_back(!r.blocked.empty() ? r.blocked : !r.warning.empty() ? r.warning : !r.depWarning.empty() ? r.depWarning
                                  : r.viaReg ? r.regNote : r.reason);
         }
@@ -1678,6 +1709,7 @@ void ServicesModule::TogglePlanRow(int row) {
     // Dependencies again, for every row: unticking a dependent can leave what it depends on with an enabled
     // dependent, and ticking one can clear another row's warning.
     if (plan_.kind != PlanKind::Control) DependencyCheck(&plan_, items_, row);
+    protAsk_ = false;   // the ticks changed: Apply asks again
     RefreshPlanList();
 }
 
@@ -1685,6 +1717,18 @@ void ServicesModule::StartApply() {
     std::wstring why;
     if (!CanApply(&why)) { Status(L"Services: " + why); return; }
     if (plan_.kind != PlanKind::Control && plan_.Included() == 0) return;
+    // The protected-items override: ticked protected rows need a second, separate confirmation (ID_PROT_GO).
+    if (plan_.kind != PlanKind::Control && plan_.Protected() > 0 && !protAsk_) {
+        protAsk_ = true;
+        Status(L"Services: " + std::to_wstring(plan_.Protected()) + L" protected row(s) ticked: confirm them in the red banner, or go back.");
+        Invalidate();
+        return;
+    }
+    if (plan_.Protected() > 0 && (!protOn_ || !plan_.overrideOn)) {   // never apply a protected row without the switch
+        protAsk_ = false;
+        Status(L"Services: the protected-items override is off: rebuild the plan.");
+        return;
+    }
     job_ = Job{};
     job_.plan = plan_;
     job_.control = plan_.kind == PlanKind::Control;
@@ -1809,7 +1853,18 @@ void ServicesModule::OnClickId(int id) {
         OpenPlan(r);
         return;
     }
-    if (id == ID_APPLY) { StartApply(); return; }
+    if (id == ID_APPLY) { if (!protAsk_) StartApply(); return; }   // while asking, only the banner's button applies
+    if (id == ID_PROT_GO) { if (protAsk_ && mode_ == Mode::Plan) StartApply(); return; }
+    if (id == ID_PROT_BACK) { protAsk_ = false; Status(L"Services: nothing applied."); Invalidate(); return; }
+    if (id == ID_PROT) {
+        if (applyW_.Running() || !ProtOffered()) return;
+        protOn_ = !protOn_;
+        Status(protOn_ ? L"Services: protected-items override ON for this plan only: protected rows are offered unticked. " +
+                             std::wstring(kOverrideWarning)
+                       : L"Services: protected-items override off.");
+        OpenPlan(planReq_, true);   // the same plan, rows re-marked; the user's ticks stay where they still apply
+        return;
+    }
     if (id == ID_CANCEL_PLAN) { ClosePlan(); return; }
     if (id == ID_CANCEL_APPLY) { cancelApply_.store(true); applyW_.Cancel(); Status(L"Services: cancelling after the current item…"); return; }
     if (id == ID_INT_UNDO || id == ID_INT_RESUME) {
@@ -1939,7 +1994,7 @@ bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         if (focus_ == Focus::Control && (w == VK_RETURN || w == VK_SPACE)) {
             swallowChar_ = true;   // its WM_CHAR must not reach the filter box
             int id = focusId_;
-            if (id != ID_APPLY) OnClickId(id);   // never a tab stop; checked again so no key can ever apply
+            if (id != ID_APPLY && id != ID_PROT_GO) OnClickId(id);   // never a tab stop; checked again so no key can ever apply
             return true;
         }
         if (focus_ == Focus::Control && (w == VK_LEFT || w == VK_RIGHT)) {   // along a row of chips, like a toolbar
@@ -2150,6 +2205,12 @@ std::vector<Banner> ServicesModule::Banners() const {
                      L"to the service's registry key (Start, DelayedAutostart) directly. Never for launch-protected, protected, "
                      L"boot-path or Boot/System-start items. It turns off after this apply. " + std::wstring(kRegRestartBasis),
                      1, applyW_.Running() ? std::vector<std::pair<int, std::wstring>>{} : std::vector<std::pair<int, std::wstring>>{{ID_REG, L"Turn off"}}});
+    if (protOn_ && mode_ == Mode::Plan && !protAsk_)
+        v.push_back({L"Protected-items override is on for this plan: " + std::wstring(kOverrideWarning) +
+                         L" Rows marked PROTECTED are offered unticked; it turns off when the plan closes or after the apply.",
+                     2, applyW_.Running() ? std::vector<std::pair<int, std::wstring>>{} : std::vector<std::pair<int, std::wstring>>{{ID_PROT, L"Turn off"}}});
+    if (protAsk_ && mode_ == Mode::Plan && !applyW_.Running())
+        v.push_back({ProtAskText(), 2, {{ID_PROT_GO, L"Apply, including " + std::to_wstring(plan_.Protected()) + L" protected"}, {ID_PROT_BACK, L"Back"}}});
     if (!storeNote_.empty()) v.push_back({storeNote_, storeRefused_ ? 2 : 1, {}});
     if (loaded_ && loadErr_.empty() && (!hw_.ok || hw_.bootDisk.empty()))
         v.push_back({std::wstring(!hw_.ok ? L"The device list could not be read" : L"The boot disk could not be found") +
@@ -2588,6 +2649,9 @@ std::vector<Para> ServicesModule::PlanRowDoc(const PlanRow& r) const {
         kv(L"Planned", StartLabel(r.after, false));
     }
     if (!r.blocked.empty()) d.push_back({P_TEXT, L"", r.blocked, p.text});   // kept or protected: left alone, not an error
+    else if (r.protectedRow)   // the override freed it: red, with the guard it lifted (DECISIONS 2026-11-11, owner)
+        d.push_back({P_TEXT, L"", L"PROTECTED: " + r.protReason + L". Offered only because the protected-items override is on. " +
+                                      kOverrideWarning + L" If Windows no longer starts, Undo cannot run: the apply's recovery folder and zip hold the old values for an offline restore.", p.badT});
     kv(L"Why", r.reason);
     if (!r.basis.empty()) kv(L"Basis", BasisLabel(r.basis, r.basisCond) + (r.basisNote.empty() ? L"" : L": " + r.basisNote), p.mute);
     kv(L"Contested", r.contested, p.warnT);
@@ -2887,6 +2951,44 @@ bool ServicesModule::RegRelevant() const {
     return false;
 }
 
+// The protected-items override checkbox (DECISIONS 2026-11-11, owner), on the plan screen of Single, custom-preset, Undo
+// and Resume plans in both layouts. The label carries the owner's warning. Returns the y below it.
+int ServicesModule::ProtCheckbox(HDC dc, int x, int y, int right, bool console) {
+    Pal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    const bool en = !applyW_.Running();
+    const int box = Sc(console ? 12 : 16);
+    std::wstring lbl = std::wstring(L"Allow changes to protected items") + (console ? L" (F4)" : L"") + L". " + kOverrideWarning;
+    int lh = 0;
+    std::vector<std::wstring> lines = WrapLines(dc, f.caption, lbl, right - x - box - Sc(8), &lh);
+    int top = y;
+    RECT bx{x, y + (lh - box) / 2, x + box, y + (lh - box) / 2 + box};
+    COLORREF edge = !en ? p.dis : protOn_ ? p.bad : p.badT;
+    FillSolid(dc, bx, protOn_ ? (p.hc ? p.text : p.bad) : p.bg);
+    FrameRectC(dc, bx, edge);
+    if (protOn_) {   // a check mark the high-contrast palette keeps visible
+        RECT in{bx.left + Sc(3), bx.top + Sc(3), bx.right - Sc(3), bx.bottom - Sc(3)};
+        FillSolid(dc, in, p.hc ? p.bg : p.onAcc);
+    }
+    for (auto& ln : lines) {
+        RECT lr{x + box + Sc(8), y, right, y + lh};
+        ui::DrawText(dc, ln, lr, f.caption, en ? (protOn_ ? p.badT : p.text) : p.dis, DT_SINGLELINE | DT_NOCLIP);
+        y += lh;
+    }
+    if (en) AddClick(RECT{x, top, right, y}, ID_PROT);
+    return y;
+}
+
+// The second confirmation: every ticked protected row on its own, then what it means.
+std::wstring ServicesModule::ProtAskText() const {
+    std::vector<std::wstring> rows;
+    for (auto& r : plan_.rows)
+        if (r.protectedRow && r.blocked.empty() && r.include)
+            rows.push_back(r.name + L" (" + StartLabel(r.before, false) + L" → " + StartLabel(r.after, false) + L"; " + r.protReason + L")");
+    return L"Second confirmation. This apply changes " + std::to_wstring(rows.size()) + L" protected item(s): " + Join(rows, L"; ") +
+           L". " + kOverrideWarning + L" The snapshot, the flushed undo log and the recovery zip are written first, as for every apply.";
+}
+
 int ServicesModule::RegToggle(HDC dc, int right, int y, int h) {
     // Drawn like the TrustedInstaller switch: outlined while off, the warn colour and its effect while on.
     Pal p(host_->Theme());
@@ -2976,7 +3078,7 @@ void ServicesModule::MoveFocus(bool back) {
 void ServicesModule::BuildTabStops(HDC dc) {
     tabStops_.clear();
     for (auto& ck : clicks_)
-        if (ck.id != ID_APPLY) tabStops_.push_back(ck);
+        if (ck.id != ID_APPLY && ck.id != ID_PROT_GO) tabStops_.push_back(ck);   // applying is a click only
     RECT lr = ActiveListRc();
     if (lr.right > lr.left) tabStops_.push_back({lr, ID_FOCUS_LIST});
     if (Console() && conLeftRc_.right > conLeftRc_.left) tabStops_.push_back({conLeftRc_, ID_FOCUS_DETAIL_L});
@@ -3202,6 +3304,7 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
         y += lh;
     }
     y += Sc(4);
+    if (ProtOffered()) y = ProtCheckbox(dc, pad, y, rc.right - pad, false) + Sc(6);
     if (!ctl && (plan_.kind == PlanKind::Preset || plan_.kind == PlanKind::Single) && !planBusy_) {
         // A custom preset from these ticks, and a "before" measurement taken for this plan.
         std::wstring dw;
@@ -3287,7 +3390,8 @@ enum ConAct {
     // custom presets and measurements
     CA_PRESETS, CA_MEASURE, CA_SAVEPRESET, CA_MEAS_BEFORE, CA_MEAS_AFTER, CA_PRE_PLAN, CA_EXPORT, CA_IMPORT, CA_REMOVE, CA_SAVE,
 };
-constexpr int CA_REG = 60;   // the plan's registry fallback switch (F7), numbered apart from the enum
+constexpr int CA_REG = 60;
+constexpr int CA_PROT = 61;  // the plan's protected-items override checkbox (F4)   // the plan's registry fallback switch (F7), numbered apart from the enum
 
 // A filled block with text on it (the selection, tags): the ink is core's text-on-fill rule (ui::OnFill: white
 // while it reaches 4.5:1, as Windows draws on its accent, else black). Console then makes it strict: if the ink is
@@ -3457,6 +3561,9 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
             k.push_back({L"F7", L"Save as preset", L"Save", CA_SAVEPRESET, startType && plan_.Included() > 0 && !applyW_.Running(), false});
             k.push_back({L"F8", L"Measure before", L"Before", CA_MEAS_BEFORE, startType && canData, false});
         }
+        if (ProtOffered())
+            k.push_back({L"F4", protOn_ ? L"Protected: ALLOWED" : L"Protected: off", protOn_ ? L"Prot ON" : L"Prot", CA_PROT,
+                         !applyW_.Running(), protOn_});
         if (RegRelevant())
             k.push_back({L"F9", regOn_ ? L"Registry fallback: ON" : L"Registry fallback: off", regOn_ ? L"Reg ON" : L"Reg off", CA_REG,
                          !applyW_.Running(), regOn_});
@@ -3587,7 +3694,9 @@ int ServicesModule::PaintConsoleBanners(HDC dc, const RECT& rc, int y0) {
     int y = y0;
     for (auto& b : Banners()) {
         COLORREF tone = b.tone == 2 ? p.bad : (b.tone == 1 ? p.warn : p.acc);
-        const wchar_t* tagText = b.tone == 2 ? L"FAIL" : (b.tone == 1 ? L"WARN" : L"INFO");
+        bool risk = false;   // the protected-items override: a risk the user takes, not a failure
+        for (auto& a : b.actions) if (a.first == ID_PROT || a.first == ID_PROT_GO) risk = true;
+        const wchar_t* tagText = risk ? L"RISK" : b.tone == 2 ? L"FAIL" : (b.tone == 1 ? L"WARN" : L"INFO");
         int tagW = TextW(dc, L"WARN", f.semi) + Sc(10);
         int actionsW = 0;
         for (auto& a : b.actions) actionsW += TextW(dc, a.second, f.caption) + Sc(14) + Sc(6);
@@ -4155,7 +4264,7 @@ void ServicesModule::ConsolePlanCells(int row, std::vector<ConCell>& out) {
         if (k == L"box") {
             if (!r.blocked.empty()) out.push_back({L"[-]", p.badInk});
             else out.push_back({r.include ? L"[x]" : L"[ ]", r.include ? p.accInk : p.mute});
-        } else if (k == L"name") out.push_back({r.name, r.include || !r.blocked.empty() ? p.text : p.mute});
+        } else if (k == L"name") out.push_back({r.name, r.protectedRow && r.blocked.empty() ? p.badInk : r.include || !r.blocked.empty() ? p.text : p.mute});
         else if (k == L"op") out.push_back({r.ctl == Op::Stop ? L"stop" : L"start", p.text});
         else if (k == L"now") out.push_back({ShortStart(r.before), p.mute});
         else if (k == L"after") out.push_back({L"\u2192 " + ShortStart(r.after), r.blocked.empty() ? p.text : p.mute});
@@ -4163,7 +4272,8 @@ void ServicesModule::ConsolePlanCells(int row, std::vector<ConCell>& out) {
             std::wstring b = ShortBasis(r.basis);
             out.push_back({b, b == L"folklore" ? p.warnInk : p.mute});
         } else if (k == L"why") {
-            if (!r.blocked.empty()) out.push_back({r.blocked, p.badInk});
+            if (r.protectedRow && r.blocked.empty()) out.push_back({L"PROTECTED: " + r.protReason, p.badInk});
+            else if (!r.blocked.empty()) out.push_back({r.blocked, p.badInk});
             else if (!r.warning.empty()) out.push_back({r.warning, p.warnInk});
             else if (!r.depWarning.empty()) out.push_back({r.depWarning, p.warnInk});
             else if (r.viaReg) out.push_back({r.regNote, p.warnInk});
@@ -4243,6 +4353,7 @@ void ServicesModule::PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom)
     RECT sr{pad, y, rc.right - pad, y + Sc(16)};
     TextLeft(dc, sum, sr, f.caption, can ? p.mute : p.warnInk);
     y += Sc(18);
+    if (ProtOffered()) y = ProtCheckbox(dc, pad, y, rc.right - pad, true) + Sc(4);
     for (auto& note : plan_.notes) {
         if (empty && note == plan_.emptyText) continue;   // shown once, in the grid
         int lh = 0;
@@ -4306,6 +4417,7 @@ void ServicesModule::OnConsoleAction(int act) {
     bool plan = mode_ == Mode::Plan;
     if (act != CA_HELP) conHelp_ = false;
     if (act == CA_REG) { if (plan && RegRelevant() && !applyW_.Running()) OnClickId(ID_REG); return; }
+    if (act == CA_PROT) { if (plan && ProtOffered() && !applyW_.Running()) OnClickId(ID_PROT); return; }
     switch (act) {
         case CA_HELP: conHelp_ = !conHelp_; return;
         case CA_TAB: if (!plan) { conItemBar_ = false; OnClickId(tab_ == TAB_SERVICES ? ID_TAB_DRV : ID_TAB_SVC); } return;
@@ -4382,6 +4494,7 @@ bool ServicesModule::OnConsoleKey(UINT vk) {
         else if (vk == VK_F7) act = CA_SAVEPRESET;
         else if (vk == VK_F8) act = CA_MEAS_BEFORE;
         else if (vk == VK_F9 && RegRelevant()) act = CA_REG;
+        else if (vk == VK_F4 && ProtOffered()) act = CA_PROT;
     } else if (conItemBar_) {
         // Inside the item bar F1..F7 are the item keys the bar shows (so F1 there is Auto, not help).
         static const int kItem[] = {CA_SET + 0, CA_SET + 1, CA_SET + 2, CA_SET + 3, CA_CTL + 0, CA_CTL + 1, CA_CTL + 2};
@@ -5490,6 +5603,54 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
             m->OnClickId(ID_PRESET + 3);   // a new plan from the chip
             check(state(nOn) == 1 && state(nOff) == 0, L"ui R10: a new plan from the chip starts from the preset's own ticks");
         }
+    }
+
+    {   // The protected-items override (DECISIONS 2026-11-11, owner): off at every start, per plan, never persisted,
+        // F4 in Console, a second confirmation that only a click can pass.
+        auto m = fresh(h, fixture);
+        const bool off0 = !m->protOn_ && !m->protAsk_;
+        PlanReq r;
+        r.type = PlanReq::Single;
+        r.item = L"BrokerInfrastructure";   // never-touch (the floor)
+        r.target = StartCfg{4, -1};
+        m->OpenPlan(r);
+        const bool blocked0 = m->plan_.rows.size() == 1 && !m->plan_.rows[0].blocked.empty() && m->ProtOffered();
+        m->OnClickId(ID_PROT);
+        const bool freed = m->protOn_ && m->plan_.overrideOn && m->plan_.rows.size() == 1 && m->plan_.rows[0].protectedRow &&
+                           m->plan_.rows[0].blocked.empty() && !m->plan_.rows[0].include;
+        check(off0 && blocked0 && freed, L"ui override: off at start; the checkbox frees the never-touch row, unticked, on this plan");
+        m->TogglePlanRow(0);
+        m->protAsk_ = true;   // what Apply does with a ticked protected row (fixture mode can't apply)
+        bool goBanner = false;
+        for (auto& b : m->Banners())
+            for (auto& bt : b.actions) if (bt.first == ID_PROT_GO) goBanner = b.text.find(L"BrokerInfrastructure") != std::wstring::npos;
+        m->Paint(cv.dc, full);
+        bool goTab = false, goClick = false;
+        for (auto& t : m->tabStops_) if (t.id == ID_PROT_GO) goTab = true;
+        for (auto& ck : m->clicks_) if (ck.id == ID_PROT_GO) goClick = true;
+        check(goBanner && goClick && !goTab && m->ProtAskText().find(L"will likely break your Windows install") != std::wstring::npos,
+              L"ui override: the second confirmation names each protected row and the risk, and only a click passes it (no tab stop)");
+        m->TogglePlanRow(0);
+        check(!m->protAsk_, L"ui override: changing a tick withdraws the second confirmation");
+        h.Use(ui::Layout::Console, 96);
+        bool f4 = false;
+        for (auto& k : m->ConsoleKeys()) if (k.cap == L"F4") f4 = k.act == CA_PROT && k.on;
+        m->OnConsoleKey(VK_F4);
+        const bool f4Off = !m->protOn_;
+        h.Use(ui::Layout::Baseline, 96);
+        check(f4 && f4Off, L"ui override: Console shows it on F4 and F4 flips it");
+        m->OnClickId(ID_PROT);
+        m->ClosePlan();
+        const bool closedOff = !m->protOn_;
+        m->OpenPlan(r);
+        const bool newOff = !m->protOn_ && !m->plan_.rows.empty() && !m->plan_.rows[0].blocked.empty();
+        m->ClosePlan();
+        m->OnClickId(ID_PRESET + 3);   // Stripped: a built-in preset never offers it
+        const bool presetNo = !m->ProtOffered();
+        m->ClosePlan();
+        check(closedOff && newOff && presetNo && h.Prefs().GetInt(L"protected", -7) == -7 && h.Prefs().GetStr(L"protected", L"none") == L"none",
+              L"ui override: it resets when the plan closes, is off on the next plan, is never offered on a built-in preset, and is never "
+              L"written to the settings");
     }
 
     {   // R19: Baseline plan: a click below the last row toggles nothing; a double-click on [x] toggles once

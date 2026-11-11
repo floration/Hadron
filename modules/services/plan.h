@@ -29,6 +29,11 @@ struct Ctx {
     std::wstring build;                // running build, e.g. "19045"
     std::wstring machine;              // machine GUID (first.txt must match)
     bool tiOn = false;
+    // The protected-items override (DECISIONS 2026-11-11, owner): the user ticked "Allow changes to protected items" on
+    // this plan. Single, custom-preset, Undo and Resume plans then offer rows that only the never-touch / never-in-a-
+    // preset / Boot-System-start / floor guards block, unticked and marked PROTECTED. Built-in presets, Default and Stock
+    // ignore it. Off at every start, never persisted, reset when the plan closes and after every apply (module.cpp).
+    bool overrideProtected = false;
     const SxsStock* sxs = nullptr;     // this PC's WinSxS manifest values, when read (fix/svcdrv-stock)
     bool sxsPending = false;           // the manifest pass is still running (review F2: the stock plan waits)
     // Filled by Prepare() from hw.
@@ -82,6 +87,10 @@ struct PlanRow {
     bool depUnticked = false;          // DependencyCheck unticked it (ticked again when the reason goes)
     bool depKept = false;              // the user ticked it while it had a dependency warning: never unticked by the check
     bool needsTi = false;
+    // The override freed this row from a guard (Ctx::overrideProtected): offered unticked, drawn PROTECTED with the guard
+    // reason, listed apart on the second confirmation, never written through the registry fallback.
+    bool protectedRow = false;
+    std::wstring protReason;
     // Registry fallback (regfallback.h): the SCM refused this write and the per-apply toggle is on, or this row undoes
     // or resumes a registry write. Written to the service key directly; identity "reg" in the undo log.
     bool viaReg = false;
@@ -107,6 +116,8 @@ struct Plan {
     // What the plan screen shows instead of a bare "Nothing to change." when the plan has no rows for a reason the
     // user must see (R20: no Windows-stock data for this build). Also in notes.
     std::wstring emptyText;
+    bool overrideOn = false;           // built with Ctx::overrideProtected (the plan screen shows it)
+    int Protected() const;             // ticked, unblocked protected rows (the second confirmation lists them)
     int Included() const;
     int Optional() const;
     int Blocked() const;
@@ -129,6 +140,13 @@ CustomPreset PresetFromPlan(const Plan& p, const std::wstring& name, const std::
 // "10.0.19045.5737" and "19045" -> "19045": the build number alone, for comparing builds.
 std::wstring BuildNumber(const std::wstring& build);
 Plan BuildSingle(const SvcItem& item, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c);
+// The plans the protected-items override applies to: Single, a custom preset, Undo and Resume (never a built-in
+// preset, Default or Stock, never a control plan).
+bool OverrideOffered(const Plan& p);
+// Why the override can never free this item ("" when it may): launch-protected (Windows itself refuses), registry
+// only, an unreadable configuration, a per-user instance.
+std::wstring OverrideRefusal(const SvcItem& s);
+extern const wchar_t kOverrideWarning[];   // the checkbox's warning sentence (the owner's words)
 // Stop / Start / Restart a service (spec §5.2): dependents that will stop are listed first.
 // Never-touch items (and anything whose stop would stop one as a dependent) come back with every row blocked (R5).
 Plan BuildControl(const SvcItem& item, int what /*0 start, 1 stop, 2 restart*/, Backend& b, const std::vector<SvcItem>& items,
