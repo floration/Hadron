@@ -80,4 +80,12 @@ shot services-console-plan "$S" --fixture "$FIX" --layout console --plan strippe
 shot services-console-keys "$S" --fixture "$FIX" --layout console --keys F1
 shot services-console-f9 "$S" --fixture "$FIX" --layout console --theme light --keys F2,F9
 shot services-console-suite "$BUILD/Hadron.exe" --module services --fixture "$FIX" --layout console --select DiagTrack
+# Custom presets and measured before/after (docs/pipeline/fixes/svcdrv-presets.md); fixture mode writes nothing.
+for L in baseline console; do
+    shot services-presets-$L "$S" --fixture "$FIX" --layout $L --presets
+    shot services-import-error-$L "$S" --fixture "$FIX" --layout $L --import "$FIX/import/bad-start.txt"
+    shot services-plan-custom-$L "$S" --fixture "$FIX" --layout $L --plan "custom:Gaming rig"
+    shot services-save-preset-$L "$S" --fixture "$FIX" --layout $L --plan stripped --save "My stripped"
+    shot services-measure-$L "$S" --fixture "$FIX" --layout $L --measure
+done
 echo "temp files left at $TMP (not deleted by this script)"
