@@ -7,12 +7,22 @@
 | docs/legacy/bios-explorer.md | done | module-builder | merged into branch | - |
 | Phase 1: core skeleton (host/sys, hello, CMake, CI) | merged | lead | claude/project-thread-7nnuw6 | #1 |
 | Port `diskmap` (Baseline + Console) | merged; owner's-PC checks pending | module-builder | module/diskmap | #1 |
-| Port `bios` + snapshots + KB v2 | review + kb-audit passed; in PR; owner's-PC live read pending | module-builder ×2 | module/bios, kb/bios | #3 |
+| Port `bios` + snapshots + KB v2 | merged; owner confirmed live read works | module-builder ×2 | module/bios, kb/bios | #3 |
+| `bios` guarded writes (rule 2 changed) | review passed (4 rounds, 1 waived); owner's first real write worked (build f) | module-builder-careful | module/bios-write | #5 |
 | `core/fs` header + design note | not started | lead | - | - |
 | `runas` module | merged; owner's-PC launch checks pending | module-builder | module/runas | #2 |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)
+
+### 2026-11-11 (lead, Opus) — update 5
+- Owner chose guarded BIOS writes; hard rule 2 rewritten, CI allows the write API only in `modules/bios/fwwrite.cpp`.
+  Spec `docs/design/bios-write.md`. Backups: `%ProgramData%\Hadron\bios-backups` (admin-only, handle-checked).
+  Owner wrote a setting with build f (backup of that write is in the old `%LOCALAPPDATA%` location, not restorable).
+- Follow-ups: (1) bios selftest scratch folder under %TEMP% is changed by path while elevated: create it admin-only
+  and hold a no-share-delete handle for the run (PR #5 review round 3 finding 1, waived for the PR);
+  (2) trust refusal headline "isn't verifiably admin-only" (finding 4); (3) Global mutex access-denied path untested;
+  (4) diskmap Windows CI shows an informational "links not followed = 2 (want 1)" FAIL before the passing run: find out why.
 
 ### 2026-11-11 (lead, Opus) — update 4
 - PR #1 (core, core/ui, diskmap) and PR #2 (runas) merged.
