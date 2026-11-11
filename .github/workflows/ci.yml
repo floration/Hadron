@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  # Hard rule 2: firmware is read-only. Fail if the suite source writes firmware. Scans core/,
+  # modules/ and app/ only (CLAUDE.md and the workflow name the banned APIs on purpose).
+  firmware-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No firmware-write APIs in the source
+        run: |
+          if grep -rnE 'SetFirmwareEnvironmentVariable|NtSetSystemEnvironmentValue' core modules app; then
+            echo "::error::firmware-write API found (hard rule 2)"; exit 1
+          fi
+          echo "ok: no firmware-write APIs"
+
+  linux-mingw:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 cmake ninja-build wine64 xvfb
+      - name: Configure and build (MinGW cross)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Selftests (Wine)
+        run: |
+          export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
+          wineboot -i || true
+          wine build/HadronHello.exe --selftest
+      - name: Screenshots (Wine + Xvfb)
+        run: |
+          export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
+          mkdir -p shots
+          xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" bash -c '
+            wine build/HadronHello.exe --screenshot shots/hello-standalone.png
+            wine build/Hadron.exe --screenshot shots/hello-suite.png'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-linux
+          path: shots/*.png
+
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure and build (MSVC)
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release
+      - name: Selftests
+        run: build\Release\HadronHello.exe --selftest
+      - name: Screenshots
+        run: |
+          mkdir shots
+          build\Release\HadronHello.exe --screenshot shots\hello-standalone.png
+          build\Release\Hadron.exe --screenshot shots\hello-suite.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-windows
+          path: shots/*.png

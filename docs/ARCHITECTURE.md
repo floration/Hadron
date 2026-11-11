@@ -25,7 +25,8 @@ hadron/
 ## The module contract
 ```cpp
 namespace hx {
-enum class Admin { None, Optional, Required };   // Optional: degraded mode without admin (e.g. BIOS loads a snapshot)
+enum class Admin { None, Optional, Required };   // See rule 4 below: every exe is requireAdministrator now,
+                                                 // so None/Optional only record intent; the build emits no asInvoker manifest.
 
 struct ModuleInfo {
     const wchar_t* id;       // "bios": used by --solo/--module and in exe/class/resource names
@@ -40,9 +41,9 @@ struct IHost {                                   // implemented by both RunStand
     virtual void SetTitle(const wchar_t*) = 0;   // replaces legacy SetWindowTextW(g_hwnd, ...)
     virtual void SetStatus(const wchar_t*) = 0;
     virtual void SetBusy(bool) = 0;              // the host blocks Close and shows activity
-    virtual bool IsElevated() = 0;
-    virtual bool RequestElevation() = 0;         // relaunch elevated with --elevated; false if cancelled or failed
-    virtual Settings& Settings() = 0;            // per-module section
+    virtual bool IsElevated() = 0;               // always true in practice (every exe is requireAdministrator)
+    virtual sys::Settings& Prefs() = 0;          // per-module section (named Prefs(), not Settings(): a member
+                                                 // named Settings would shadow the type on GCC)
     virtual void Log(LogLevel, const wchar_t*) = 0;
 };
 
@@ -57,7 +58,8 @@ public:
     virtual bool PreTranslateMessage(MSG&) { return false; }   // active module only (accelerators)
     virtual bool CanClose() { return true; }           // asked of every module; false while a plan executes
     virtual void Shutdown() {}                         // cancel; must not return while any worker is alive
-    virtual int  RunCli(int argc, wchar_t** argv) { return -1; }   // headless: --selftest, --screenshot, exports
+    virtual int  RunCli(int argc, wchar_t** argv) { return -1; }   // headless: exports and other CLI modes
+    virtual void LoadFixture(const wchar_t* dir) {}                // synchronous data load for --screenshot/--selftest
 };
 std::unique_ptr<Module> MakeBiosModule();   // explicit factories in core/host/registry.h; no static self-registration
 int RunStandalone(std::unique_ptr<Module>);
@@ -85,9 +87,9 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
 |---|---|
 | `--module <id>` | Suite: open on that module |
 | `--solo <id>` | Suite: run only that module, as if standalone |
-| `--elevated` | Marks a relaunch; never relaunch again |
+| `--elevated` | Accepted and ignored; kept for forward-compat. Every exe is requireAdministrator (rule 4), so there is no relaunch |
 | `--selftest` | Run the module's checks |
-| `--screenshot <png> --fixture <dir>` | Load the fixture, render the main view with `PrintWindow`, save, exit. This makes CI and tester screenshots deterministic on Windows and Wine |
+| `--screenshot <png> --fixture <dir>` | Load the fixture, then compose the frame into a top-down DIB (chrome via the host, content via `Module::Paint`, which also serves `WM_PRINTCLIENT`) and write a PNG. No `PrintWindow`, so Windows and Wine produce the same pixels. Fixed 1280x800 at 96 DPI |
 | other | Passed to `RunCli`. GUI-subsystem exes call `AttachConsole(ATTACH_PARENT_PROCESS)` before writing output |
 
 ## Firmware access (`core/sys/firmware.h`)
@@ -108,8 +110,11 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
 | Target | File | Manifest execution level |
 |---|---|---|
 | Suite | `Hadron.exe` | requireAdministrator |
-| Module with `Admin::None` or `Admin::Optional` | `Hadron<Name>.exe` | asInvoker |
-| Module with `Admin::Required` | `Hadron<Name>.exe` | requireAdministrator |
+| Every standalone module | `Hadron<Name>.exe` | requireAdministrator |
+
+Hard rule 4 (rewritten 2026-11-11): every exe is `requireAdministrator`; there is no asInvoker build and no
+elevation relaunch. A feature that needs more than admin (SYSTEM/TrustedInstaller) gates it behind its own
+off-by-default toggle. The old `Admin::Optional` / `RequestElevation()` / single-shot relaunch design is gone.
 
 - Each exe's `.rc` and manifest are generated with `configure_file`. They contain:
   - VERSIONINFO from `project(VERSION)`;
