@@ -17,7 +17,9 @@
 #include <string>
 #include <vector>
 #include <cstdio>
-#include <cwchar>
+#include <cstdlib>   // _wtoi / _wtoi64
+#include <cstring>   // _wcsicmp
+#include <cwchar>    // swprintf
 
 namespace hx::runas {
 namespace {
