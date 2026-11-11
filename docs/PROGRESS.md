@@ -14,7 +14,8 @@
 | `services` module (pipeline `svcdrv`, full run) | merged; read-only owner's-PC checks pending | pipeline | module/services-svcdrv | #8 |
 | `services` KB follow-ups (svcdrv-kb: stock table, Fax, drivers, OEM) | merged | Small fixes | fix/svcdrv-kb | #9 |
 | `services` custom presets + Measure (svcdrv-presets) | merged | Small fixes | fix/svcdrv-presets | #10 |
-| `services` Windows-stock from WinSxS + tables (svcdrv-stock) | in Push | Small fixes | fix/svcdrv-stock | (PR) |
+| `services` Windows-stock from WinSxS + tables (svcdrv-stock) | merged | Small fixes | fix/svcdrv-stock | #11 |
+| `services` Signer, event 7040, interface evidence, registry fallback (svcdrv-evidence) | in Push | Small fixes | fix/svcdrv-evidence | (PR) |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)

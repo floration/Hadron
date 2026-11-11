@@ -18,7 +18,7 @@ it was designed.
   - current, first-seen and Windows-stock configuration; triggers, dependencies, dependents and failure actions;
   - protection (PPL, the security-descriptor check, Tamper Protection);
   - the service's own registered description, labelled as Windows' text, not Hadron's.
-  Third-party items get facts only: path, Company (the file's own claim) and start type. A few OEM services on
+  Third-party items get facts only: path, Company (the file's own claim), Signer and start type. A few OEM services on
   the owner's board (MSI Center, Mystic Light, Realtek audio, Intel LMS and JHI) have explanation-only entries that
   say what is and isn't documented; they are never in a preset.
 - **Presets, the same levels on both tabs:**
@@ -39,6 +39,16 @@ it was designed.
 - **TrustedInstaller toggle** (rule 4): off at every launch and never saved. When on, the writes admin can't make run
   on a thread impersonating TrustedInstaller, and TI is put back the way it was found.
 - **Undo** of any apply, and **Resume or Undo** of an apply that was interrupted (crash, power loss).
+- **Signer column** (Authenticode, checked offline: no revocation or network fetch; cloud placeholders, links and
+  network paths are not read): "Signed: <name>", "Catalog-signed", "Unsigned", "Not trusted" or "Can't check", with why.
+- **Who changed it.** When an item's start type differs from how Hadron first saw it or from what Hadron set, the
+  detail pane shows the System log's event 7040 for it: account, SID, time and from/to (read only).
+- **Hardware evidence** also uses device-interface triggers and each device's last-arrival date. It can only keep
+  more items, never tick more.
+- **Registry fallback** for rows the service manager refuses: off by default, per apply and never saved (Console F9).
+  Each row says "will write registry Start directly, takes effect after restart"; the key is re-read before the write
+  (drift skips it), the undo record is flushed first, and the value is read back after. Refused for protected,
+  never-touch, boot-chain and Boot/System-start items.
 - **Custom presets.** Any plan's ticks can be saved under a name, then reopened, exported or imported as a plain-text
   `HXPRESET 1` file (Hadron's own strict parser; an export never overwrites, an import refuses cloud placeholders and
   offline files unread). Opening one only builds a plan, which goes through the same guards as the built-in presets
@@ -86,10 +96,12 @@ The safety mechanics, file formats and every resolved ambiguity are in `docs/des
 | `modules/services/model.*` | Pure data: `SvcItem`, `StartCfg`, names, image paths, per-user folding |
 | `modules/services/kb.*` | Loads the embedded `services.db` (RCDATA `SERVICES_KB`) |
 | `modules/services/hw.*` | Hardware evidence (a pure part that reads a dump, and the live CfgMgr32 part) |
-| `modules/services/backend.h`, `backend_live.cpp`, `backend_fake.cpp` | The SCM interface. `backend_live.cpp` is the **only** file that writes, and only after `Arm()`; the fake backend drives the selftest, goldens and screenshots |
+| `modules/services/backend.h`, `backend_live.cpp`, `backend_fake.cpp` | The SCM and registry interface. `backend_live.cpp` is the **only** file that writes (SCM, and the registry fallback's `RegSetValueExW`), and only after `Arm()`; the fake backend drives the selftest, goldens and screenshots |
 | `modules/services/plan.*` | Guards, presets, single, Default, Undo and Resume plans, dependency checks, `RunApply` |
 | `modules/services/store.*` | The data folder checks, snapshot and undo-log formats, `CREATE_NEW` writers, the apply lock |
 | `modules/services/recovery.*` | The restore scripts, `.reg` files and a stored-only zip writer (rule 3) |
+| `modules/services/evidence.*`, `evidence_view.*` | Signer (Authenticode) and event 7040 reads, and their Worker passes |
+| `modules/services/regfallback.*` | The registry fallback's plan marking and refusals (the write itself is in `backend_live.cpp`) |
 | `modules/services/sxsstock.*` | Windows-stock start types from this PC's WinSxS manifests (read-only), the cache and the cross-check |
 | `modules/services/custom.*` | Custom presets: the `HXPRESET 1` format, the preset store, export and import |
 | `modules/services/measure.*` | Before/after measurements: taking, storing and pairing records |
