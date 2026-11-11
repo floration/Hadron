@@ -11,7 +11,7 @@
 | `bios` guarded writes (rule 2 changed) | review passed (4 rounds, 1 waived); owner's first real write worked (build f) | module-builder-careful | module/bios-write | #5 |
 | `core/fs` header + design note | not started | lead | - | - |
 | `runas` module | merged; owner's-PC launch checks pending | module-builder | module/runas | #2 |
-| `services` module (pipeline `svcdrv`, full run) | in Push: PR open, first Windows CI run pending; read-only owner's-PC checks pending | pipeline | module/services-svcdrv | (PR) |
+| `services` module (pipeline `svcdrv`, full run) | in Push: PR open, first Windows CI run pending; read-only owner's-PC checks pending | pipeline | module/services-svcdrv | #8 |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)
