@@ -389,7 +389,7 @@ std::string DumpFixturePlan(const std::wstring& fixture, int level, int tab, std
 }
 
 // ============================================================================================
-int RunSelftest(const std::vector<std::wstring>& args) {
+int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
     int fails = 0, checks = 0;
     auto check = [&](bool ok, const std::wstring& what) {
         checks++;
@@ -1699,6 +1699,9 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         check(Store::Plain(L"\\\\?\\UNC\\srv\\share\\x") == L"\\\\srv\\share\\x" && Store::Plain(L"\\\\?\\C:\\x") == L"C:\\x",
               L"Store::Plain strips \\\\?\\ and \\\\?\\UNC\\ (--data-dir is kept without the prefix)");
     }
+
+    // ---- the page (module.cpp), on the fixture ---------------------------------------------------------------
+    if (ui) ui(fixture, check);
 
     // ---- live, read-only ------------------------------------------------------------------------------------
     {

@@ -114,6 +114,26 @@ static COLORREF HslToRgb(double h, double s, double l) {
     return RGB(to8(r), to8(g), to8(b));
 }
 
+namespace {
+double ChannelLinear(int v) {
+    double c = v / 255.0;
+    return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+}
+double RelLuminance(COLORREF c) {
+    return 0.2126 * ChannelLinear(GetRValue(c)) + 0.7152 * ChannelLinear(GetGValue(c)) + 0.0722 * ChannelLinear(GetBValue(c));
+}
+}  // namespace
+
+double Contrast(COLORREF a, COLORREF b) {
+    double la = RelLuminance(a), lb = RelLuminance(b);
+    return la > lb ? (la + 0.05) / (lb + 0.05) : (lb + 0.05) / (la + 0.05);
+}
+
+COLORREF OnFill(COLORREF fill, COLORREF light, COLORREF dark) {
+    double onLight = Contrast(light, fill);
+    return onLight >= 4.45 || onLight >= Contrast(dark, fill) ? light : dark;
+}
+
 bool IsAchromatic(COLORREF c) {
     double h, s, l;
     RgbToHsl(c, h, s, l);

@@ -31,15 +31,9 @@ struct Pal {
     // so the accent of any theme, or any Windows accent, stays legible.
     COLORREF selText()const {
         if (t.highContrast) return GetSysColor(COLOR_HIGHLIGHTTEXT);
-        // White while it reaches 4.5:1 to one decimal (white on the accent is the Windows convention; on
-        // the default blue 0078D7 it is 4.50:1), else black, which is then above 4.6:1. A Rec. 601
-        // brightness threshold picked white on a bright green accent (about 2:1).
-        auto lin = [](int v) { double c = v / 255.0; return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); };
-        auto lum = [&](COLORREF c) { return 0.2126 * lin(GetRValue(c)) + 0.7152 * lin(GetGValue(c)) + 0.0722 * lin(GetBValue(c)); };
-        const COLORREF dark = RGB(0, 0, 0), light = RGB(255, 255, 255);
-        double lf = lum(t.accent);
-        double onDark = (lf + 0.05) / (lum(dark) + 0.05), onLight = (lum(light) + 0.05) / (lf + 0.05);
-        return onLight >= 4.45 || onLight >= onDark ? light : dark;   // white while it passes (the Windows convention)
+        // White while it reaches 4.5:1 (the Windows convention; 4.50:1 on the default blue 0078D7), else black:
+        // ui::OnFill, the one text-on-fill rule every module uses.
+        return OnFill(t.accent);
     }
 };
 }  // namespace

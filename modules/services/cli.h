@@ -7,6 +7,7 @@
 #include "modules/services/backend.h"
 #include "modules/services/kb.h"
 #include "modules/services/store.h"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -28,7 +29,10 @@ bool HasArg(const std::vector<std::wstring>& args, const wchar_t* name);
 // The golden text of one preset plan on a fixture folder (MarkTi with the toggle off); "" and *err on failure.
 std::string DumpFixturePlan(const std::wstring& fixture, int level, int tab, std::wstring* err);
 
-int RunSelftest(const std::vector<std::wstring>& args);    // exit 0 = every check passed
+// The page's own checks (module.cpp: plan ticks across a rebuild, the [x] click, the result banner's Undo, labels,
+// layout at the minimum window size), run by RunSelftest with the fixture folder and its check reporter.
+using UiChecks = std::function<void(const std::wstring& fixture, const std::function<void(bool, const std::wstring&)>& check)>;
+int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui = {});    // exit 0 = every check passed
 // --dump-plan <bloat|stripped|minimum|default|stock> --tab <services|drivers> --fixture <dir> [--out <file>]
 int RunDumpPlan(const std::vector<std::wstring>& args);
 // --live-test <HadronTest*> [--ti] [--data-dir <dir>]: plan, apply, verify, undo, verify on one dummy
