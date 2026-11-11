@@ -62,8 +62,11 @@ beyond a compile. Verification is:
   /groups`), reading back the child's identity;
 - a `windows-latest` CI job that at least launches **This admin (limited)** and reads back medium IL.
 
-## Open choices for the owner
-1. "Another user" needs a password prompt. Include it, or drop non-admin users for v1 and keep
-   Admin/SYSTEM/TI only?
-2. Default integrity for a SYSTEM launch: full token, or filtered?
-3. Which Windows-tool buttons, and in what order? The list above is my proposal.
+## Choices (owner, 2026-11-11)
+1. **Include all users on the PC.** Enumerate local accounts (`NetUserEnum`, filter out disabled
+   and well-known service accounts), and offer them in the identity selector. Launch via
+   `CreateProcessWithLogonW` with the account + password. Prompt for a password only when the
+   account has one; blank-password accounts launch with an empty credential. The password is read
+   through a secure field, never logged, and zeroed after the call.
+2. **Default token is the full token** for every identity. The Limited switch is opt-in.
+3. **Button set above is accepted for v1**; the owner will adjust later.
