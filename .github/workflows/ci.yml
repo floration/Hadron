@@ -53,17 +53,29 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure and build (MSVC)
+      # Build with Ninja + the runner's own MSVC, not the "Visual Studio 17 2022" generator:
+      # on the hosted image cmake's generator reports "could not find any instance of Visual
+      # Studio". vswhere + vcvars64 (both preinstalled) are reliable and add no third-party action.
+      # /MT and /MANIFEST:NO come from CMakeLists' MSVC block, so no flags are needed here.
+      - name: Configure and build (MSVC via Ninja)
+        shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-          cmake --build build --config Release
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw "No Visual Studio with C++ tools found on the runner" }
+          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2]) }
+          }
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
       - name: Selftests
-        run: build\Release\HadronHello.exe --selftest
+        run: build\HadronHello.exe --selftest
       - name: Screenshots
         run: |
           mkdir shots
-          build\Release\HadronHello.exe --screenshot shots\hello-standalone.png
-          build\Release\Hadron.exe --screenshot shots\hello-suite.png
+          build\HadronHello.exe --screenshot shots\hello-standalone.png
+          build\Hadron.exe --screenshot shots\hello-suite.png
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-windows
