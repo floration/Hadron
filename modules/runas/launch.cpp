@@ -583,13 +583,25 @@ void LaunchTrustedInstaller(const LaunchRequest& req, LaunchResult* out) {
     }
     if (!winTok) { out->error = L"Could not get a SYSTEM token from winlogon: " + sys::ErrorText(err); return; }
     {
-        // Enable SeTcbPrivilege on our copy of the SYSTEM token (best effort: if it fails, the
-        // session move below reports the real error).
+        // Enable SeTcbPrivilege on our copy of the SYSTEM token (needed to move the TI token to
+        // our session). Counts only if AdjustTokenPrivileges succeeded and assigned it (rule 4).
         TOKEN_PRIVILEGES tp{};
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        if (LookupPrivilegeValueW(nullptr, L"SeTcbPrivilege", &tp.Privileges[0].Luid))
-            AdjustTokenPrivileges(winTok, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+        DWORD perr = 0;
+        bool on = false;
+        if (!LookupPrivilegeValueW(nullptr, L"SeTcbPrivilege", &tp.Privileges[0].Luid)) perr = GetLastError();
+        else {
+            BOOL r = AdjustTokenPrivileges(winTok, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+            DWORD gle = GetLastError();
+            on = PrivilegeEnabled(r, gle);
+            if (!on) perr = gle ? gle : ERROR_NOT_ALL_ASSIGNED;
+        }
+        if (!on) {
+            CloseHandle(winTok);
+            FailPrivilege(out, L"SeTcbPrivilege", perr);
+            return;
+        }
     }
 
     HANDLE tok = nullptr;

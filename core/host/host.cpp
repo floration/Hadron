@@ -1,6 +1,7 @@
 // core/host/host.cpp — the shared host. Implements IHost, owns the frame, the message loop, DPI,
 // COM, logging and the deterministic --screenshot path. Standalone and suite differ only in whether
 // the sidebar is drawn and how many modules are present.
+#include <cstdio>
 #include "core/host/run.h"
 #include "core/host/cmdline.h"
 #include "core/host/registry.h"
@@ -362,12 +363,37 @@ int Host::Run(const CommandLine& cl) {
     elevated_ = sys::IsElevated();
 
     if (cl.selftest) {
-        AttachConsole(ATTACH_PARENT_PROCESS);
+        // A GUI-subsystem exe has no console, so wprintf output vanishes when it's started from
+        // cmd on Windows (Wine and CI pass real handles, so leave those alone). Attach to the
+        // parent console, or open one (an elevated exe started from a non-admin prompt gets a new
+        // process with no parent console), and point the C runtime's stdout/stderr at it.
+        bool ownConsole = false;
+        HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (out == nullptr || out == INVALID_HANDLE_VALUE || GetFileType(out) == FILE_TYPE_UNKNOWN) {
+            if (!AttachConsole(ATTACH_PARENT_PROCESS)) ownConsole = AllocConsole() != FALSE;
+            FILE* f = nullptr;
+            _wfreopen_s(&f, L"CONOUT$", L"w", stdout);
+            _wfreopen_s(&f, L"CONOUT$", L"w", stderr);
+            if (!ownConsole) wprintf(L"\n");   // cmd has already printed its prompt; start on a new line
+        }
         int init = PickInitial(cl);
         if (init < 0) return 1;
         wchar_t a0[] = L"--selftest";
         wchar_t* argv[] = {a0};
-        return modules_[init]->RunCli(1, argv);
+        int rc = modules_[init]->RunCli(1, argv);
+        fflush(stdout);
+        if (ownConsole) {   // our own window would close at once: keep the result readable
+            wprintf(L"\nPress Enter to close.");
+            fflush(stdout);
+            HANDLE in = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    nullptr, OPEN_EXISTING, 0, nullptr);
+            if (in != INVALID_HANDLE_VALUE) {
+                wchar_t buf[8]; DWORD got = 0;
+                ReadConsoleW(in, buf, 8, &got, nullptr);
+                CloseHandle(in);
+            }
+        }
+        return rc;
     }
 
     static PFnSetDpiCtx setDpi =

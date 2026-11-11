@@ -316,7 +316,8 @@ int TextWidth(HDC dc, const std::wstring& s, size_t n) {
     GetTextExtentPoint32W(dc, s.c_str(), (int)n, &sz);
     return sz.cx;
 }
-bool CtrlDown() { return (GetKeyState(VK_CONTROL) & 0x8000) != 0; }
+// AltGr reports Ctrl+Alt; it types characters, so it is not a Ctrl shortcut.
+bool CtrlDown() { return (GetKeyState(VK_CONTROL) & 0x8000) != 0 && (GetKeyState(VK_MENU) & 0x8000) == 0; }
 bool ShiftDown() { return (GetKeyState(VK_SHIFT) & 0x8000) != 0; }
 bool IsWordChar(wchar_t ch) { return iswalnum(ch) || ch == L'_'; }
 }  // namespace
@@ -356,9 +357,12 @@ void TextField::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
     const int ty = rc.top + ((rc.bottom - rc.top) - tm.tmHeight) / 2;
     if (HasSelection() && focused) {
         // Unselected text, then the selected run over the highlight in the selection text colour.
+        int a = x0 + TextWidth(dc, text_, SelLo()), b = x0 + TextWidth(dc, text_, SelHi());
+        const int inner = SaveDC(dc);   // unselected text everywhere except the selection
+        ExcludeClipRect(dc, a, rc.top, b, rc.bottom);
         SetTextColor(dc, p.text1());
         ExtTextOutW(dc, x0, ty, 0, nullptr, text_.c_str(), (UINT)text_.size(), nullptr);
-        int a = x0 + TextWidth(dc, text_, SelLo());
+        RestoreDC(dc, inner);
         SetTextColor(dc, p.selText());
         ExtTextOutW(dc, a, ty, 0, nullptr, text_.c_str() + SelLo(), (UINT)(SelHi() - SelLo()), nullptr);
     } else {
@@ -393,11 +397,11 @@ void TextField::ReplaceSel(const std::wstring& s) {
 
 bool TextField::OnChar(wchar_t ch) {
     if (ch == 0x08) {   // backspace (Ctrl+Backspace arrives as 0x7F and is handled in OnKey)
+        if (!HasSelection() && caret_ == 0) return false;   // nothing to delete: keep the undo state
         Snapshot();
         if (DeleteSel()) { Changed(); return true; }
-        if (caret_ > 0) { text_.erase(caret_ - 1, 1); caret_--; anchor_ = caret_; Changed(); return true; }
-        hasUndo_ = false;
-        return false;
+        text_.erase(caret_ - 1, 1); caret_--; anchor_ = caret_; Changed();
+        return true;
     }
     if (ch < 0x20 || ch == 0x7F) return false;   // control chars (Ctrl+letters) are handled in OnKey
     Snapshot();
@@ -453,8 +457,9 @@ bool TextField::Paste(HWND owner) {
         }
     }
     CloseClipboard();
-    // Single-line field: a pasted line break becomes a space; trailing ones are dropped (a path
-    // copied from Explorer's "Copy as path" or a terminal often ends with one).
+    // Single-line field: a pasted line break becomes a space; trailing ones are dropped (text
+    // copied from a terminal often ends with one). Capped at 32767 characters (the longest path),
+    // so an accidental paste of a whole file can't stall hit-testing and painting.
     while (!s.empty() && (s.back() == L'\r' || s.back() == L'\n')) s.pop_back();
     std::wstring clean;
     clean.reserve(s.size());
@@ -465,6 +470,9 @@ bool TextField::Paste(HWND owner) {
         if (ch < 0x20) continue;
         clean += ch;
     }
+    const size_t kMaxLen = 32767;
+    size_t room = kMaxLen > text_.size() - (SelHi() - SelLo()) ? kMaxLen - (text_.size() - (SelHi() - SelLo())) : 0;
+    if (clean.size() > room) clean.resize(room);
     if (clean.empty() && !HasSelection()) return false;
     Snapshot();
     ReplaceSel(clean);
@@ -479,7 +487,7 @@ bool TextField::OnKey(WPARAM vk, HWND owner) {
         if (!shift && had) {
             // Plain Left/Right with a selection collapse it to that side.
             if (vk == VK_LEFT && to + 1 >= SelLo()) to = SelLo();
-            else if (vk == VK_RIGHT) to = std::max(to, SelHi());
+            else if (vk == VK_RIGHT && to <= SelHi() + 1) to = SelHi();
         }
         bool changed = to != caret_ || (!shift && had);
         caret_ = to;
@@ -493,28 +501,27 @@ bool TextField::OnKey(WPARAM vk, HWND owner) {
     case VK_END:   return move(text_.size());
     case VK_DELETE:
         if (shift && !ctrl) { if (!Copy(owner)) return false; Snapshot(); DeleteSel(); Changed(); return true; }  // Shift+Del = cut
+        if (!HasSelection() && caret_ >= text_.size()) return false;   // nothing to delete
         Snapshot();
         if (DeleteSel()) { Changed(); return true; }
-        if (caret_ < text_.size()) {
+        {
             size_t to = ctrl ? WordRight(caret_) : caret_ + 1;
             text_.erase(caret_, to - caret_);
             Changed();
             return true;
         }
-        hasUndo_ = false;
-        return false;
     case VK_BACK:
         if (!ctrl) return false;   // plain backspace arrives as WM_CHAR 0x08
+        if (!HasSelection() && caret_ == 0) return false;
         Snapshot();
         if (DeleteSel()) { Changed(); return true; }
-        if (caret_ > 0) {
+        {
             size_t from = WordLeft(caret_);
             text_.erase(from, caret_ - from);
             caret_ = anchor_ = from;
             Changed();
             return true;
         }
-        return false;
     case VK_INSERT:
         if (ctrl && !shift) return Copy(owner), false;
         if (shift && !ctrl) return Paste(owner);
@@ -539,21 +546,29 @@ bool TextField::OnKey(WPARAM vk, HWND owner) {
 }
 
 size_t TextField::HitIndex(HWND owner, int x, const RECT& rc, const PaintCtx& c) const {
+    if (text_.empty()) return 0;
     HDC dc = GetDC(owner);
     if (!dc) return caret_;
     HGDIOBJ old = SelectObject(dc, c.fonts.ui);
-    int rel = x - (rc.left + S(10, c.dpi)) + scrollX_;
-    size_t best = 0;
-    int prev = 0;
-    for (size_t i = 1; i <= text_.size(); i++) {
-        int w = TextWidth(dc, text_, i);
-        if (rel < (prev + w) / 2) break;   // nearer the left edge of character i-1's right side
-        best = i;
-        prev = w;
-    }
+    // One call gives every prefix width (dx[i] = width of the first i+1 characters).
+    std::vector<int> dx(text_.size(), 0);
+    SIZE total{0, 0};
+    int fit = 0;
+    bool ok = GetTextExtentExPointW(dc, text_.c_str(), (int)text_.size(), 0, &fit, dx.data(), &total) != FALSE;
     SelectObject(dc, old);
     ReleaseDC(owner, dc);
-    return best;
+    if (!ok) return caret_;
+    const int rel = x - (rc.left + S(10, c.dpi)) + scrollX_;
+    // Index i sits at prefix width w(i) (w(0)=0, w(i)=dx[i-1]); pick the boundary nearest rel.
+    size_t lo = 0, hi = text_.size();
+    while (lo < hi) {   // first i with w(i) >= rel
+        size_t mid = (lo + hi) / 2;
+        int w = mid == 0 ? 0 : dx[mid - 1];
+        if (w < rel) lo = mid + 1; else hi = mid;
+    }
+    if (lo == 0) return 0;
+    int wl = lo - 1 == 0 ? 0 : dx[lo - 2], wr = dx[lo - 1];
+    return (rel - wl) < (wr - rel) ? lo - 1 : lo;
 }
 
 bool TextField::OnMouse(HWND owner, UINT msg, int x, int y, const RECT& rc, const PaintCtx& c) {
@@ -613,8 +628,15 @@ bool TextField::OnMouse(HWND owner, UINT msg, int x, int y, const RECT& rc, cons
         case 2: Copy(owner); return true;
         case 3: Paste(owner); return true;
         case 4: SelectAll(); return true;
-        case 5: if (hasUndo_) { std::swap(text_, undoText_); std::swap(caret_, undoCaret_);
-                    if (caret_ > text_.size()) caret_ = text_.size(); anchor_ = caret_; Changed(); } return true;
+        case 5:
+            if (hasUndo_) {
+                std::swap(text_, undoText_);
+                std::swap(caret_, undoCaret_);
+                if (caret_ > text_.size()) caret_ = text_.size();
+                anchor_ = caret_;
+                Changed();
+            }
+            return true;
         case 6: Snapshot(); if (DeleteSel()) Changed(); return true;
         }
         return true;

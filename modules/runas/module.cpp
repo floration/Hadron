@@ -223,7 +223,9 @@ LRESULT RunAsModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS | DLGC_WANTARROWS | DLGC_WANTCHARS;
     case WM_SETCURSOR:
         if (LOWORD(l) == HTCLIENT) {
-            SetCursor(LoadCursorW(nullptr, hoverId_ > 0 ? IDC_HAND : IDC_ARROW));
+            POINT cp; GetCursorPos(&cp); ScreenToClient(h, &cp);
+            bool inEdit = PtInRect(&rcPath_, cp) || PtInRect(&rcArgs_, cp) || PtInRect(&rcWork_, cp);
+            SetCursor(LoadCursorW(nullptr, inEdit ? IDC_IBEAM : hoverId_ > 0 ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
         break;
@@ -253,6 +255,9 @@ LRESULT RunAsModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LBUTTONDOWN:
         SetFocus(h);
         [[fallthrough]];
+    case WM_CAPTURECHANGED:
+        path_.CancelDrag(); args_.CancelDrag(); work_.CancelDrag();
+        return 0;
     case WM_LBUTTONDBLCLK: case WM_RBUTTONDOWN:
         SetFocus(h);
         if (m == WM_RBUTTONDOWN) return 0;
@@ -758,6 +763,9 @@ void RunAsModule::RunTarget() {
     if (!Gate(who_)) return;
     LaunchRequest req;
     req.path = path_.Text();
+    // Explorer's "Copy as path" wraps the path in quotes; the launch wants it bare.
+    if (req.path.size() >= 2 && req.path.front() == L'"' && req.path.back() == L'"')
+        req.path = req.path.substr(1, req.path.size() - 2);
     req.args = args_.Text();
     req.workingDir = work_.Text();
     req.who = who_;
@@ -859,7 +867,10 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     POINT p{x, y};
     switch (msg) {
     case WM_MOUSEMOVE: {
-        if (Edit* e = DragEdit()) return e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);
+        if (Edit* e = DragEdit()) {
+            if (!(w & MK_LBUTTON)) { e->CancelDrag(); return true; }   // button released elsewhere
+            return e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);
+        }
         int nid = -1, nd = 0;
         for (int i = (int)clicks_.size() - 1; i >= 0; i--)
             if (PtInRect(&clicks_[i].rc, p)) { nid = clicks_[i].id; nd = clicks_[i].data; break; }
@@ -889,7 +900,9 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         return list_.OnMouse(msg, x, y, rcList_, c);
     case WM_LBUTTONDBLCLK: case WM_RBUTTONUP: {
         Edit* e = PtInRect(&rcPath_, p) ? &path_ : PtInRect(&rcArgs_, p) ? &args_ : PtInRect(&rcWork_, p) ? &work_ : nullptr;
-        if (!e) return msg == WM_LBUTTONDBLCLK ? OnInput(WM_LBUTTONDOWN, w, l) : false;
+        // A double-click on the history list is its re-fill gesture (the list times the second
+        // button-down); anywhere else it is ignored, so a double-click can't run a button twice.
+        if (!e) return msg == WM_LBUTTONDBLCLK && PtInRect(&rcList_, p) ? OnInput(WM_LBUTTONDOWN, w, l) : false;
         focus_ = e == &path_ ? Focus::Path : e == &args_ ? Focus::Args : Focus::Work;
         if (msg == WM_RBUTTONUP) Invalidate();   // show the focus before the menu opens
         e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);

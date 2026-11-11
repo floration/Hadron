@@ -272,18 +272,19 @@ LRESULT BiosModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_CAPTURECHANGED:
         if (listSb_.Dragging()) listSb_.OnMouse(WM_LBUTTONUP, 0, 0, rcListSbTrack_);
         if (detSb_.Dragging()) detSb_.OnMouse(WM_LBUTTONUP, 0, 0, rcDetSbTrack_);
+        search_.CancelDrag();
         Invalidate();
         return 0;
     case WM_BIOS_DONE:
         OnJobDone();
         return 0;
+    case WM_RBUTTONDOWN:
+        SetFocus(h);
+        return 0;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
         SetFocus(h);
         [[fallthrough]];
-    case WM_RBUTTONDOWN:
-        SetFocus(h);
-        return 0;
     case WM_LBUTTONUP: case WM_MOUSEMOVE: case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_CHAR: case WM_RBUTTONUP:
         if (m == WM_MOUSEMOVE && !tracking_) {
             TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
@@ -862,7 +863,8 @@ bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         if (msg == WM_RBUTTONUP) return false;
     }
     if (msg == WM_KEYDOWN) {
-        bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        // AltGr reports Ctrl+Alt: not a Ctrl shortcut.
+        bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0 && (GetKeyState(VK_MENU) & 0x8000) == 0;
         int pitch = Sc(Console() ? 20 : 26);
         int page = std::max(1, (int)(rcListBody_.bottom - rcListBody_.top) / pitch - 1);
         if (w == VK_TAB) {
@@ -912,7 +914,7 @@ bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         wchar_t ch = (wchar_t)w;
         if (ch == 0x09 || ch == 0x1B || ch == 0x0D || ch == 0x06) return false;   // handled as keys
         if (focus_ != Focus::Search) {
-            if (ch < 0x20) return false;
+            if (ch < 0x20 || ch == 0x7F) return false;
             focus_ = Focus::Search;   // typing anywhere starts a search
         }
         return search_.OnChar(ch);

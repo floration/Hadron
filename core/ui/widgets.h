@@ -109,6 +109,7 @@ public:
     // coordinates as rc. Takes mouse capture while dragging. WM_RBUTTONUP shows the context menu.
     bool OnMouse(HWND owner, UINT msg, int x, int y, const RECT& rc, const PaintCtx& c);
     bool Dragging() const { return dragging_; }
+    void CancelDrag() { dragging_ = false; }   // call on WM_CAPTURECHANGED
 
 private:
     size_t SelLo() const { return anchor_ < caret_ ? anchor_ : caret_; }
