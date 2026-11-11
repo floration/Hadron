@@ -1099,8 +1099,8 @@ int RunAsModule::RunCli(int argc, wchar_t** argv) {
         std::wstring u, d;
         SplitAccount(L"alice", &u, &d);       bool s1 = u == L"alice" && d == L".";
         SplitAccount(L"PC1\\bob", &u, &d);    bool s2 = u == L"bob" && d == L"PC1";
-        SplitAccount(L"carol@corp.example", &u, &d); bool s3 = u == L"carol" && d == L"corp.example";
-        check(s1 && s2 && s3, L"SplitAccount handles user, domain\\user and user@domain");
+        SplitAccount(L"carol@corp.example", &u, &d); bool s3 = u == L"carol@corp.example" && d.empty();
+        check(s1 && s2 && s3, L"SplitAccount: user -> '.', domain\\user split, UPN kept whole with NULL domain");
     }
 
     // --- identity label ---------------------------------------------------------------------

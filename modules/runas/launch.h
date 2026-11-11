@@ -75,7 +75,8 @@ bool PrivilegeEnabled(BOOL adjustReturn, DWORD lastError);
 // TrustedInstaller" switch is on; This admin and Another user are always allowed.
 bool LaunchAllowed(Who who, bool allowElevated);
 
-// Split "domain\user" or "user@domain" for CreateProcessWithLogonW; domain is "." when absent.
+// Split for CreateProcessWithLogonW: "domain\user" -> (user, domain); bare "user" -> (user, ".");
+// a UPN "user@domain" stays whole with an empty domain, which the caller passes as NULL (per the API).
 void SplitAccount(const std::wstring& account, std::wstring* user, std::wstring* domain);
 
 // Expand a file-association command template (%1/%L = the file, %* = args, %% = %). The file is

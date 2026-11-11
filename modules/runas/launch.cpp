@@ -460,7 +460,8 @@ void LaunchAnotherUser(const LaunchRequest& req, const wchar_t* password, Launch
 
     std::wstring user, domain;
     SplitAccount(req.account, &user, &domain);
-    BOOL ok = CreateProcessWithLogonW(user.c_str(), domain.c_str(), pw, LOGON_WITH_PROFILE, app,
+    BOOL ok = CreateProcessWithLogonW(user.c_str(), domain.empty() ? nullptr : domain.c_str(), pw,
+                                      LOGON_WITH_PROFILE, app,
                                       cmd.empty() ? nullptr : &cmd[0], CREATE_UNICODE_ENVIRONMENT,
                                       nullptr, wd, &si, &pi);
     if (!ok) {
@@ -697,12 +698,8 @@ void SplitAccount(const std::wstring& account, std::wstring* user, std::wstring*
     if (bs != std::wstring::npos) {
         *domain = account.substr(0, bs);
         *user = account.substr(bs + 1);
-    } else {
-        size_t at = account.rfind(L'@');
-        if (at != std::wstring::npos) {
-            *user = account.substr(0, at);
-            *domain = account.substr(at + 1);
-        }
+    } else if (account.find(L'@') != std::wstring::npos) {
+        return;   // UPN: CreateProcessWithLogonW wants the whole UPN as the user and a NULL domain
     }
     if (domain->empty()) *domain = L".";
 }
