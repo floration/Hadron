@@ -2,6 +2,7 @@
 #include "core/ui/widgets.h"
 #include "core/ui/draw.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cwctype>
 
@@ -26,13 +27,19 @@ struct Pal {
     COLORREF text3()  const { return Pick(t.text3,  COLOR_GRAYTEXT); }
     COLORREF accent() const { return Pick(t.accent, COLOR_HIGHLIGHT); }
     COLORREF selBg()  const { return Pick(t.accent, COLOR_HIGHLIGHT); }
-    // Readable text on the selection fill: system colour in high contrast, else black or white by
-    // the fill's luminance (Rec. 601), so a saturated accent of any theme stays legible.
+    // Readable text on the selection fill: system colour in high contrast, else black or white (below),
+    // so the accent of any theme, or any Windows accent, stays legible.
     COLORREF selText()const {
         if (t.highContrast) return GetSysColor(COLOR_HIGHLIGHTTEXT);
-        COLORREF c = t.accent;
-        int lum = (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000;
-        return lum > 140 ? RGB(16, 18, 22) : RGB(245, 247, 250);
+        // White while it reaches 4.5:1 to one decimal (white on the accent is the Windows convention; on
+        // the default blue 0078D7 it is 4.50:1), else black, which is then above 4.6:1. A Rec. 601
+        // brightness threshold picked white on a bright green accent (about 2:1).
+        auto lin = [](int v) { double c = v / 255.0; return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); };
+        auto lum = [&](COLORREF c) { return 0.2126 * lin(GetRValue(c)) + 0.7152 * lin(GetGValue(c)) + 0.0722 * lin(GetBValue(c)); };
+        const COLORREF dark = RGB(0, 0, 0), light = RGB(255, 255, 255);
+        double lf = lum(t.accent);
+        double onDark = (lf + 0.05) / (lum(dark) + 0.05), onLight = (lum(light) + 0.05) / (lf + 0.05);
+        return onLight >= 4.45 || onLight >= onDark ? light : dark;   // white while it passes (the Windows convention)
     }
 };
 }  // namespace
@@ -156,12 +163,19 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
         int w = S(cols_[i].width, c.dpi);
         RECT cell{x + pad, hdr.top, x + w - pad, hdr.bottom};
         bool sorted = (i == sortCol_);
+        // The sort triangle gets its own space at the inner edge: the title ellipsises before it instead of
+        // running under it on a narrow column.
+        const int arrowW = S(8, c.dpi) + S(6, c.dpi);
+        if (sorted) {
+            if (cols_[i].rightAlign) cell.left = std::min(cell.right, cell.left + arrowW);
+            else                     cell.right = std::max(cell.left, cell.right - arrowW);
+        }
         COLORREF hc = (i == hotHeader_ || sorted) ? p.text1() : p.text2();
         if (cols_[i].rightAlign) TextRight(dc, cols_[i].title, cell, c.fonts.semi, hc);
         else                     TextLeft(dc, cols_[i].title, cell, c.fonts.semi, hc);
         if (sorted) {
             // Sort triangle at the inner edge.
-            int ax = cols_[i].rightAlign ? x + pad + S(4, c.dpi) : x + w - pad - S(9, c.dpi);
+            int ax = cols_[i].rightAlign ? x + pad : x + w - pad - S(8, c.dpi);
             int ay = hdr.top + (headerH - S(6, c.dpi)) / 2;
             int s = S(8, c.dpi), h = S(5, c.dpi);
             POINT tri[3];
@@ -199,15 +213,20 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
             int w = S(cols_[ci].width, c.dpi);
             RECT cell{cx + pad, row.top, cx + w - pad, row.bottom};
             COLORREF tc = selected ? p.selText() : (ci == 0 ? p.text1() : p.text2());
-            HFONT font = (c.layout == Layout::Console) ? c.fonts.mono
-                                                       : (ci == 0 ? c.fonts.ui : c.fonts.caption);
+            // One cell size per list (Segoe UI 9pt, the Windows body size): a larger first column cost about a
+            // fifth of its width and left two type sizes on one baseline. text1 vs text2 keeps it the anchor.
+            HFONT font = (c.layout == Layout::Console) ? c.fonts.mono : c.fonts.caption;
             if (cols_[ci].rightAlign) TextRight(dc, rows_[i][ci], cell, font, tc);
             else                      TextLeft(dc, rows_[i][ci], cell, font, tc);
             cx += w;
         }
         if (selected && focused) {
-            RECT fr{row.left + S(2, c.dpi), row.top, row.right - S(2, c.dpi), row.bottom};
-            FocusRectC(dc, fr, p.accent());
+            // The focus row is always the selected row, which is filled with the accent: an accent outline
+            // there is invisible. Draw it in the selection text colour (the best of black/white on the
+            // fill, or the system highlight text in high contrast), inset inside the rounded fill.
+            const int in = S(3, c.dpi);
+            RECT fr{row.left + S(2, c.dpi) + in, row.top + in, row.right - S(2, c.dpi) - in, row.bottom - in};
+            FocusRectC(dc, fr, p.selText());
         }
     }
     RestoreDC(dc, savedClip);
