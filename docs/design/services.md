@@ -253,26 +253,47 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   - Present or phantom ("seen before") hardware is blocked as "Kept".
   - Use-based Stripped items (no hardware hint) are offered unticked at Stripped with "use cannot be detected: tick if you don't use it" (kb-auditor M16, spec §5.3). At Minimum the same rows are ticked and say "use cannot be detected: ticked at Minimum, untick if you use it" (R18, proxy Q1: Minimum is only what is needed to boot, network, play games and run Hadron); plan, confirm and undo still gate them.
 - **"No guidance"** is a keep-the-default rating (DECISIONS.md, proxy): an IoT No guidance keeps an item out of Pure bloat; a WS16 No guidance alone does not, but the pbasis says so.
-- **Windows stock.** The KB has a small stock table (`STOCK` at the end of `tools/services/kb.py`, fix/svcdrv-kb):
-  five services whose default or expected start type a Microsoft page for Windows client states (msiserver,
-  W32Time, TimeBrokerSvc, WSearch, BrokerInfrastructure), each `published` with its URL. None of the pages names
-  build 19045, and each stock note says what its page applies to. No driver has a stock value. Every other item
-  is "no data": `docs/pipeline/fixes/svcdrv-kb.md` says why the larger tables that exist (IoT, per-user services,
-  Server 2016) are not used.
-  - The plan writes only items with a stock value; the note says how many of the tab's items have one.
+- **Windows stock** (fix/svcdrv-stock; DECISIONS 2026-11-11, owner). Two sources, in this order:
+  1. **This PC's WinSxS component manifests** (`sxsstock.cpp`). On a Worker after the list is shown, once per
+     session: every `%windir%\WinSxS\Manifests\*.manifest` ("DCM\x01" + a delta) is expanded with msdelta's
+     `ApplyDeltaB` (`DELTA_APPLY_FLAG_ALLOW_PA19`) against the dictionary in the newest servicing-stack `wcp.dll`
+     (resource type 614, name 1). wcp.dll is loaded `LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE`
+     (no code runs); msdelta.dll by `LoadLibraryEx(LOAD_LIBRARY_SEARCH_SYSTEM32)` + `GetProcAddress`. Both are
+     Windows system DLLs (rule 3). A manifest with a reparse-point, recall or offline attribute is skipped
+     unopened, and the attributes are checked again on the handle (`FILE_FLAG_OPEN_REPARSE_POINT |
+     FILE_FLAG_BACKUP_SEMANTICS`). Hadron's own XML scanner takes, in precedence order: (1) the edition file's
+     override (`%windir%\servicing\Editions\<EditionID>Edition.xml`, `<component name><Start_X>n</Start_X>`,
+     mapped through the manifest setting of that component and name); (2) `<serviceData name start>` or the
+     `registryKey ...\Services\X` `Start` value (and `DelayedAutostart`); (3) a configuration-setting default
+     (`<xsd:element default wcm:handler="regkey('...\Services\X')" wcm:legacyName="Start|DelayedAutostart">`).
+     Two manifests with different values for a name are a conflict: no value. A per-user instance maps to its
+     template. The result is cached in the data folder as `sxs-<build>.<UBR>-<EditionID>.txt` (temp + rename, never
+     overwritten), only after `EnsureRoot` passes again on that worker (A1); an unusable cache is renamed aside and
+     the manifests are read again. Basis: `owner-measured`, condition "read from this PC's WinSxS component
+     manifests, Windows build N.UBR (edition)".
+  2. **Hadron's KB** (19045 only): five Microsoft-page values (`STOCK`) and the values where two third-party tables
+     agree (`stock_src` `table`); `stock_disagree` where the tables differ (tools/services/README.md).
+  - How they combine (`StockFor` in plan.cpp): manifest and KB agree, or only the manifest has a value: applied
+    from the manifest (the KB source is named when it agrees). Only the KB has one: applied from the KB. They
+    disagree, the tables disagree with each other, or only a setting default gives the manifest value (setting
+    defaults can be Server values, e.g. Themes) and no KB value agrees: shown with both sources, never applied.
+    Services Windows sets at runtime from hardware or software (WlanSvc, stisvc, camsvc, IKEEXT, PolicyAgent,
+    iphlpsvc, ssh-agent, WinHttpAutoProxySvc; and BITS, WinRM, dcsvc, dmwappushservice, whose DelayedAutostart is
+    written at runtime) are always shown, never applied. Drivers take a manifest value only when their KB entry has
+    `sysok`; storage drivers never get one. On a build other than 19045 only the manifests give values.
+  - Shown rows are unticked and can't be ticked ("Not applied: <why>"); the plan notes count them.
   - An explanation-only (`never`) KB entry doesn't block its stock row: `never` means not in a preset level.
     Never-touch items, protected services and the named never-preset list still block (DECISIONS 2026-11-11).
   - With no stock value the plan is empty, with no Apply button and no sum, and never a bare "Nothing to change."
-    (R20, proxy Q2). On a build the KB has no stock values for, it says "Hadron has no Windows-stock data for build N
-    yet: nothing will be changed." and the chip "(no data for this build yet)". On 19045, a tab with no value (Drivers)
-    says "Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed." and the chip
-    "(no data on this tab)". The detail's Windows stock line uses the chip's words; a row without a value on a tab
-    that has some says "no data for this item yet". `StockKnown()` counts per tab; the Services chip reads
-    "Default: Windows stock (N sourced)".
-  - A published stock value is worded "from a Microsoft page (it names no build)". genkb enforces that: a published
-    stock note cites learn.microsoft.com pages only and says its page "names no build"; a driver with a stock value
-    needs `sysok`.
-  - The mechanism is also selftested with an in-memory KB.
+    (R20, proxy Q2). Without manifests on a build the KB has no values for: "Hadron has no Windows-stock data for
+    build N yet: nothing will be changed." and the chip "(no data for this build yet)". A tab with no value says
+    "Hadron's KB has no Windows stock value for any item on this tab" (or "Hadron has no ..." when manifests were
+    read) and the chip "(no data on this tab)". The detail's Windows stock line gives the value and its source
+    ("this PC's component manifests, build N.UBR", "two agreeing third-party tables", "the page names no build"),
+    "not applied: <why>" with both sources, "still reading this PC's component manifests", or the chip's words.
+  - Tests: the scanner and edition mapping on hand-written XML in the selftest; the fake backend reads
+    `tests/fixtures/services/sxs/` (hand-written manifests in the decompressed shape, an edition file, build and
+    edition). Live decompression is checked on a real Windows PC only, never under Wine.
   - Stock values are never applied to storage drivers.
 - **"Default: as first seen"** (the first-run snapshot).
   - KB guards don't apply: it restores what the PC had.
@@ -367,7 +388,7 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 | `--data-dir <dir>` | module, `--live-test` | Use another data folder instead of `%ProgramData%\Hadron\services\` |
 | `--readonly` | module | Never arm the backend. Without `--data-dir` it opens the default data folder read-only, so the first-run snapshot, undo logs and interrupted banner still show |
 | `--selftest [--update-golden] [--golden <dir>]` | selftest | Run the selftest. `--golden` points at another golden folder (default `<fixture>\..\..\golden\services`); `--update-golden` rewrites every golden it compares instead of comparing |
-| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (Services: the fixture's WSearch row; Drivers: no data, the plan says so) |
+| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (Services: manifest, table and Microsoft rows and the shown-not-applied rows from the fixture's `sxs\`; Drivers: no data, the plan says so) |
 | `--live-test HadronTest<name> [--ti] [--data-dir <dir>]` | `HadronServices.exe`, test build only (R25) | CI's round trip on a dummy service (see below) |
 
 **Regenerating goldens** (only when a change is meant to alter them, and review every diff):

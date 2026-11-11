@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Hand-written fixture in the shape of a decompressed WinSxS component manifest (not Microsoft's file).
+     Layers: serviceData says demand, the setting default says 3, the edition file overrides both to 2. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0" copyright="fixture">
+  <assemblyIdentity name="Microsoft-Windows-Audio-AudioCore" version="10.0.19041.1" processorArchitecture="amd64" language="neutral" />
+  <dependency discoverable="no">
+    <dependentAssembly>
+      <assemblyIdentity name="Microsoft-Windows-SomethingElse" version="10.0.19041.1" />
+    </dependentAssembly>
+  </dependency>
+  <categoryMembership><id name="Microsoft.Windows.Categories.Services" /></categoryMembership>
+  <serviceData name="AudioSrv" errorControl="normal" start="demand" type="win32ShareProcess" dependOnService="AudioEndpointBuilder,RpcSs" imagePath="%SystemRoot%\System32\svchost.exe -k LocalServiceNetworkRestricted -p" objectName="NT AUTHORITY\LocalService">
+    <failureActions resetPeriod="86400"><actions><action delay="120000" type="restartService" /></actions></failureActions>
+  </serviceData>
+  <serviceData name="AudioEndpointBuilder" errorControl="normal" start="demand" type="win32ShareProcess" objectName="LocalSystem" />
+  <configuration xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+    <configurationSchema>
+      <xsd:schema targetNamespace="Microsoft-Windows-Audio-AudioCore">
+        <xsd:element name="Start_AudioSrv" default="3" type="xsd:unsignedInt" wcm:handler="regkey('HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\AudioSrv')" wcm:legacyName="Start" wcm:legacyType="REG_DWORD" />
+        <xsd:element name="Start_EndpointBuilder" default="3" type="xsd:unsignedInt" wcm:handler="regkey('HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\AudioEndpointBuilder')" wcm:legacyName="Start" wcm:legacyType="REG_DWORD" />
+      </xsd:schema>
+    </configurationSchema>
+  </configuration>
+</assembly>

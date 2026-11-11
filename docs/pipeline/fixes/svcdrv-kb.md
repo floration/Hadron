@@ -166,3 +166,65 @@ The reviewer found no category 1-4 issues. The small ones, all applied:
   (two must-fail cases). WSearch's note now says "the page names no build".
 - **F3**: the chip reads "Default: Windows stock (N sourced)".
 - **N1**: genkb fails `stock` on a driver without `sysok` (one must-fail case).
+
+## 7. Stock from tables and from this PC's manifests (fix/svcdrv-stock)
+Owner's call (DECISIONS 2026-11-11): rule 7 counts a linkable third-party table as `published`, and the stock values
+come first from the PC's own WinSxS manifests, cross-checked with the tables.
+
+### Sources
+| Key | Table | Version it states |
+|---|---|---|
+| `@TBLWINTIPS` | wintips.org, "Default Startup Type of Services on Windows 10 PRO OS", https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf | Windows 10 Pro; no version or build (published 2021-09) |
+| `@TBLTWEAKHOUND` | TweakHound, "Windows 10 Default Services v20H2", https://tweakhound.com/?p=18808 | Windows 10 20H2, build 19042.685 (23 Dec 2020) |
+
+Neither names 19045/22H2, so every table note says the value "names no build". They are independent captures: they
+differ on six services, and each has rows the other lacks. Both were read with WebFetch on 2026-11-11 and
+transcribed by display name; names were mapped to service names through the IoT page, the fixture and the KB
+titles. Unmapped rows (ignored): Local Profile Assistant Service, Microsoft (R) Diagnostics Hub Standard Collector
+Service, Microsoft Update Health Service, Wi-Fi Direct Services Connection Manager Service, Windows Mixed Reality
+OpenXR Service, WPF Font Cache. A page I could not fetch (winhelponline) is not used.
+
+### Counts (289 KB entries)
+- **Sourced: 183.** 178 from two agreeing tables (`stock_src` `table`), 5 from Microsoft pages (`microsoft`,
+  unchanged: msiserver, W32Time, TimeBrokerSvc, WSearch, BrokerInfrastructure).
+- **Sources disagree: 5** (shown in the detail pane, never applied): BITS (Manual / Automatic delayed),
+  DeviceAssociationService (Manual / Automatic, both trigger), WlanSvc (Automatic / Manual), wscsvc (Automatic /
+  Automatic delayed), wuauserv (Automatic / Manual, both trigger). W32Time also differs between the tables
+  (Automatic delayed / Manual trigger) but keeps its Microsoft value.
+- **None: 101.** 84 drivers (neither table lists drivers, so no driver gets a value) and 17 services the tables
+  don't list (per-user templates, OEM and third-party entries).
+- Follow-up: 40 services both tables agree on have no KB entry yet (AssignedAccessManagerSvc, BDESVC, camsvc,
+  DispBrokerDesktopSvc, DisplayEnhancementService, DoSvc, edgeupdate, edgeupdatem, fhsvc, GraphicsPerfSvc,
+  IpxlatCfgSvc, LxpSvc, MicrosoftEdgeElevationService, NaturalAuthentication, NcdAutoSetup, p2pimsvc, p2psvc,
+  PeerDistSvc, perceptionsimulation, PNRPAutoReg, PNRPsvc, PushToInstall, SDRSVC, Sense, SgrmBroker,
+  SharedRealitySvc, shpamsvc, spectrum, ssh-agent, TokenBroker, TroubleshootingSvc, VacSvc, WarpJITSvc, wbengine,
+  Wcncsvc, WebClient, WManSvc, workfolderssvc, WpcMonSvc, WwanSvc). On a PC the manifests cover them.
+
+### genkb
+- K lines have 27 fields; the last is `stock_src` (`microsoft`, `table`, `disagree` or empty).
+- Five new must-fail cases (70 in all): a non-Microsoft note without "third-party table"; a table value from one
+  table; a table note without "names no build"; `stock_disagree` naming one source; `stock_disagree` with a value.
+
+### This PC's WinSxS manifests (`modules/services/sxsstock.cpp`)
+- Method from the read-only probe on the owner's PC (19045.2965 Pro): each manifest is "DCM\x01" + an msdelta
+  delta against wcp.dll's type-614 resource; 18,883 manifests decompressed with no failure in about 18 s.
+- Precedence: edition file override, then serviceData start or the Services\X registry value, then a
+  configuration-setting default (low confidence: applied only when the KB's value agrees).
+- Cross-check, per item: manifest and KB agree, or manifest only: applied (`owner-measured`, "read from this PC's
+  WinSxS component manifests, Windows build N.UBR (edition)"). KB only: applied as before. Disagree, tables
+  disagree, setting default alone with no agreeing table, or on the runtime list (WlanSvc, stisvc, camsvc, IKEEXT,
+  PolicyAgent, iphlpsvc, ssh-agent, WinHttpAutoProxySvc, BITS, WinRM, dcsvc, dmwappushservice): shown, not applied.
+- The probe's list of manifest-vs-stock candidates (Audiosrv, AudioEndpointBuilder, IKEEXT, PolicyAgent, camsvc,
+  stisvc, WlanSvc, ssh-agent, iphlpsvc, BITS, dcsvc, dmwappushservice, WinRM, MSDTC) came from the probe session's
+  knowledge, not a source; the module doesn't hard-code them as stock. Audiosrv/AudioEndpointBuilder resolve through
+  the edition file; the rest are either on the runtime list or caught by the cross-check.
+- Cache: `sxs-<build>.<UBR>-<EditionID>.txt` in the data folder, written once after `EnsureRoot` (A1).
+- Tests: hand-written XML fixtures (`tests/fixtures/services/sxs/`, one per layer, plus an edition file) through the
+  fake backend's reader, and scanner, edition, conflict, cache and cross-check cases in the selftest. Live
+  decompression is not run under Wine; it is checked on the owner's PC from the project folder.
+
+### Goldens changed
+- `plan-services-stock.txt`: 6 applied rows (DiagTrack and XblGameSave from the tables; OneSyncSvc and PcaSvc from
+  the fixture's manifests; TimeBrokerSvc and WSearch from Microsoft pages), 4 shown-not-applied rows (DPS setting
+  default only, SysMain manifest vs tables, stisvc and dmwappushservice runtime-set), 93 of 110 with a value.
+- `plan-drivers-stock.txt`: the manifests note, and "Hadron has no Windows stock value for any item on this tab".

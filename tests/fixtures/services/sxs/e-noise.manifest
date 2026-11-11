@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Hand-written fixture: a component with no service at all (most manifests are like this). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
+  <assemblyIdentity name="Microsoft-Windows-Fixture-Noise" version="10.0.19041.1" processorArchitecture="amd64" />
+  <file name="noise.dll" destinationPath="$(runtime.system32)\" />
+</assembly>

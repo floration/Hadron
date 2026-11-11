@@ -338,6 +338,7 @@ std::vector<SvcItem> Folded(FakeBackend& b) {
 
 struct World {
     FixtureData fx;
+    std::shared_ptr<const SxsStock> sxs;   // the fixture's sxs\ manifests, when it has them
     std::vector<SvcItem> items;
     HwInfo hw;
     Ctx ctx;
@@ -353,6 +354,8 @@ bool MakeWorld(const std::wstring& dir, const Kb* kb, World* w, std::wstring* er
     w->ctx.first = w->fx.hasFirst ? &w->fx.first : nullptr;
     w->ctx.build = w->fx.backend.Build();
     w->ctx.machine = w->fx.backend.MachineGuid();
+    if (std::unique_ptr<SxsReader> r = w->fx.backend.MakeSxs()) w->sxs = std::make_shared<const SxsStock>(ScanSxs(*r));
+    w->ctx.sxs = w->sxs.get();
     w->ctx.Prepare();
     return true;
 }
@@ -613,6 +616,101 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
     if (golden.empty()) golden = Parent(Parent(fixture)) + L"\\golden\\services";
     World w;
     check(MakeWorld(fixture, &kb, &w, &err), L"fixture loads (snapshot.txt, hw.txt, first.txt)" + (err.empty() ? L"" : L": " + err));
+
+    // ---- WinSxS manifest stock (fix/svcdrv-stock): the scanner on hand-written XML, the fake reader, the cache ----------
+    {
+        SxsScan a;
+        ScanManifestXml("<assembly><assemblyIdentity name='C1'/>"
+                        "<serviceData name=\"Svc&amp;A\" start='delayedAuto'/>"
+                        "<serviceData name=\"B\" start=\"bogus\"/>"
+                        "<!-- <serviceData name=\"Cm\" start=\"disabled\"/> -->"
+                        "<registryKey keyName=\"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Drv1\">"
+                        "<registryValue name=\"Start\" valueType=\"REG_DWORD\" value=\"0x00000000\"/></registryKey>"
+                        "<registryKey keyName=\"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Drv1\\Parameters\">"
+                        "<registryValue name=\"Start\" value=\"4\"/></registryKey>"
+                        "<registryValue name=\"Start\" value=\"4\"/>"
+                        "<registryKey keyName=\"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\StorX\">"
+                        "<registryValue name=\"DelayedAutostart\" value=\"1\"/></registryKey>"
+                        "<serviceData name=\"StorX\" start=\"auto\"/></assembly>", &a);
+        auto at = [&](const wchar_t* n) { auto it = a.byName.find(n); return it == a.byName.end() ? nullptr : &it->second; };
+        check(at(L"svc&a") && at(L"svc&a")->Cfg().Delayed() && at(L"svc&a")->StartSrc() == SxsValue::SERVICE && !at(L"b") && !at(L"cm"),
+              L"sxs scanner: serviceData start (delayedAuto -> Auto delayed), entities decoded, a bad start and a comment ignored");
+        check(at(L"drv1") && at(L"drv1")->Cfg().start == 0 && at(L"drv1")->StartSrc() == SxsValue::REGISTRY && a.byName.size() == 3,
+              L"sxs scanner: registryKey Services\\X Start; a subkey's Start and a value outside a key are ignored");
+        check(at(L"storx") && at(L"storx")->Cfg().Delayed() && !at(L"storx")->LowConfidence(),
+              L"sxs scanner: DelayedAutostart=1 from the registry value makes serviceData auto delayed (StorSvc's case)");
+        ScanManifestXml("<assembly><serviceData name=\"svc&amp;a\" start=\"demand\"/></assembly>", &a);
+        check(at(L"svc&a")->conflict && !at(L"svc&a")->Usable(), L"sxs scanner: two manifests with different values -> conflict, no value");
+        SxsScan s;
+        ScanManifestXml("<assembly><assemblyIdentity name=\"Comp-A\"/><dependency><dependentAssembly><assemblyIdentity name=\"Other\"/>"
+                        "</dependentAssembly></dependency><serviceData name=\"Q\" start=\"demand\"/><xsd:element name=\"Start_Q\" default=\"3\" "
+                        "wcm:handler=\"regkey('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Q')\" wcm:legacyName=\"Start\"/>"
+                        "<xsd:element name=\"Start_T\" default=\"4\" wcm:handler=\"regkey('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\T')\" "
+                        "wcm:legacyName=\"Start\"/></assembly>", &s);
+        const SxsValue* t = s.byName.count(L"t") ? &s.byName[L"t"] : nullptr;
+        check(t && t->Usable() && t->LowConfidence() && t->Cfg().start == 4 && s.settings.count(L"comp-a|start_q"),
+              L"sxs scanner: a setting default alone is a low-confidence value; settings keyed by the manifest's own component");
+        int n = ApplyEditionXml("<unattend><component name=\"Comp-A\"><Start_Q>2</Start_Q></component>"
+                                "<component name=\"Other\"><Start_Q>4</Start_Q></component></unattend>", &s);
+        check(n == 1 && s.byName[L"q"].Cfg().start == 2 && s.byName[L"q"].StartSrc() == SxsValue::EDITION && s.byName[L"q"].Usable(),
+              L"sxs edition file: overrides serviceData and the setting default; another component's setting is not mapped");
+
+        const SxsStock* fs = w.sxs.get();
+        check(fs && fs->ok && fs->manifests == 5 && fs->editionRead && fs->overrides == 2 && fs->build == L"19045.5737" &&
+                  fs->edition == L"Professional",
+              L"sxs fake reader: 5 fixture manifests, the Professional edition file (2 overrides), build 19045.5737");
+        const SxsValue* au = fs ? fs->Find(L"Audiosrv") : nullptr;
+        const SxsValue* dps = fs ? fs->Find(L"DPS") : nullptr;
+        check(au && au->Cfg().start == 2 && au->StartSrc() == SxsValue::EDITION && dps && dps->LowConfidence() && dps->Cfg().Delayed(),
+              L"sxs layers: AudioSrv demand + setting 3 + edition 2 -> Auto (edition); DPS from setting defaults only -> low confidence");
+        check(fs && fs->Find(L"CDPUserSvc_4f2a1") && fs->Find(L"CDPUserSvc_4f2a1")->Cfg().start == 2 && !fs->Find(L"Foo_zz") &&
+                  !fs->Find(L"Commented") && !fs->Find(L"InCdata") && fs->Find(L"Beep") && fs->Find(L"Beep")->Cfg().start == 1,
+              L"sxs: a per-user instance maps to its template; comments and CDATA are not read; a driver's registry Start is");
+        if (fs) {
+            SxsStock back;
+            std::wstring e;
+            std::string text = WriteSxsCache(*fs);
+            bool rt = ParseSxsCache(text, &back, &e) && back.fromCache && WriteSxsCache(back) == text && back.Usable() == fs->Usable();
+            SxsStock torn;
+            bool tornFails = !ParseSxsCache(text.substr(0, text.size() - 4), &torn, &e) && !torn.ok;
+            check(rt && tornFails, L"sxs cache: write -> parse -> write reproduces it; a torn file (no end line) is refused");
+        }
+        check(SxsCacheName(L"19045.5737", L"Professional") == L"sxs-19045.5737-Professional.txt" && SxsCacheName(L"19045", L"Pro").empty() &&
+                  SxsCacheName(L"19045.1", L"..\\x").empty() && SxsCacheName(L"", L"Pro").empty(),
+              L"sxs cache name: build.UBR and an alphanumeric edition only");
+        check(SxsRuntimeDependent(L"WlanSvc") && SxsRuntimeDependent(L"BITS") && !SxsRuntimeDependent(L"Spooler"),
+              L"sxs: the runtime-set list (WlanSvc, BITS, ...)");
+        auto pick = [&](const wchar_t* n) {
+            for (auto& i : w.items) if (IEq(i.name, n)) return StockFor(i, w.ctx);
+            return StockPick{};
+        };
+        StockPick pca = pick(L"PcaSvc"), one = pick(L"OneSyncSvc"), sm = pick(L"SysMain"), sti = pick(L"stisvc"), dp = pick(L"DPS"),
+                  au2 = pick(L"Audiosrv"), bp = pick(L"Beep"), ws = pick(L"WSearch");
+        check(pca.kind == StockPick::Apply && pca.basis == L"owner-measured" && pca.cfg.start == 3 &&
+                  pca.basisNote.find(L"read from this PC's WinSxS component manifests, Windows build 19045.5737 (Professional)") != std::wstring::npos &&
+                  pca.basisNote.find(L"Two agreeing third-party tables agree") != std::wstring::npos,
+              L"stock: manifest and tables agree -> applied, owner-measured with the condition, the tables named");
+        check(one.kind == StockPick::Apply && one.cfg.start == 3 && one.basis == L"owner-measured", L"stock: manifest only -> applied");
+        check(sm.kind == StockPick::Show && sm.why.find(L"sources disagree: this PC's manifests say Manual; two agreeing third-party tables say Auto") == 0 &&
+                  sm.basisNote.find(L"tweakhound.com") != std::wstring::npos,
+              L"stock: manifest and tables disagree -> shown with both sources, not applied");
+        check(sti.kind == StockPick::Show && sti.why.find(L"at runtime") != std::wstring::npos, L"stock: a runtime-set service -> shown, not applied");
+        check(dp.kind == StockPick::Show && dp.why.find(L"only a configuration-setting default") == 0,
+              L"stock: a setting default alone that no table confirms -> shown, not applied");
+        check(au2.kind == StockPick::Apply && au2.cfg.start == 2 && bp.kind == StockPick::None && ws.kind == StockPick::Apply &&
+                  ws.reason == L"Windows stock start type from a Microsoft page (it names no build)",
+              L"stock: AudioSrv's edition value agrees with the tables; a driver without sysok gets none; no manifest -> the KB's value");
+        Ctx other = w.ctx;
+        other.build = L"22631";
+        StockPick o = StockFor(w.items.front(), other);
+        bool anyKb = false;
+        for (auto& i : w.items) {
+            StockPick k = StockFor(i, other);
+            if (k.kind == StockPick::Apply && k.basis != L"owner-measured") anyKb = true;
+        }
+        (void)o;
+        check(!anyKb, L"stock: on another build only this PC's manifests give values (the KB's are for 19045)");
+    }
     {
         std::string raw;
         Snapshot s;
@@ -997,6 +1095,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         }
         Ctx co = w.ctx;
         co.build = L"22631";
+        co.sxs = nullptr;   // without this PC's manifests (they would give values on any build)
         Plan so = BuildDefault(true, TAB_SERVICES, w.items, co);
         check(so.rows.empty() && !so.notes.empty() && so.notes[0].find(L"no Windows-stock data for build 22631") != std::wstring::npos,
               L"Windows stock on another build: refused with the reason");
@@ -2363,6 +2462,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
     {
         World a;
         freshWorld(&a);
+        a.ctx.sxs = nullptr;   // the KB's own wording (the manifest wording is checked with the sxs fixture)
         Plan s0 = PlanFor(-2, TAB_DRIVERS, a);   // no driver has a stock value in the KB
         Ctx co = a.ctx;
         co.build = L"22631";

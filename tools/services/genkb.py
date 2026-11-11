@@ -48,7 +48,7 @@ def load_kb(path=None):
 
 B = load_bios_gen()
 LEVELS = ('bloat', 'stripped', 'minimum')
-FIELDS = 26
+FIELDS = 27
 SEED_MIN = 60
 # Storage drivers never get a Windows-stock value: Windows sets those per PC (spec §0.5). Mirrors plan.cpp.
 STORAGE = {'storport', 'stornvme', 'storahci', 'iastorac', 'iastoravc', 'iastorvd', 'iastorv', 'iavroc', 'atapi', 'pciide',
@@ -218,6 +218,18 @@ def check_entry(e, kb, errors, warnings=None):
     # Windows stock value.
     stock = e.get('stock')
     stock_cfg = ''
+    stock_src = ''
+    disagree = e.get('stock_disagree', '')
+    if disagree:
+        # Two tables that disagree: recorded and shown, never applied.
+        if stock is not None or e.get('stock_basis') or e.get('stock_note'):
+            errors.append('%s: stock_disagree with a stock value' % where)
+        if len(set(B.KEY_RE.findall(disagree))) < 2 or 'disagree' not in disagree:
+            errors.append('%s: stock_disagree must name both sources (two @KEYs) and say they disagree' % where)
+        for k in unknown_keys(disagree, kb):
+            errors.append('%s stock_disagree: unknown source @%s' % (where, k))
+        render(disagree, '%s stock_disagree' % where, kb, errors, warnings)
+        stock_src = 'disagree'
     if stock is not None:
         stock_cfg = stock if isinstance(stock, str) else '%d/-' % stock
         if not CFG_RE.match(stock_cfg):
@@ -226,15 +238,23 @@ def check_entry(e, kb, errors, warnings=None):
             errors.append('%s: stock on a storage driver (Windows sets those per PC)' % where)
         if e.get('stock_basis') not in B.NUMBER_KINDS:
             errors.append('%s: stock needs an owner-measured or published stock_basis' % where)
-        # Reviewer F2: the module words a published stock value as "from a Microsoft page (it names no build)", so a
-        # published stock note must cite only learn.microsoft.com pages and say that its page names no build.
+        # Reviewer F2, relaxed in fix/svcdrv-stock: the module words a published stock value by its source kind
+        # (stock_src): "a Microsoft page" when every cited page is on learn.microsoft.com, "third-party tables"
+        # otherwise. A table note must say "third-party table"; both must say they name no build.
         if e.get('stock_basis') == 'published':
-            keys = B.KEY_RE.findall(e.get('stock_note', ''))
-            if not keys or any(not kb.SOURCES.get(k, '').startswith('https://learn.microsoft.com/') for k in keys):
-                errors.append('%s: a published stock note must cite learn.microsoft.com pages only (the UI says "a '
-                              'Microsoft page")' % where)
-            if 'names no build' not in e.get('stock_note', ''):
-                errors.append('%s: a published stock note must say its page "names no build" (the UI says so)' % where)
+            note = e.get('stock_note', '')
+            keys = B.KEY_RE.findall(note)
+            if keys and all(kb.SOURCES.get(k, '').startswith('https://learn.microsoft.com/') for k in keys):
+                stock_src = 'microsoft'
+            else:
+                stock_src = 'table'
+                if 'third-party table' not in note:
+                    errors.append('%s: a published stock note citing a non-Microsoft page must say "third-party table" '
+                                  '(the UI says so)' % where)
+                if len(set(keys)) < 2:
+                    errors.append('%s: a stock value from tables needs two agreeing tables (two @KEYs)' % where)
+            if 'names no build' not in note:
+                errors.append('%s: a published stock note must say it "names no build" (the UI says so)' % where)
         # Reviewer N1: a driver with a stock value is planned like one in a level, so it needs sysok.
         if e.get('kind') == 'drv' and not e.get('sysok'):
             errors.append('%s: stock on a driver without sysok' % where)
@@ -256,8 +276,9 @@ def check_entry(e, kb, errors, warnings=None):
     fields += ['1' if e.get('sysok') else '0', '1' if e.get('never') else '0',
                e.get('basis', ''), B.esc(expand(e.get('basis_note', ''), kb, True)),
                e.get('pbasis', ''), B.esc(expand(e.get('pbasis_note', ''), kb, True)),
-               stock_cfg, e.get('stock_basis', ''), B.esc(expand(e.get('stock_note', ''), kb, True)),
-               hw, B.esc(expand(con, kb, True)), B.esc(e.get('sources', ''))]
+               stock_cfg, e.get('stock_basis', ''),
+               B.esc(expand(disagree or e.get('stock_note', ''), kb, True)),
+               hw, B.esc(expand(con, kb, True)), B.esc(e.get('sources', '')), stock_src]
     if len(fields) != FIELDS:
         errors.append('%s: internal: %d fields' % (where, len(fields)))
     line = '\t'.join(fields)
@@ -413,8 +434,19 @@ def selftest():
         ('one tenth', good(expl='Uses one tenth of the RAM.')),
         ('a millisecond', good(expl='Saves a millisecond per frame.')),
         # Reviewer F2 / N1: the stock wording the UI relies on, and drivers.
-        ('published stock note citing a non-Microsoft page',
+        ('published stock note citing a non-Microsoft page without "third-party table"',
          good(stock='3/-', stock_basis='published', stock_note='@VDOT sets it to Manual. The page names no build.')),
+        ('third-party table stock from one table only',
+         good(stock='3/-', stock_basis='published',
+              stock_note='Third-party table: @TBLWINTIPS lists Manual. The value names no build.')),
+        ('third-party table stock without "names no build"',
+         good(stock='3/-', stock_basis='published',
+              stock_note='Third-party tables: @TBLWINTIPS and @TBLTWEAKHOUND list Manual (third-party table).')),
+        ('stock_disagree naming one source',
+         good(stock_disagree='Third-party tables: @TBLWINTIPS lists Manual; they disagree.')),
+        ('stock_disagree together with a stock value',
+         good(stock='3/-', stock_basis='published', stock_note='@IOT: Manual. The page names no build.',
+              stock_disagree='@TBLWINTIPS and @TBLTWEAKHOUND disagree.')),
         ('published stock note without "names no build"',
          good(stock='3/-', stock_basis='published', stock_note='@IOT says the default is Manual.')),
         ('stock on a driver without sysok',
@@ -454,6 +486,9 @@ def selftest():
     expect(all(len(l.split('\t')) == FIELDS for l in text.splitlines() if l.startswith('K\t')), 'every K line has %d fields' % FIELDS)
     expect('@' not in ''.join(l.split('\t')[17] for l in text.splitlines() if l.startswith('K\t')),
            'every @KEY in basis notes is expanded')
+    srcs = {l.split('\t')[26] for l in text.splitlines() if l.startswith('K\t')}
+    expect(srcs <= {'', 'microsoft', 'table', 'disagree'} and 'table' in srcs and 'disagree' in srcs,
+           'stock_src is microsoft, table, disagree or empty, and the KB has table and disagree rows')
     print('services genkb selftest: %s (%d failed)' % ('FAIL' if fails else 'PASS', fails))
     return 1 if fails else 0
 

@@ -6,7 +6,7 @@
 namespace hx::services {
 
 namespace {
-constexpr size_t kKbFields = 26;
+constexpr size_t kKbFields = 27;   // 26 before stock_src (fix/svcdrv-stock): still read
 constexpr size_t kMaxKb = 16u << 20;
 
 int Target(const std::wstring& s) {
@@ -41,7 +41,7 @@ bool Kb::Parse(const std::string& utf8, std::wstring* err) {
         } else if (f[0] == L"B" && f.size() >= 2) {
             build = f[1];
         } else if (f[0] == L"K") {
-            if (f.size() != kKbFields) {
+            if (f.size() != kKbFields && f.size() != kKbFields - 1) {
                 *err = L"services.db line " + std::to_wstring(ln) + L": K line has " + std::to_wstring(f.size()) +
                        L" fields, expected " + std::to_wstring(kKbFields);
                 return false;
@@ -77,6 +77,7 @@ bool Kb::Parse(const std::string& utf8, std::wstring* err) {
             e.hw = f[23];
             e.contested = Unesc(f[24]);
             e.sources = Unesc(f[25]);
+            if (f.size() > 26) e.stockSrc = f[26];
             if (e.name.empty() || (e.kind != L"svc" && e.kind != L"drv")) {
                 *err = L"services.db line " + std::to_wstring(ln) + L": bad name or kind";
                 return false;

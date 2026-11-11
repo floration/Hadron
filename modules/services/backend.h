@@ -9,6 +9,7 @@
 
 #include "modules/services/hw.h"
 #include "modules/services/model.h"
+#include "modules/services/sxsstock.h"
 #include <atomic>
 #include <map>
 #include <memory>
@@ -56,6 +57,8 @@ public:
     virtual bool ReadHw(HwInfo* out) = 0;
     virtual std::wstring Build() = 0;         // "19045"
     virtual std::wstring MachineGuid() = 0;
+    // The reader for this PC's WinSxS component manifests (Windows-stock values); null when there is none.
+    virtual std::unique_ptr<SxsReader> MakeSxs() { return nullptr; }
     virtual void Arm() {}
     virtual void Disarm() {}
 };
@@ -117,8 +120,12 @@ public:
     bool ReadHw(HwInfo* out) override { *out = hw_; return hw_.ok; }
     std::wstring Build() override { return build_; }
     std::wstring MachineGuid() override { return machine_; }
+    // The fixture's sxs\ folder (hand-written XML manifests), when it has one.
+    std::unique_ptr<SxsReader> MakeSxs() override { return sxsDir_.empty() ? nullptr : MakeFakeSxsReader(sxsDir_); }
+    void SetSxsDir(std::wstring d) { sxsDir_ = std::move(d); }
 
 private:
+    std::wstring sxsDir_;
     SvcItem* Find(const std::wstring& name);
     std::vector<SvcItem> items_;
     HwInfo hw_;

@@ -24,6 +24,9 @@ struct KbEntry {
     int stock = -1;                    // Windows stock start type on the KB build; -1 = none
     int stockDelayed = 0;
     std::wstring stockBasis, stockNote;
+    // Where the stock value comes from: "microsoft" (learn.microsoft.com pages), "table" (two agreeing third-party
+    // tables), "disagree" (the tables disagree: stockNote says how, stock is -1), "" (measured, or none).
+    std::wstring stockSrc;
     std::wstring hw;                   // hardware hint: class:<Name>, svc:<name>, self, vmguest, hvhost
     std::wstring contested;            // sources on both sides (URLs expanded), empty when not contested
     std::wstring sources;              // number sources (text, kind, ref) when the text has marked numbers

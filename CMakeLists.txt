@@ -75,7 +75,8 @@ hadron_add_module(services NAME HadronServices DESC "Hadron Services: Windows se
 target_sources(mod_services PRIVATE modules/services/model.cpp modules/services/kb.cpp modules/services/hw.cpp
                                     modules/services/store.cpp modules/services/recovery.cpp modules/services/plan.cpp
                                     modules/services/backend_fake.cpp modules/services/backend_live.cpp
-                                    modules/services/ti.cpp modules/services/selftest.cpp)
+                                    modules/services/ti.cpp modules/services/selftest.cpp
+                                    modules/services/sxsstock.cpp)
 # The embedded services.db (RCDATA SERVICES_KB), an INTERFACE source as for bios.
 target_sources(mod_services INTERFACE "${HADRON_ROOT}/modules/services/resources/services.rc")
 set_property(SOURCE "${HADRON_ROOT}/modules/services/resources/services.rc" APPEND PROPERTY OBJECT_DEPENDS

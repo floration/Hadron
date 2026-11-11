@@ -1,11 +1,41 @@
 Plan: Default: Windows stock (Services)
 Source: default-stock:services
-Rows: 2 ticked, 0 unticked, 0 kept or protected; already set: 1
-Note: 3 of 110 items have a Windows stock value with a measured or published basis in Hadron's KB; the rest are left alone. Storage drivers never get a stock value: Windows sets those per PC.
+Rows: 6 ticked, 0 unticked, 4 kept or protected; already set: 87
+Note: Stock values come first from this PC's own WinSxS component manifests (build 19045.5737, Professional), cross-checked with Hadron's KB. Where they disagree, both are shown and nothing is applied.
+Note: 93 of 110 items have a Windows stock value from this PC's manifests or a measured or published basis in Hadron's KB; the rest are left alone. Storage drivers never get a stock value: Windows sets those per PC.
+Note: 4 more are shown and not applied: their sources disagree, only a setting default gives them, or Windows sets them at runtime.
 Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
+[x] DiagTrack  Disabled -> Auto  (4/- -> 2/-)
+    why: Windows stock start type from two agreeing third-party tables (they name no build)
+    basis: published -- Third-party tables: wintips.org's "Default Startup Type of Services on Windows 10 PRO OS" (third-party table) (https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf) (Windows 10 Pro, no version stated) lists "Automatic"; TweakHound's "Windows 10 Default Services v20H2" (third-party table) (https://tweakhound.com/?p=18808) (Windows 10 20H2) lists "Automatic". The two third-party tables agree. Neither is a capture of this release, so the value names no build; Hadron uses it as the Windows 10 stock value.
+[x] OneSyncSvc  Auto (delayed) -> Manual  (2/1 -> 3/1)
+    why: Windows stock start type from this PC's component manifests (build 19045.5737)
+    basis: owner-measured -- Windows stock start type read from this PC's WinSxS component manifests, Windows build 19045.5737 (Professional), from the component's serviceData start.
+[x] PcaSvc  Auto -> Manual  (2/- -> 3/-)
+    why: Windows stock start type from this PC's component manifests (build 19045.5737)
+    basis: owner-measured -- Windows stock start type read from this PC's WinSxS component manifests, Windows build 19045.5737 (Professional), from the component's serviceData start. Two agreeing third-party tables agree: Third-party tables: wintips.org's "Default Startup Type of Services on Windows 10 PRO OS" (third-party table) (https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf) (Windows 10 Pro, no version stated) lists "Manual"; TweakHound's "Windows 10 Default Services v20H2" (third-party table) (https://tweakhound.com/?p=18808) (Windows 10 20H2) lists "Manual". The two third-party tables agree. Neither is a capture of this release, so the value names no build; Hadron uses it as the Windows 10 stock value.
 [x] TimeBrokerSvc  Disabled -> Manual  (4/- -> 3/-)
     why: Windows stock start type from a Microsoft page (it names no build)
     basis: published -- Microsoft's Task Scheduler startup failure page (https://learn.microsoft.com/en-us/troubleshoot/windows-client/system-management-components/task-scheduler-service-not-start) (supported Windows client versions) says to check that its Start value "is set to 3 by default" (Manual). The page names no build; Hadron uses it as the Windows 10 stock value.
 [x] WSearch  Manual -> Auto (delayed)  (3/- -> 2/1)
     why: Windows stock start type from a Microsoft page (it names no build)
     basis: published -- Microsoft's Windows Search performance page (https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/windows-search-performance-issues) (supported Windows client versions): "The service should have the following configuration", Status Running and "Startup Type: Automatic (Delayed Start)". That is the setting the page expects; the page names no build. Hadron uses it as the Windows 10 stock value.
+[x] XblGameSave  Disabled -> Manual  (4/- -> 3/-)
+    why: Windows stock start type from two agreeing third-party tables (they name no build)
+    basis: published -- Third-party tables: wintips.org's "Default Startup Type of Services on Windows 10 PRO OS" (third-party table) (https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf) (Windows 10 Pro, no version stated) lists "Manual (Trigger Start)"; TweakHound's "Windows 10 Default Services v20H2" (third-party table) (https://tweakhound.com/?p=18808) (Windows 10 20H2) lists "Manual (Trigger Start)". The two third-party tables agree. Neither is a capture of this release, so the value names no build; Hadron uses it as the Windows 10 stock value.
+[-] dmwappushservice  Manual -> Manual  (3/- -> 3/-)
+    Not applied: Windows can set this start type at runtime from the hardware or software it finds, so no file or table value is reliable for this PC; two agreeing third-party tables say Manual
+    why: Windows stock start type: not applied
+    basis: not applied -- KB: Third-party tables: wintips.org's "Default Startup Type of Services on Windows 10 PRO OS" (third-party table) (https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf) (Windows 10 Pro, no version stated) lists "Manual (Trigger Start)"; TweakHound's "Windows 10 Default Services v20H2" (third-party table) (https://tweakhound.com/?p=18808) (Windows 10 20H2) lists "Manual (Trigger Start)". The two third-party tables agree. Neither is a capture of this release, so the value names no build; Hadron uses it as the Windows 10 stock value.
+[-] DPS  Auto (delayed) -> Auto (delayed)  (2/1 -> 2/1)
+    Not applied: only a configuration-setting default in this PC's manifests gives Auto (delayed), and such defaults can be Server values; two agreeing third-party tables say Auto
+    why: Windows stock start type: not applied
+    basis: not applied -- Manifests: Auto (delayed), read from this PC's WinSxS component manifests, Windows build 19045.5737 (Professional) (a configuration-setting default). KB: Third-party tables: wintips.org's "Default Startup Type of Services on Windows 10 PRO OS" (third-party table) (https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf) (Windows 10 Pro, no version stated) lists "Automatic"; TweakHound's "Windows 10 Default Services v20H2" (third-party table) (https://tweakhound.com/?p=18808) (Windows 10 20H2) lists "Automatic". The two third-party tables agree. Neither is a capture of this release, so the value names no build; Hadron uses it as the Windows 10 stock value.
+[-] stisvc  Manual -> Manual  (3/- -> 3/-)
+    Not applied: Windows can set this start type at runtime from the hardware or software it finds, so no file or table value is reliable for this PC (this PC's manifests say Manual); two agreeing third-party tables say Manual
+    why: Windows stock start type: not applied
+    basis: not applied -- Manifests: Manual, read from this PC's WinSxS component manifests, Windows build 19045.5737 (Professional) (the component's serviceData start). KB: Third-party tables: wintips.org's "Default Startup Type of Services on Windows 10 PRO OS" (third-party table) (https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf) (Windows 10 Pro, no version stated) lists "Manual"; TweakHound's "Windows 10 Default Services v20H2" (third-party table) (https://tweakhound.com/?p=18808) (Windows 10 20H2) lists "Manual". The two third-party tables agree. Neither is a capture of this release, so the value names no build; Hadron uses it as the Windows 10 stock value.
+[-] SysMain  Auto -> Manual  (2/- -> 3/-)
+    Not applied: sources disagree: this PC's manifests say Manual; two agreeing third-party tables say Auto
+    why: Windows stock start type: not applied
+    basis: not applied -- Manifests: Manual, read from this PC's WinSxS component manifests, Windows build 19045.5737 (Professional) (the component's serviceData start). KB: Third-party tables: wintips.org's "Default Startup Type of Services on Windows 10 PRO OS" (third-party table) (https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf) (Windows 10 Pro, no version stated) lists "Automatic"; TweakHound's "Windows 10 Default Services v20H2" (third-party table) (https://tweakhound.com/?p=18808) (Windows 10 20H2) lists "Automatic". The two third-party tables agree. Neither is a capture of this release, so the value names no build; Hadron uses it as the Windows 10 stock value.

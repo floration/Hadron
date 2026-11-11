@@ -377,6 +377,7 @@ public:
     std::wstring Build() override {
         return RegString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"CurrentBuildNumber");
     }
+    std::unique_ptr<SxsReader> MakeSxs() override { return MakeLiveSxsReader(); }
     std::wstring MachineGuid() override {
         return RegString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", L"MachineGuid", RRF_SUBKEY_WOW6464KEY);
     }

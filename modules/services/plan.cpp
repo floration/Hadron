@@ -304,6 +304,103 @@ std::wstring BuildNumber(const std::wstring& build) {
     return parts.size() >= 3 ? parts[2] : build;
 }
 
+StockPick StockFor(const SvcItem& s, const Ctx& c) {
+    StockPick p;
+    if (s.cfgUnknown || IsStorageDriver(s.name)) return p;
+    const bool drv = IsDriverType(s.type);
+    const KbEntry* e = c.kb ? c.kb->Find(s.name) : nullptr;
+    const bool kbFor = e && e->ForBuild(c.build);
+    const bool hasK = kbFor && e->stock >= 0;
+    const bool kDis = kbFor && e->stockSrc == L"disagree";
+    const StartCfg k{hasK ? e->stock : 3, hasK && e->stock == 2 ? e->stockDelayed : -1};
+    const SxsValue* m = c.sxs ? c.sxs->Find(s.name) : nullptr;
+    if (drv && !(e && e->sysok)) m = nullptr;   // drivers: a manifest value only with the KB's sysok (guard unchanged)
+    auto same = [](const StartCfg& a, const StartCfg& b) { return a.start == b.start && (a.start != 2 || a.Delayed() == b.Delayed()); };
+    auto label = [](const StartCfg& x) { return StartLabel(x, false); };
+    std::wstring kbText, kbShort;
+    if (hasK || kDis) {
+        if (e->stockBasis == L"owner-measured") { kbText = L"Hadron's KB (measured on build " + c.build + L")"; kbShort = L"measured by Hadron's author"; }
+        else if (e->stockSrc == L"table" || kDis) { kbText = L"two agreeing third-party tables"; kbShort = L"published; two agreeing third-party tables, no build named"; }
+        else { kbText = L"a Microsoft page"; kbShort = L"published; the page names no build"; }
+    }
+    std::wstring cond, mShort;
+    StartCfg mv;
+    if (m) {
+        mv = m->Cfg();
+        cond = L"read from this PC's WinSxS component manifests, Windows build " + c.sxs->build +
+               (c.sxs->edition.empty() ? std::wstring() : L" (" + c.sxs->edition + L")");
+        mShort = L"this PC's component manifests, build " + c.sxs->build;
+    }
+    auto show = [&](const std::wstring& why) {
+        p.kind = StockPick::Show;
+        p.why = why;
+        if (m) { p.cfg = mv; p.hasCfg = true; }
+        else if (hasK) { p.cfg = k; p.hasCfg = true; }
+        p.value = L"not applied: " + why;
+        p.basisNote = (m ? L"Manifests: " + label(mv) + L", " + cond + L" (" + SxsSrcText(m->StartSrc()) + L"). " : std::wstring()) +
+                      (hasK || kDis ? L"KB: " + e->stockNote : std::wstring());
+        return p;
+    };
+    if (SxsRuntimeDependent(s.name) && (m || hasK))
+        return show(L"Windows can set this start type at runtime from the hardware or software it finds, so no file or table value is reliable for this PC" +
+                    (m ? L" (this PC's manifests say " + label(mv) + L")" : std::wstring()) +
+                    (hasK ? L"; " + kbText + L" say" + (kbText == L"a Microsoft page" || kbText.rfind(L"Hadron", 0) == 0 ? L"s " : L" ") + label(k) : std::wstring()));
+    if (m && !m->LowConfidence()) {
+        if (hasK && !same(mv, k))
+            return show(L"sources disagree: this PC's manifests say " + label(mv) + L"; " + kbText + L" say" +
+                        (kbText == L"two agreeing third-party tables" ? L" " : L"s ") + label(k));
+        if (kDis)
+            return show(L"sources disagree: this PC's manifests say " + label(mv) + L"; the third-party tables disagree with each other");
+        p.kind = StockPick::Apply;
+        p.cfg = mv;
+        p.basis = L"owner-measured";
+        p.basisNote = L"Windows stock start type " + cond + L", from " + SxsSrcText(m->StartSrc()) + L"." +
+                      (hasK ? L" " + std::wstring(kbText == L"two agreeing third-party tables" ? L"Two agreeing third-party tables agree"
+                                                    : kbText == L"a Microsoft page" ? L"A Microsoft page agrees" : L"Hadron's KB agrees") +
+                                  L": " + e->stockNote
+                            : std::wstring());
+        p.reason = L"Windows stock start type from this PC's component manifests (build " + c.sxs->build + L")";
+        p.value = label(mv) + L" (" + mShort + (hasK ? L"; " + kbText + L" agree" + (kbText == L"two agreeing third-party tables" ? L"" : L"s") : std::wstring()) + L")";
+        return p;
+    }
+    if (m) {   // low confidence: a configuration-setting default alone
+        if (hasK && same(mv, k)) {
+            p.kind = StockPick::Apply;
+            p.cfg = mv;
+            p.basis = e->stockBasis;
+            p.basisNote = L"Windows stock start type " + cond + L", from a configuration-setting default (low confidence: such "
+                          L"defaults can be Server values), applied because " + kbText + L" agree" +
+                          (kbText == L"two agreeing third-party tables" ? L"" : L"s") + L": " + e->stockNote;
+            p.reason = L"Windows stock start type from this PC's component manifests (a setting default) and " + kbText;
+            p.value = label(mv) + L" (" + mShort + L", a setting default; " + kbShort + L")";
+            return p;
+        }
+        return show(L"only a configuration-setting default in this PC's manifests gives " + label(mv) +
+                    L", and such defaults can be Server values; " +
+                    (hasK ? kbText + L" say" + (kbText == L"two agreeing third-party tables" ? L" " : L"s ") + label(k)
+                          : std::wstring(L"no table confirms it")));
+    }
+    if (hasK) {
+        p.kind = StockPick::Apply;
+        p.cfg = StartCfg{e->stock, e->stock == 2 ? e->stockDelayed : -1};
+        p.basis = e->stockBasis;
+        p.basisNote = e->stockNote;
+        // kb-audit svcdrv-kb M2: only a measured value is a fact about this build; the published ones name no build.
+        p.reason = e->stockBasis == L"owner-measured" ? L"Windows stock start type, measured on build " + c.build
+                   : e->stockSrc == L"table" ? std::wstring(L"Windows stock start type from two agreeing third-party tables (they name no build)")
+                                             : std::wstring(L"Windows stock start type from a Microsoft page (it names no build)");
+        p.value = label(p.cfg) + L" (" + kbShort + L")";
+        return p;
+    }
+    if (kDis) {
+        p.kind = StockPick::Show;
+        p.why = L"the third-party tables disagree";
+        p.value = L"not applied: the third-party tables disagree";
+        p.basisNote = e->stockNote;
+    }
+    return p;
+}
+
 Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const Ctx& c) {
     Plan p;
     p.kind = PlanKind::Preset;
@@ -373,32 +470,49 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
         // R20 (proxy Q2): never a bare "Nothing to change." that reads as "already at stock".
         const std::wstring none = L"Hadron has no Windows-stock data for build " + (c.build.empty() ? std::wstring(L"(unknown)") : c.build) +
                                   L" yet: nothing will be changed.";
-        if (c.build != L"19045") {
+        const bool sxsOk = c.sxs && c.sxs->ok;
+        if (c.build != L"19045" && !sxsOk) {
             p.notes.push_back(none);
+            if (c.sxs && !c.sxs->err.empty()) p.notes.push_back(L"This PC's component manifests could not be read: " + c.sxs->err);
             p.emptyText = none;
             return p;
         }
-        int withStock = 0, total = 0;
+        if (sxsOk)
+            p.notes.push_back(L"Stock values come first from this PC's own WinSxS component manifests (build " + c.sxs->build +
+                              (c.sxs->edition.empty() ? std::wstring() : L", " + c.sxs->edition) +
+                              L"), cross-checked with Hadron's KB. Where they disagree, both are shown and nothing is applied.");
+        else if (c.sxs && !c.sxs->err.empty())
+            p.notes.push_back(L"This PC's component manifests could not be read, so only Hadron's KB is used: " + c.sxs->err);
+        int withStock = 0, total = 0, shown = 0;
         for (auto& s : items) {
             if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
             total++;
             if (s.cfgUnknown) continue;   // R2: CheckGuard would refuse it anyway
-            const KbEntry* e = c.kb ? c.kb->Find(s.name) : nullptr;
-            if (!e || e->stock < 0 || !e->ForBuild(c.build) || IsStorageDriver(s.name)) continue;
-            withStock++;
-            StartCfg t{e->stock, e->stock == 2 ? e->stockDelayed : s.cfg.delayed};
-            if (SameStart(s.cfg, t)) { p.alreadySet++; continue; }
+            StockPick k = StockFor(s, c);
+            if (k.kind == StockPick::None || (k.kind == StockPick::Show && !k.hasCfg)) continue;
             PlanRow r;
             r.name = s.name; r.display = s.display; r.driver = IsDriverType(s.type);
             r.before = s.cfg; r.deps = s.deps; r.group = s.group;
+            StartCfg t{k.cfg.start, k.cfg.start == 2 ? k.cfg.delayed : s.cfg.delayed};
+            if (k.kind == StockPick::Show) {
+                shown++;
+                r.op = OpTo(s.cfg, t);
+                r.after = AfterOf(s.cfg, r.op);
+                r.reason = L"Windows stock start type: not applied";
+                r.basis = L"not applied";
+                r.basisNote = k.basisNote;
+                r.blocked = L"Not applied: " + k.why;
+                r.include = false; r.canToggle = false;
+                p.rows.push_back(std::move(r));
+                continue;
+            }
+            withStock++;
+            if (SameStart(s.cfg, t)) { p.alreadySet++; continue; }
             r.op = OpTo(s.cfg, t);
             r.after = AfterOf(s.cfg, r.op);
-            // kb-audit svcdrv-kb M2: only a measured value is a fact about this build; the published ones name no build.
-            r.reason = e->stockBasis == L"owner-measured"
-                           ? L"Windows stock start type, measured on build " + c.build
-                           : std::wstring(L"Windows stock start type from a Microsoft page (it names no build)");
-            r.basis = e->stockBasis;
-            r.basisNote = e->stockNote;
+            r.reason = k.reason;
+            r.basis = k.basis;
+            r.basisNote = k.basisNote;
             Guard g = CheckGuard(s, c);
             // DECISIONS 2026-11-11 (proxy, Small fixes): a KB `never` means "not in a preset level", not "never restore
             // to a sourced Microsoft default"; never-touch, protected and the named never-preset list still block.
@@ -409,15 +523,20 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
             p.rows.push_back(std::move(r));
         }
-        if (withStock == 0) {   // reviewer F1: this build has stock values, only not on this tab
-            const std::wstring tabNone = L"Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed.";
+        if (withStock == 0 && shown == 0) {   // reviewer F1: this build has stock values, only not on this tab
+            const std::wstring tabNone = sxsOk ? L"Hadron has no Windows stock value for any item on this tab: nothing will be changed."
+                                               : L"Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed.";
             p.notes.push_back(tabNone);
             p.emptyText = tabNone;
             return p;
         }
         p.notes.push_back(std::to_wstring(withStock) + L" of " + std::to_wstring(total) +
-                          L" items have a Windows stock value with a measured or published basis in Hadron's KB; the rest are left alone. "
+                          (sxsOk ? L" items have a Windows stock value from this PC's manifests or a measured or published basis in Hadron's KB; the rest are left alone. "
+                                 : L" items have a Windows stock value with a measured or published basis in Hadron's KB; the rest are left alone. ") +
                           L"Storage drivers never get a stock value: Windows sets those per PC.");
+        if (shown)
+            p.notes.push_back(std::to_wstring(shown) + L" more are shown and not applied: their sources disagree, only a setting "
+                              L"default gives them, or Windows sets them at runtime.");
     }
     if (std::wstring hn = HwNote(tab, c); !hn.empty()) p.notes.push_back(hn);
     DependencyCheck(&p, items);
