@@ -31,6 +31,7 @@
 #include <atomic>
 #include <cmath>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
@@ -1827,9 +1828,20 @@ bool ServicesModule::SetListColumns(int widthPx) {
                              {L"start", L"Start type", 90, 0}, {L"kb", L"Hadron", 84, 0}, {L"basis", L"Basis", 76, 2},
                              {L"changed", L"vs first", 70, 3}, {L"company", L"Company", 100, 5},
                              {L"group", L"Load group", 116, 4}, {L"type", L"Type", 96, 1}};
-    const int kFlexMin = 100;
-    const C* all = tab_ == TAB_SERVICES ? kSvc : kDrv;
-    const size_t n = tab_ == TAB_SERVICES ? sizeof(kSvc) / sizeof(kSvc[0]) : sizeof(kDrv) / sizeof(kDrv[0]);
+    // Console keeps the build's table as it was (its Consolas cells are wider; the Console design owns them).
+    static const C kSvcCon[] = {{L"name", L"Name", 156, 0}, {L"display", L"Display name", 0, 0}, {L"state", L"State", 70, 0},
+                                {L"start", L"Start type", 120, 0}, {L"changed", L"vs first", 74, 5}, {L"kb", L"Hadron", 80, 0},
+                                {L"basis", L"Basis", 80, 4}, {L"type", L"Type", 104, 3}, {L"account", L"Account", 130, 2},
+                                {L"company", L"Company", 140, 1}};
+    static const C kDrvCon[] = {{L"name", L"Name", 130, 0}, {L"display", L"Display name", 0, 0}, {L"state", L"State", 70, 0},
+                                {L"start", L"Start type", 96, 0}, {L"changed", L"vs first", 74, 5}, {L"kb", L"Hadron", 80, 0},
+                                {L"basis", L"Basis", 80, 4}, {L"type", L"Type", 100, 3}, {L"group", L"Load group", 130, 2},
+                                {L"company", L"Company", 140, 1}};
+    const bool con = Console();
+    const int kFlexMin = con ? 110 : 100;
+    const bool svc = tab_ == TAB_SERVICES;
+    const C* all = con ? (svc ? kSvcCon : kDrvCon) : (svc ? kSvc : kDrv);
+    const size_t n = con ? (svc ? std::size(kSvcCon) : std::size(kDrvCon)) : (svc ? std::size(kSvc) : std::size(kDrv));
     std::vector<bool> on(n, true);
     int fixed = 0;
     for (size_t i = 0; i < n; i++) fixed += all[i].w;
