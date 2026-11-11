@@ -48,6 +48,7 @@ jobs:
           export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
           wineboot -i || true
           wine build/HadronHello.exe --selftest
+          wine build/HadronHello.exe --selftest-update
           wine build/HadronUikit.exe --selftest
           python3 tests/fixtures/make_diskmap_tree.py dmfix
           wine build/HadronDiskMap.exe --selftest
@@ -116,6 +117,7 @@ jobs:
         shell: pwsh
         run: |
           build\HadronHello.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronHello.exe --selftest-update; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronUikit.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tests\fixtures\make_diskmap_tree.py dmfix; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronDiskMap.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }

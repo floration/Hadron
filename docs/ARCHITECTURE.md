@@ -131,8 +131,30 @@ off-by-default toggle. The old `Admin::Optional` / `RequestElevation()` / single
   - Antivirus heuristics may flag static MinGW binaries that read firmware or volume handles. Mitigation: full
     VERSIONINFO, no packers, and false-positive submissions when needed.
 
+## Updates (`core/sys/update.h`)
+- **Ask once.** On the first interactive start (no `[update] auto` in settings.ini), the status bar asks
+  "Update Hadron automatically from GitHub releases?" with Yes/No. Nothing is fetched until the user answers.
+- **Updates chip.** Click toggles On/Off; right-click checks now; after an install it reads "Restart to update"
+  (restarts with the same arguments, after every module's `CanClose`). With auto on, a check runs at start, at
+  most once per 20 hours (`[update] last`).
+- **What it does.** On a Worker thread: `GET api.github.com/repos/floration/Hadron/releases/latest` (WinHTTP,
+  HTTPS, redirects only to github.com / *.githubusercontent.com). It picks the asset named like the running exe and
+  checks it against the release's `SHA256SUMS`, the `MZ` header, and its own VERSIONINFO (must equal the tag).
+  Then it swaps: the running exe moves to `<exe dir>\.hadron-old\<stamp>\` (kept, never deleted), and the new
+  file moves into place. Same folder, so no copy; on failure the old exe is moved back.
+- **Each exe updates only itself**, so the suite and each standalone you use update when you run them.
+- **Dev builds** (built without `-DHADRON_VERSION`) only report the latest release; they never replace themselves.
+- **Never** in `--selftest` or `--screenshot`. `--selftest-update` runs the offline checks (JSON, versions, hosts,
+  SHA256SUMS, the swap in a temp folder).
+- **Trust.** HTTPS plus SHA256SUMS from the same release catches corruption and a wrong asset, not a compromised
+  GitHub account; the exes are not code-signed.
+- **Releasing.** Push a tag `vX.Y.Z` on a commit on main; `.github/workflows/release.yml` builds with that version
+  and publishes the four exes and `SHA256SUMS`.
+
 ## Settings, logs, crashes
 - Settings: `%LOCALAPPDATA%\Hadron\settings.ini`, or portable mode when `Hadron.ini` sits next to the exe.
+  `Save` writes only the keys this process changed, merged into the file on disk under a mutex, so several
+  exes can share it.
 - Logs: `%LOCALAPPDATA%\Hadron\logs\` (session log).
 - Crash dumps: `SetUnhandledExceptionFilter` + `MiniDumpWriteDump`.
 - Exports go through a Save dialog. Never write "next to the exe", which fails when run from inside a zip.
