@@ -1,7 +1,7 @@
 Plan: Pure bloat removal (Services)
 Source: preset:bloat:services
 Rows: 15 ticked, 0 unticked, 0 kept or protected; already set: 2
-Note: 3 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
+Note: 2 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
 Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
 [x] autotimesvc  Manual -> Disabled  (3/- -> 4/-)
     why: clock from a cellular network

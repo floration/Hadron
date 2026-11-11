@@ -7,7 +7,7 @@ The KB has three files:
 
 Commands:
 ```
-python3 tools/services/genkb.py --selftest          # 62 must-fail cases, 17 ok texts, a warning case, the committed KB
+python3 tools/services/genkb.py --selftest          # 65 must-fail cases, 17 ok texts, 3 marker cases, a warning case, the committed KB
 python3 tools/services/genkb.py                     # regenerates modules/services/data/services.db
 python3 tools/services/genkb.py /tmp/services.db    # writes elsewhere (CI then runs cmp against the committed file)
 ```
@@ -44,12 +44,33 @@ Hadron's own inference.
 | `stock`, `stock_basis`, `stock_note` | The Windows stock value (`"2/1"`, `"3/-"` or an int). Needs an `owner-measured` or `published` basis. Never set on storage drivers |
 | `builds` | Five-digit builds the entry is for. The default is `BUILD` (19045) |
 
+The Windows stock table:
+- It is `STOCK` at the end of `kb.py`: `(name, "start/delayed", note)` rows that fill `stock`, `stock_basis`
+  (`published`) and `stock_note` on the entry of that name. Each row needs an entry (the file asserts it).
+- A row goes in only when a Microsoft page for Windows client states that service's default or expected start
+  type. The note quotes it and says what the page applies to. "Automatic" without "(Delayed Start)" is written
+  `2/0` (the plan then clears a lingering DelayedAutostart), so a page that doesn't say which one needs a
+  "(reasoning)" clause in the note.
+- genkb fails a `published` stock note that cites anything but learn.microsoft.com pages, or that doesn't say its
+  page "names no build": the module words every published stock value as "from a Microsoft page (it names no
+  build)". A driver with a stock value needs `sysok`.
+- Not usable as client stock: the `@IOT` and `@PERUSER` "Startup Type (Default)" columns ("the current version of
+  Windows"; they disagree with each other), `@WS16` (Server 2016) and BITS (its page gives a start type that
+  depends on queued jobs). `docs/pipeline/fixes/svcdrv-kb.md` has the details.
+- Build numbers are not on the digit allow-list, so notes say "the Windows 10 stock value", not the build.
+
 Sources:
 - They are the `SOURCES` keys. Each carries its `r3 [n]` id from
   `docs/pipeline/svcdrv/research/r3-documentation.md`.
 - Don't add a URL that isn't in r3 without reading the page first. The driver pages (`HIDKBM`, `USBHOST`,
   `USBCLASSES`, `STORPORT`, `STORNVME`, `STORAHCI`, `FLTMGR`, `BASICDISPLAY`, `USBAUDIO2`) were added in Finalize
-  and read on 2026-11-11; `docs/pipeline/svcdrv/finalize/kb.md` lists what each one says.
+  and read on 2026-11-11; `docs/pipeline/svcdrv/finalize/kb.md` lists what each one says. The stock pages
+  (`WUERRCLIENT`, `W32TWG`, `TASKSCHED`, `SEARCHPERF`), the driver pages `UVC`, `USBPRINT`, `RDBSS`, `LLTDCSP`,
+  `HVNET` and the OEM pages (`MSIBOARD`, `INTELLMS`, `INTELDAL`, `FN*`) were added in fix/svcdrv-kb;
+  `docs/pipeline/fixes/svcdrv-kb.md` lists what each says.
+- OEM entries are explanation-only (third-party items are never in a preset). The `FN*` sources are file.net, a
+  third-party process database (not the vendor; its pages mix its own write-ups with user ratings): cite them for a service's name and folder only, never for what
+  it does, and keep the basis `reasoning`.
 - In text, `@KEY` becomes the source's label. In basis and contested notes it becomes "label (url)".
 - Every note says which OS the source was written for (IoT Enterprise, Server 2016, VDI), because none of them
   is about a gaming desktop.
@@ -68,7 +89,8 @@ Numbers:
   can't be listed that way, so the gate also rejects counts and units in words (`forty processes`, `two seconds`,
   `one second`, `ten percent`), any size word (`a gigabyte`) and fractions (`half`, `a third`, `a quarter`).
   "one" on its own is not a count ("one instance per user"); write instructions in words ("restart three times").
-- A number with a basis is marked `[[shown|published|@KEY]]`, as in the bios KB.
+- A number with a basis is marked `[[shown|published|@KEY]]`, as in the bios KB. The db gets the shown text (the
+  module never renders markers); genkb fails if `[[` or `]]` would reach a K line.
 - The KB needs at least 60 entries; there is no upper bound.
 
 ## services.db format

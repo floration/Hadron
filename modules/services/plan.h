@@ -37,6 +37,7 @@ struct Ctx {
 struct Guard {
     bool neverTouch = false;    // no preset, no single-item change
     bool neverPreset = false;   // single item allowed where Windows allows
+    bool kbNever = false;       // neverPreset only because the KB entry is explanation-only (`never`)
     std::wstring reason;
 };
 Guard CheckGuard(const SvcItem& s, const Ctx& c);

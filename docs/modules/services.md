@@ -18,12 +18,16 @@ it was designed.
   - current, first-seen and Windows-stock configuration; triggers, dependencies, dependents and failure actions;
   - protection (PPL, the security-descriptor check, Tamper Protection);
   - the service's own registered description, labelled as Windows' text, not Hadron's.
-  Third-party items get facts only: path, Company (the file's own claim) and start type.
+  Third-party items get facts only: path, Company (the file's own claim) and start type. A few OEM services on
+  the owner's board (MSI Center, Mystic Light, Realtek audio, Intel LMS and JHI) have explanation-only entries that
+  say what is and isn't documented; they are never in a preset.
 - **Presets, the same levels on both tabs:**
   - **Default: as first seen**: back to how Hadron first saw this PC (dated). That is not Windows' default, and the
     label says so.
-  - **Default: Windows stock**: says "no data for this build yet" and changes nothing (no published client source
-    for stock start types exists; a follow-up idea).
+  - **Default: Windows stock**: restores only the items with a sourced stock value: five services (msiserver,
+    W32Time, TimeBrokerSvc, WSearch, BrokerInfrastructure), each quoted from a Microsoft troubleshooting page that
+    names no build. No driver has one, so on the Drivers tab it says so and changes nothing. A full 19045 table needs
+    an owner-measured capture of a clean install (`docs/pipeline/fixes/svcdrv-kb.md` §1).
   - **Pure bloat removal**, **Stripped** and **Minimum**, cumulative (an item in a level is in every stricter
     level unless that level names another target). Stripped removes only hardware that was never seen; Minimum
     ticks rows whose use can't be detected, Stripped leaves them unticked; hot-plug classes are never ticked. Membership is stock
@@ -78,7 +82,7 @@ The safety mechanics, file formats and every resolved ambiguity are in `docs/des
 | `modules/services/recovery.*` | The restore scripts, `.reg` files and a stored-only zip writer (rule 3) |
 | `modules/services/ti.*` | TrustedInstaller impersonation (module-local; moving it to core is a lead follow-up) |
 | `modules/services/selftest.cpp`, `cli.h`, `standalone.cpp` | `--selftest` (282 checks), `--dump-plan`, and `--live-test` (test-hooks build only) |
-| `tools/services/kb.py`, `genkb.py` | KB source and the rule-7 gate (`tools/services/README.md`) |
+| `tools/services/kb.py`, `genkb.py` | KB source (289 entries) and the rule-7 gate (`tools/services/README.md`) |
 | `tests/fixtures/services/` | The fixture machine plus `delayedlinger`, `forged`, `interrupted` and `multi` regression cases |
 | `tests/golden/services/` | 11 plan goldens and the generated restore scripts |
 | `tests/tools/services_check.sh` | The Wine acceptance run CI uses |

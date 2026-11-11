@@ -60,6 +60,32 @@ SOURCES = {
     'FLTMGR': 'https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/filter-manager-concepts',
     'BASICDISPLAY': 'https://learn.microsoft.com/en-us/windows-hardware/drivers/display/microsoft-basic-display-driver',
     'USBAUDIO2': 'https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/usb-2-0-audio-drivers',
+    # Windows-stock start types (fix/svcdrv-kb, read 2026-11-11). Microsoft client pages that state one service's
+    # default or expected start type; see STOCK at the end of this file.
+    'WUERRCLIENT': 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/'
+                   'common-windows-update-errors',
+    'W32TWG': 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/active-directory/w32time-not-start-on-workgroup',
+    'TASKSCHED': 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/system-management-components/'
+                 'task-scheduler-service-not-start',
+    'SEARCHPERF': 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/'
+                  'windows-search-performance-issues',
+    # Driver pages added in fix/svcdrv-kb (read 2026-11-11).
+    'UVC': 'https://learn.microsoft.com/windows-hardware/drivers/stream/usb-video-class-driver-overview',
+    'USBPRINT': 'https://learn.microsoft.com/en-us/windows-hardware/drivers/print/usb-printing',
+    'RDBSS': 'https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/the-rdbss-driver-and-library',
+    'LLTDCSP': 'https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-linklayertopologydiscovery',
+    'HVNET': 'https://learn.microsoft.com/en-us/windows-hardware/drivers/network/overview-of-hyper-v',
+    # OEM (fix/svcdrv-kb, read 2026-11-11). Vendor pages where one exists; the file.net pages are a third-party process
+    # database (not the vendor; its pages mix its own write-ups with user ratings), cited only for a service's name
+    # and folder, never for what it does.
+    'MSIBOARD': 'https://www.msi.com/Motherboard/PRO-Z790-P-WIFI/Specification',
+    'INTELLMS': 'https://software.intel.com/sites/manageability/AMT_Implementation_and_Reference_Guide/WordDocuments/'
+                'gloss_lms.htm',
+    'INTELDAL': 'https://www.intel.com/content/www/us/en/docs/dynamic-application-loader/developer-guide/1-0/'
+                'host-interface-service.html',
+    'FNMSICENTER': 'https://www.file.net/process/msi_central_service.exe.html',
+    'FNMYSTIC': 'https://www.file.net/process/mystic_light_service.exe.html',
+    'FNRTKAUD': 'https://www.file.net/process/rtkauduservice64.exe.html',
 }
 
 # How each source reads in running text. In basis and contested notes the URL follows in parentheses.
@@ -90,6 +116,21 @@ LABELS = {
     'FLTMGR': 'Microsoft\'s Filter Manager page',
     'BASICDISPLAY': 'Microsoft\'s Basic Display Driver page',
     'USBAUDIO2': 'Microsoft\'s USB Audio 2.0 drivers page',
+    'WUERRCLIENT': 'Microsoft\'s Windows Update errors page (Windows client)',
+    'W32TWG': 'Microsoft\'s "W32Time doesn\'t start on a workgroup computer" page',
+    'TASKSCHED': 'Microsoft\'s Task Scheduler startup failure page',
+    'SEARCHPERF': 'Microsoft\'s Windows Search performance page',
+    'UVC': 'Microsoft\'s USB Video Class driver page',
+    'USBPRINT': 'Microsoft\'s USB printing page',
+    'RDBSS': 'Microsoft\'s RDBSS driver page',
+    'LLTDCSP': 'Microsoft\'s Link-Layer Topology Discovery policy page',
+    'HVNET': 'Microsoft\'s Hyper-V networking overview',
+    'MSIBOARD': 'MSI\'s specification page for the MSI PRO Z790-P WIFI',
+    'INTELLMS': 'Intel\'s AMT reference guide (LMS glossary entry)',
+    'INTELDAL': 'Intel\'s DAL developer guide (Host Interface Service)',
+    'FNMSICENTER': 'file.net\'s MSI_Central_Service.exe page (third-party)',
+    'FNMYSTIC': 'file.net\'s Mystic_Light_Service.exe page (third-party)',
+    'FNRTKAUD': 'file.net\'s RtkAudUService64.exe page (third-party)',
 }
 
 ENTRIES = []
@@ -1270,3 +1311,194 @@ drv('hvservice', 'Hypervisor support driver',
     'Memory Integrity). The boot loader starts the hypervisor itself (reasoning).',
     'Features that use the hypervisor may fail (reasoning, not tested). Hadron never changes it while the hypervisor '
     'is running.')
+
+
+# ---- fix/svcdrv-kb: the rest of the KB (7-finalize.md follow-ups 1-3; finalize/kb.md §3b) -------------------------
+# All explanation-only (`never`): no preset, plan row or tick changes.
+
+# Fax: on the @IOT page with a rating but no description, and not on the @WS16 list.
+E('Fax', 'svc', 'Fax', 'Sends and receives faxes through a fax modem or a network fax server (reasoning, from its '
+                       'name and the description Windows registers for it).',
+  if_off='Windows Fax and Scan can\'t send or receive faxes (reasoning).',
+  basis='reasoning', basis_note='@IOT lists Fax and rates it "OK to disable" (Windows 10/11 IoT Enterprise) but gives '
+                                'it no description; @WS16 does not list it. What it does is reasoning.', never=True)
+
+# Drivers left out in finalize/kb.md §3b. USB class drivers.
+drv('usbhub', 'USB hub driver (older USB stack)',
+    'Manages USB hubs on the older USB driver stack, the one EHCI and older controllers use (reasoning). Hubs on '
+    'xHCI controllers use the USB 3 hub driver (USBHUB3) instead (reasoning).',
+    'Hubs on controllers that use the older stack stop enumerating devices (reasoning). On a PC whose USB '
+    'controllers are all xHCI, Hadron knows of nothing that uses it (reasoning).', 'published',
+    '@USBCLASSES: "Microsoft provides the Usbhub.sys driver for managing USB hubs", and lists Usbhub3.sys for '
+    'SuperSpeed hubs on xHCI controllers. Which stack uses which is reasoning.')
+drv('usbvideo', 'USB Video Class driver', 'The inbox driver for webcams and other USB Video Class (UVC) devices.',
+    'Webcams and USB capture devices that use it stop (reasoning).', 'published',
+    '@UVC: "a Microsoft-provided AVStream minidriver that provides driver support for USB Video Class devices"; it '
+    'suggests the system-supplied Usbvideo.sys for a webcam or a digital camcorder.')
+drv('usbprint', 'USB printer driver', 'The inbox driver that connects USB printers to their printer drivers.',
+    'USB printers stop printing (reasoning); network printers don\'t use it (reasoning).', 'published',
+    '@USBPRINT: "Usbprint.sys is the Microsoft-provided device driver for USB printers"; it "provides a '
+    'communication conduit by which higher-level drivers can control the printer".')
+drv('usbscan', 'USB scanner and camera driver (WIA)', 'The inbox driver for USB scanners and still cameras that use '
+                                                       'Windows Image Acquisition (WIA).',
+    'USB scanners and cameras that use it stop (reasoning).', 'published',
+    '@USBCLASSES: Usbscan.sys "manages USB digital cameras and scanners" and "implements the USB component of the '
+    'Windows Imaging Architecture (WIA)".')
+drv('usbser', 'USB serial (CDC) driver', 'The inbox driver for USB communications-class devices that show up as COM '
+                                         'ports, such as microcontroller boards and some USB modems (examples: '
+                                         'reasoning).',
+    'Those devices get no COM port (reasoning).', 'published',
+    '@USBCLASSES: for the Communications and CDC Control class, "In Windows 10, Usbser.inf loads Usbser.sys '
+    'automatically as the function driver."')
+
+# File system filters and the SMB client.
+drv('wcifs', 'Windows Container Isolation filter',
+    'A Microsoft file system minifilter that layers file system views for Windows container features (reasoning).',
+    'Features built on container file isolation may fail (reasoning, not tested); Windows Sandbox is a likely '
+    'example (not sourced). '
+    'Hadron does not know everything that uses it: leave it at its default.')
+drv('FileCrypt', 'FileCrypt minifilter',
+    'A Microsoft file system minifilter. Hadron has no Microsoft page that says what it does; the name suggests file '
+    'encryption (reasoning).',
+    'Not known: Hadron does not know what depends on it, so it can\'t say what stops. Leave it at its default.')
+drv('rdbss', 'Redirected Drive Buffering Subsystem',
+    'The file system driver the SMB client\'s redirector runs on. Other network redirectors link a static copy of '
+    'the library and don\'t need it.',
+    'Network file systems built on it stop: shared folders, mapped drives and SMB printers fail (reasoning).',
+    'published', '@RDBSS: "A file system driver (rdbss.sys) supplied with the operating system", "automatically '
+                 'loaded if any non-monolithic network mini-redirectors are registered on the system".')
+drv('mrxsmb', 'SMB redirector (SMB client)', 'The SMB client\'s network mini-redirector, built on RDBSS.',
+    'The SMB client stops: shared folders, mapped drives and SMB printers on other computers fail (reasoning).',
+    'published', '@RDBSS: "The Microsoft Server Message Block (SMB) redirector ... is currently the only driver that '
+                 'can be built as a non-monolithic network mini-redirector driver"; rdbss.sys "is automatically loaded '
+                 'if any non-monolithic network mini-redirectors are registered".')
+drv('mrxsmb20', 'SMB2/SMB3 redirector', 'The SMB2/SMB3 protocol part of the SMB client (reasoning).',
+    'Connections to SMB2/SMB3 shares, which is what current Windows and NAS devices offer, fail (reasoning).')
+drv('bowser', 'Browser support driver', 'The SMB client\'s support driver for the old Computer Browser network list '
+                                        '(reasoning).',
+    'If the Workstation service (LanmanWorkstation) lists it as a dependency, Windows won\'t start that service, and '
+    'the SMB client stops (reasoning). Check it: run sc qc LanmanWorkstation and look under DEPENDENCIES.')
+
+# Network.
+drv('NdisVirtualBus', 'NDIS virtual network adapter enumerator',
+    'A bus driver that creates software (virtual) network adapters (reasoning).',
+    'Software network adapters it creates disappear (reasoning, not tested); Device Manager shows which devices sit '
+    'under it.')
+drv('WFPLWFS', 'Windows Filtering Platform NDIS filter',
+    'Lets the Windows Filtering Platform inspect and filter traffic at the network adapter (reasoning).',
+    'Firewall, VPN and filtering features that use the platform at that layer may break (reasoning, not tested).')
+drv('lltdio', 'Link-Layer Topology Discovery Mapper I/O driver',
+    'Lets this PC discover the layout of the local network and start quality-of-service checks such as bandwidth '
+    'estimation. Windows 10 has no built-in network map that shows the result (reasoning).',
+    'Tools on this PC that map the network with LLTD stop finding devices (reasoning, not tested). Internet access '
+    'and file sharing don\'t depend on it (reasoning).', 'published',
+    '@LLTDCSP: "LLTDIO allows a computer to discover the topology of a network it\'s connected to. It also allows a '
+    'computer to initiate Quality-of-Service requests such as bandwidth estimation and network health analysis."')
+drv('rspndr', 'Link-Layer Topology Discovery Responder',
+    'Answers other computers\' Link Layer Topology Discovery requests, so this PC can be found on the network.',
+    'LLTD mapping tools on other computers no longer find this PC (reasoning, not tested).', 'published',
+    '@LLTDCSP: "The Responder allows a computer to participate in Link Layer Topology Discovery requests so that it '
+    'can be discovered and located on the network."')
+
+# Hyper-V guest drivers: used inside a Hyper-V virtual machine. @HVNET describes the components; that these service
+# names are those components is reasoning.
+_HV_NOTE = ('Reasoning: @HVNET describes VMBus and the guest-side virtual service clients; it does not name these '
+            'driver files.')
+drv('vmbus', 'Hyper-V virtual machine bus (VMBus)',
+    'The channel a Hyper-V virtual machine\'s synthetic devices use to reach the host (reasoning).',
+    'Inside a Hyper-V virtual machine, synthetic disk, network, keyboard and video stop (reasoning). On a physical '
+    'PC Hadron knows of nothing that needs it unless Hyper-V features are on (reasoning, not tested).',
+    note=_HV_NOTE + ' @HVNET: "The VMBus is a logical inter-partition communication channel".')
+drv('netvsc', 'Hyper-V synthetic network adapter', 'The network adapter driver inside a Hyper-V virtual machine '
+                                                   '(reasoning).',
+    'A Hyper-V virtual machine loses its synthetic network adapter (reasoning).',
+    note=_HV_NOTE + ' @HVNET: "a Network VSC (NetVSC) runs in a guest operating system".')
+drv('storvsc', 'Hyper-V synthetic storage', 'The disk controller driver inside a Hyper-V virtual machine (reasoning).',
+    'A Hyper-V virtual machine whose disks are synthetic can\'t start (reasoning). ' + _BOOT_PATH,
+    note='Reasoning: @HVNET describes VMBus and a network client (NetVSC); it does not mention storage or name this '
+         'driver.')
+# HyperVideo and hyperkbd already have entries (Stripped, hw vmguest) above.
+
+# OEM services (7-finalize.md follow-up 2). Third-party items are never in a preset (DECISIONS 2026-11-11), so these
+# only explain. Components named for the MSI PRO Z790-P WIFI by @MSIBOARD: Intel Z790 chipset, Intel LAN and Wi-Fi,
+# Realtek ALC897 audio. A name a PC doesn't have is never shown (the KB is looked up by service name).
+_OEM = ' Hadron found no vendor documentation for this service; "not tested" means Hadron has no measurement either way.'
+E('MSI_Center_Service', 'svc', 'MSI Center service (MSI)',
+  'The background service of MSI Center, MSI\'s utility for its boards and PCs. Windows does not use it (reasoning).',
+  if_off='MSI Center and the features installed in it may stop working until it is set back (reasoning, not '
+         'tested).',
+  test='Set it to Manual, restart, open MSI Center and use each feature you rely on; undo if one fails.',
+  basis='reasoning', basis_note='Hadron found no MSI page for it. @FNMSICENTER lists the service MSI_Center_Service '
+                                'for MSI_Central_Service.exe in MSI Center\'s folder (or One Dragon Center\'s, its '
+                                'older name), from Micro-Star; it is cited for '
+                                'the name only.' + _OEM, never=True)
+E('Mystic_Light_Service', 'svc', 'Mystic Light service (MSI)',
+  'MSI\'s RGB lighting service, part of MSI Center\'s Mystic Light feature (reasoning, from its name and folder).',
+  if_off='Mystic Light can no longer change the lighting (reasoning). What the LEDs show without it is not known '
+         '(not tested).',
+  test='Set it to Manual, restart and change a lighting effect in MSI Center; undo if it no longer applies.',
+  basis='reasoning', basis_note='Hadron found no MSI page for it. @FNMYSTIC lists the service Mystic_Light_Service in '
+                                'MSI Center\'s Mystic Light folder, from Micro-Star; it is cited for the name only.'
+                                + _OEM, never=True)
+E('RtkAudioUniversalService', 'svc', 'Realtek Audio Universal Service (Realtek)',
+  'A Realtek service installed with Realtek\'s audio driver package, for onboard audio such as the board\'s Realtek '
+  'ALC897 codec (@MSIBOARD). Hadron found no Realtek page that says what it does.',
+  if_off='Playback should not need it, because sound goes through the audio driver (reasoning, not tested). '
+         'Realtek\'s audio app and '
+         'jack-detection pop-ups may stop working (reasoning, not tested).',
+  test='Set it to Manual, restart, play sound on the rear jacks and plug a headset into the front panel; undo if '
+       'sound or jack switching fails.',
+  basis='reasoning', basis_note='Hadron found no Realtek page for it. @FNRTKAUD gives the service name '
+                                'RtkAudioUniversalService and a driver-store folder (realtekservice.inf); it is cited '
+                                'for the name only. @MSIBOARD names the codec.' + _OEM, never=True)
+E('LMS', 'svc', 'Intel Local Manageability Service (Intel ME software)',
+  '@INTELLMS: "A service that runs locally in an Intel AMT device and enables local management applications to send '
+  'requests"; it passes them to the Management Engine through the MEI driver.',
+  if_off='Local tools that talk to Intel AMT stop (reasoning). AMT is a business (vPro) feature (reasoning); on a PC without '
+         'it, Hadron knows of nothing that uses this service (reasoning).',
+  basis='published', basis_note='@INTELLMS (Intel AMT). That the Windows service named LMS is this component, '
+                                'installed with Intel\'s Management Engine software, is reasoning.', never=True)
+E('jhi_service', 'svc', 'Intel DAL Host Interface Service (Intel ME software)',
+  'The host side of Intel\'s Dynamic Application Loader (DAL): @INTELDAL says it "serves as an intermediate layer '
+  'between host applications and the Intel DAL firmware component" and is "commonly referred to by its engineering '
+  'name: JHI".',
+  if_off='Apps that run trusted applets in the Management Engine through DAL fail (reasoning). Intel does not list '
+         'which desktop apps use DAL (reasoning).',
+  basis='published', basis_note='@INTELDAL, which also says the Intel Management Engine installer installs it. That '
+                                'the Windows service named jhi_service is this component is reasoning.', never=True)
+
+
+# ---- Windows stock start types for 19045 (7-finalize.md follow-up 1) ---------------------------------------------
+# Only Microsoft pages for Windows client that state one service's default (or expected) start type, read
+# 2026-11-11. None of them names build 19045; each note says what the page applies to. Not used, and why
+# (docs/pipeline/fixes/svcdrv-kb.md): @IOT's and @PERUSER's "Startup Type (Default)" columns are "the current version
+# of Windows" and disagree with each other (cbdhsvc, OneSyncSvc, WpnUserService); @WS16's are Server 2016 values
+# (DECISIONS 2026-11-11, R20); BITS's own page gives a start type that depends on whether jobs are queued.
+# Each row: (name, "start/delayed", note). The note's basis is `published`.
+STOCK = [
+    ('msiserver', '3/-',
+     '@WUERRCLIENT (applies to Windows 10 and Windows 11): "The default Startup type of the Windows Installer service '
+     'is Manual." The page names no build; Hadron uses it as the Windows 10 stock value.'),
+    ('W32Time', '3/-',
+     '@W32TWG (supported Windows client and Windows Server versions): on workgroup computers "The startup value for '
+     'the Windows Time service is Manual", and it is a trigger-start service by default. For domain-joined PCs the '
+     'page says it starts on a trigger event and gives no other start type. The page names no build; Hadron uses it as '
+     'the Windows 10 stock value.'),
+    ('TimeBrokerSvc', '3/-',
+     '@TASKSCHED (supported Windows client versions) says to check that its Start value "is set to '
+     '[[3|published|@TASKSCHED]] by default" (Manual). The page names no build; Hadron uses it as the Windows 10 '
+     'stock value.'),
+    ('WSearch', '2/1',
+     '@SEARCHPERF (supported Windows client versions): "The service should have the following configuration", '
+     'Status Running and "Startup Type: Automatic (Delayed Start)". That is the setting the page expects; the page '
+     'names no build. Hadron uses it as the Windows 10 stock value.'),
+    ('BrokerInfrastructure', '2/0',
+     '@STARTMENU (a Start menu symptom on Windows 10 and two Windows Server releases): '
+     '"BrokerInfrastructure is an automatic service." The page does not mention delayed start; Hadron reads it as '
+     'plain Automatic (reasoning). The page names no build; Hadron uses it as the Windows 10 stock value.'),
+]
+
+for _name, _cfg, _note in STOCK:
+    _hit = [e for e in ENTRIES if e['name'].lower() == _name.lower()]
+    assert len(_hit) == 1, 'STOCK row %s has no KB entry' % _name
+    _hit[0].update(stock=_cfg, stock_basis='published', stock_note=_note)

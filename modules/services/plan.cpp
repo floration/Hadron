@@ -196,7 +196,7 @@ Guard CheckGuard(const SvcItem& s, const Ctx& c) {
         g.reason = L"Hadron's KB entry is for build " + Join(e->builds, L", ") + L", not " + (c.build.empty() ? L"this one" : c.build);
         return g;
     }
-    if (e->never) { g.neverPreset = true; g.reason = L"Hadron's KB keeps it out of every preset"; return g; }
+    if (e->never) { g.neverPreset = g.kbNever = true; g.reason = L"Hadron's KB keeps it out of every preset"; return g; }
     return g;
 }
 
@@ -393,20 +393,26 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             r.before = s.cfg; r.deps = s.deps; r.group = s.group;
             r.op = OpTo(s.cfg, t);
             r.after = AfterOf(s.cfg, r.op);
-            r.reason = L"Windows stock start type for build 19045";
+            // kb-audit svcdrv-kb M2: only a measured value is a fact about this build; the published ones name no build.
+            r.reason = e->stockBasis == L"owner-measured"
+                           ? L"Windows stock start type, measured on build " + c.build
+                           : std::wstring(L"Windows stock start type from a Microsoft page (it names no build)");
             r.basis = e->stockBasis;
             r.basisNote = e->stockNote;
             Guard g = CheckGuard(s, c);
-            if (g.neverTouch || g.neverPreset) r.blocked = L"Protected: not in presets. " + g.reason;
+            // DECISIONS 2026-11-11 (proxy, Small fixes): a KB `never` means "not in a preset level", not "never restore
+            // to a sourced Microsoft default"; never-touch, protected and the named never-preset list still block.
+            if (g.neverTouch || (g.neverPreset && !g.kbNever)) r.blocked = L"Protected: not in presets. " + g.reason;
             else if (t.start < 2) r.blocked = L"Kept: Hadron never sets Boot or System start";
             else if (r.driver && s.cfg.start < 2 && !SysOk(s, c))
                 r.blocked = kSysStartKept + std::wstring(L" (its start type now)");
             if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
             p.rows.push_back(std::move(r));
         }
-        if (withStock == 0) {
-            p.notes.push_back(none);
-            p.emptyText = none;
+        if (withStock == 0) {   // reviewer F1: this build has stock values, only not on this tab
+            const std::wstring tabNone = L"Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed.";
+            p.notes.push_back(tabNone);
+            p.emptyText = tabNone;
             return p;
         }
         p.notes.push_back(std::to_wstring(withStock) + L" of " + std::to_wstring(total) +

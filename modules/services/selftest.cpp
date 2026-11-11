@@ -538,9 +538,19 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             if (e.basis == L"published" && e.basisNote.find(L"https://") == std::wstring::npos) urls = false;
         check(urls, L"every published basis note carries its https URL");
         int stock = 0;
-        for (auto& e : kb.entries) if (e.stock >= 0) stock++;
-        info(L"KB: " + std::to_wstring(n) + L" entries, " + std::to_wstring(stock) +
-             L" with a Windows stock value (none has a measured or published stock basis yet)");
+        bool stockSourced = true;
+        for (auto& e : kb.entries)
+            if (e.stock >= 0) {
+                stock++;
+                if ((e.stockBasis != L"published" && e.stockBasis != L"owner-measured") ||
+                    (e.stockBasis == L"published" && e.stockNote.find(L"https://") == std::wstring::npos) || IsStorageDriver(e.name))
+                    stockSourced = false;
+            }
+        const KbEntry* ws = kb.Find(L"WSearch");
+        check(stock > 0 && stockSourced && ws && ws->stock == 2 && ws->stockDelayed == 1,
+              L"KB stock table: every stock value has a published (with URL) or owner-measured basis, none on a storage "
+              L"driver; WSearch is Auto (delayed)");
+        info(L"KB: " + std::to_wstring(n) + L" entries, " + std::to_wstring(stock) + L" with a Windows stock value");
     }
 
     // ---- A5 first: the data folder owner check (before any test makes a data dir) ----------------------------
@@ -936,7 +946,12 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             }
         }
         Plan sk = PlanFor(-2, TAB_SERVICES, w);
-        check(sk.rows.empty() && !sk.notes.empty(), L"Default (Windows stock): no KB stock values yet -> no rows, with a note");
+        Plan skd = PlanFor(-2, TAB_DRIVERS, w);
+        check(RowOf(sk, L"WSearch") && RowOf(sk, L"WSearch")->basis == L"published" &&
+                  RowOf(sk, L"WSearch")->after.start == 2 && RowOf(sk, L"WSearch")->after.delayed == 1 &&
+                  skd.rows.empty() && !skd.notes.empty(),
+              L"Default (Windows stock): the KB's published stock value for WSearch (fixture Manual -> Auto delayed); "
+              L"no driver has one -> no rows, with a note");
         // Stock mechanism with an in-memory KB that has one measured stock value (and one refused storage driver).
         Kb ks;
         ks.Parse("V\t1\tservices\nB\t19045\n"
@@ -949,6 +964,38 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         Plan sd = BuildDefault(true, TAB_DRIVERS, w.items, cs);
         check(sm.Included() == 1 && RowOf(sm, L"WSearch") && RowOf(sm, L"WSearch")->basis == L"owner-measured" && !RowOf(sd, L"disk"),
               L"Windows stock: applies a KB stock value with its basis; never for a storage driver");
+        // A KB `never` (explanation-only) entry doesn't block its stock row; never-touch (floor), protected and the
+        // named never-preset list still do (DECISIONS 2026-11-11, proxy Small fixes).
+        {
+            const PlanRow* tb = RowOf(sk, L"TimeBrokerSvc");
+            check(tb && tb->blocked.empty() && tb->include && tb->after.start == 3,
+                  L"Windows stock: TimeBrokerSvc (KB entry explanation-only) is a ticked row Disabled -> Manual");
+            Kb kn;
+            kn.Parse("V\t1\tservices\nB\t19045\n"
+                     "K\tTimeBrokerSvc\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t1\treasoning\tn\t\t\t3/-\towner-measured\tclean VM\t\t\t\n"
+                     "K\tRpcSs\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t1\treasoning\tn\t\t\t3/-\towner-measured\tclean VM\t\t\t\n"
+                     "K\tSecurityHealthService\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t1\treasoning\tn\t\t\t2/0\towner-measured\tclean VM\t\t\t\n"
+                     "K\tTrustedInstaller\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t1\treasoning\tn\t\t\t2/0\towner-measured\tclean VM\t\t\t\n",
+                     &err);
+            Ctx cn = w.ctx;
+            cn.kb = &kn;
+            Plan sn = BuildDefault(true, TAB_SERVICES, w.items, cn);
+            const PlanRow *t2 = RowOf(sn, L"TimeBrokerSvc"), *rp = RowOf(sn, L"RpcSs"), *sh = RowOf(sn, L"SecurityHealthService"),
+                          *ti = RowOf(sn, L"TrustedInstaller");
+            check(t2 && t2->blocked.empty() && t2->include && rp && !rp->blocked.empty() && !rp->include && sh &&
+                      !sh->blocked.empty() && ti && !ti->blocked.empty(),
+                  L"Windows stock: a never entry's row is ticked; never-touch (RpcSs), protected (SecurityHealthService) "
+                  L"and named never-preset (TrustedInstaller) rows with a stock value stay blocked");
+            bool presetsSame = true;
+            for (int lv : {LV_BLOAT, LV_STRIPPED, LV_MINIMUM}) {
+                Plan pp = PlanFor(lv, TAB_SERVICES, w);
+                const PlanRow* pr = RowOf(pp, L"TimeBrokerSvc");
+                if (pr && pr->blocked.empty()) presetsSame = false;
+            }
+            Plan pd = PlanFor(LEVEL_DEFAULT, TAB_SERVICES, w);
+            check(presetsSame && !RowOf(pd, L"TimeBrokerSvc"),L"presets never offer TimeBrokerSvc (KB never), and Default as first seen leaves it "
+                                      L"(already as first seen)");
+        }
         Ctx co = w.ctx;
         co.build = L"22631";
         Plan so = BuildDefault(true, TAB_SERVICES, w.items, co);
@@ -2317,14 +2364,14 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
     {
         World a;
         freshWorld(&a);
-        Plan s0 = PlanFor(-2, TAB_SERVICES, a);
+        Plan s0 = PlanFor(-2, TAB_DRIVERS, a);   // no driver has a stock value in the KB
         Ctx co = a.ctx;
         co.build = L"22631";
         Plan s1 = BuildDefault(true, TAB_DRIVERS, a.items, co);
-        const std::wstring want0 = L"Hadron has no Windows-stock data for build 19045 yet: nothing will be changed.";
+        const std::wstring want0 = L"Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed.";
         check(s0.rows.empty() && s0.emptyText == want0 && s0.notes.size() == 1 && s0.notes[0] == want0 &&
                   s1.emptyText == L"Hadron has no Windows-stock data for build 22631 yet: nothing will be changed.",
-              L"R20: Windows stock with no data says so (never a bare \"Nothing to change.\"), on any build");
+              L"R20: Windows stock with no data says so (never a bare \"Nothing to change.\"): no value on this tab (19045), no data for another build");
         std::vector<SvcItem> gi = {Mk(L"gmem", 3, {}), Mk(L"gdep", 3, {L"+grp"})};
         gi[0].group = L"GRP";
         FakeBackend fb;
