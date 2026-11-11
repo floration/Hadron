@@ -184,6 +184,7 @@ private:
     void OnNumEditChanged();
     bool StagedOverlap(int setting, std::wstring* other) const;
     void StageSelected();
+    bool MovePick(int dir);   // Detail focus, Left/Right: the previous/next option chip
     void StageRecommended();
     void ReviewPlan();
     void StartWrite();
@@ -1070,6 +1071,31 @@ void BiosModule::SyncEditor() {
     numEdit_.SetText(st != staged_.end() ? std::to_wstring(st->second) : (s.hasCur ? std::to_wstring(s.cur) : L""));
 }
 
+// The values of the "New value" chips, in display order (a checkbox without options: 0 and 1).
+std::vector<long long> ChipValues(const Setting& s) {
+    std::vector<long long> v;
+    if (s.kind == L"numeric") return v;
+    if (s.kind == L"checkbox" && s.opts.empty()) return {0, 1};
+    for (auto& o : s.opts) v.push_back(o.v);
+    return v;
+}
+
+bool BiosModule::MovePick(int dir) {
+    if (!WritesPossible() || sel_ < 0 || sel_ >= (int)db_.S.size()) return false;
+    const Setting& s = db_.S[sel_];
+    std::vector<long long> chips = ChipValues(s);
+    if (!s.hasCur || chips.empty()) return false;
+    SyncEditor();
+    long long from = hasPick_ ? pick_ : s.cur;
+    int at = -1;
+    for (int k = 0; k < (int)chips.size(); k++) if (chips[(size_t)k] == from) { at = k; break; }
+    int to = at < 0 ? (dir > 0 ? 0 : (int)chips.size() - 1) : std::clamp(at + dir, 0, (int)chips.size() - 1);
+    pick_ = chips[(size_t)to];
+    hasPick_ = true;
+    editMsg_.clear();
+    return true;
+}
+
 // Whole numbers only (decimal); anything else is refused, there is no hex or byte entry.
 bool ParseWhole(const std::wstring& t, long long* v) {
     size_t a = 0, b = t.size();
@@ -1373,10 +1399,10 @@ bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         int pitch = Sc(Console() ? 20 : 26);
         int page = std::max(1, (int)(rcListBody_.bottom - rcListBody_.top) / pitch - 1);
         if (w == VK_TAB) {
+            // List -> Search -> Detail -> the value field (only while it is shown) -> List.
             bool back = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            int cur = focus_ == Focus::Edit ? (int)Focus::Detail : (int)focus_;
-            int f = (cur + (back ? 2 : 1)) % 3;
-            focus_ = (Focus)f;
+            int n = IsRectEmpty(&rcNumEdit_) ? 3 : 4;
+            focus_ = (Focus)(((int)focus_ + (back ? n - 1 : 1)) % n);
             return true;
         }
         if (ctrl && w == 'F') { focus_ = Focus::Search; return true; }
@@ -1392,6 +1418,14 @@ bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
             return numEdit_.OnKey(w, hwnd_);
         }
         if (focus_ == Focus::Detail) {
+            // The "New value" editor: Left/Right walk the option chips, Enter stages (staging writes nothing;
+            // only the plan's Write button writes, and the plan ignores Enter).
+            if (w == VK_LEFT || w == VK_RIGHT) return MovePick(w == VK_RIGHT ? 1 : -1);
+            if (w == VK_RETURN) {
+                if (!WritesPossible() || sel_ < 0 || sel_ >= (int)db_.S.size()) return false;
+                StageSelected();
+                return true;
+            }
             int before = detSb_.Offset();
             int view = rcDetail_.bottom - rcDetail_.top;
             switch (w) {
@@ -2973,8 +3007,48 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         m.OnInput(WM_CHAR, L'\r', 0);
         m.OnInput(WM_KEYDOWN, VK_SPACE, 0);
         bool still = m.planOpen_ && m.job_ == Job::None;
+        m.OnInput(WM_LBUTTONDBLCLK, 0, MAKELPARAM(10, 10));
+        bool dbl = m.planOpen_ && m.job_ == Job::None;
         bool esc = m.OnInput(WM_KEYDOWN, VK_ESCAPE, 0) && !m.planOpen_;
-        check(enter && still && esc, L"plan overlay: Enter and Space never confirm; Esc closes");
+        check(enter && still && dbl && esc, L"plan overlay: Enter, Space and double-click never confirm; Esc closes");
+
+        // Keyboard editing on a live-looking instance (writes possible, mock backend).
+        m.db_ = d;
+        m.db_.S[0].hasCur = true;
+        m.db_.S[0].cur = 0;
+        m.primary_ = Src::Live;
+        m.liveDone_ = true;
+        m.live_.readOk = 1;
+        m.live_.elevated = true;
+        m.live_.privOk = true;
+        m.unverified_ = false;
+        m.guardText_.clear();
+        m.guardUnknown_.clear();
+        auto km = freshMock();
+        MockBackend* kmp = km.get();
+        m.backend_ = std::move(km);
+        if (!m.writeSwitch_) m.ToggleWriteSwitch();
+        m.sel_ = 0;
+        m.focus_ = Focus::Detail;
+        bool possible = m.WritesPossible();
+        bool right = m.OnInput(WM_KEYDOWN, VK_RIGHT, 0) && m.hasPick_ && m.pick_ == 1;
+        bool clampR = m.OnInput(WM_KEYDOWN, VK_RIGHT, 0) && m.pick_ == 1;
+        bool stage = m.OnInput(WM_KEYDOWN, VK_RETURN, 0) && m.staged_.count(0) && m.staged_[0] == 1 && !m.planOpen_ &&
+                     m.job_ == Job::None && kmp->writes == 0;
+        bool left = m.OnInput(WM_KEYDOWN, VK_LEFT, 0) && m.pick_ == 0;
+        check(possible && right && clampR && stage && left,
+              L"keyboard: in Detail, Left/Right move between option chips and Enter stages (nothing written, no plan)");
+        m.rcNumEdit_ = RECT{0, 0, 10, 10};   // the value field is shown
+        m.focus_ = Focus::Detail;
+        m.OnInput(WM_KEYDOWN, VK_TAB, 0);
+        bool toEdit = m.focus_ == Focus::Edit;
+        m.OnInput(WM_KEYDOWN, VK_TAB, 0);
+        bool wrap = m.focus_ == Focus::List;
+        m.rcNumEdit_ = RECT{};
+        m.focus_ = Focus::Detail;
+        m.OnInput(WM_KEYDOWN, VK_TAB, 0);
+        bool skip = m.focus_ == Focus::List;
+        check(toEdit && wrap && skip, L"keyboard: Tab goes Detail -> value field -> List, skipping the field when it isn't shown");
     }
 }
 
