@@ -1,0 +1,14 @@
+Plan: Default: as first seen (Services)
+Source: default-first:services
+Rows: 3 ticked, 0 unticked, 0 kept or protected; already set: 106
+Note: Start types as Hadron first saw this PC on 2026-11-01. This is not Windows' default.
+Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
+[x] DiagTrack  Disabled -> Auto  (4/- -> 2/-)
+    why: as recorded by the first-run snapshot (2026-11-01 18:30)
+    basis: recorded -- Hadron's first-run snapshot of this PC (2026-11-01 18:30), read from its service manager
+[x] WSearch  Manual -> Auto (delayed)  (3/- -> 2/1)
+    why: as recorded by the first-run snapshot (2026-11-01 18:30)
+    basis: recorded -- Hadron's first-run snapshot of this PC (2026-11-01 18:30), read from its service manager
+[x] XblGameSave  Disabled -> Manual  (4/- -> 3/-)
+    why: as recorded by the first-run snapshot (2026-11-01 18:30)
+    basis: recorded -- Hadron's first-run snapshot of this PC (2026-11-01 18:30), read from its service manager

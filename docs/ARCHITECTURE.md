@@ -7,9 +7,11 @@ hadron/
   core/
     host/                  IHost, Module, registry (explicit factories), RunStandalone, RunSuite, command line
     ui/                    theme, per-DPI fonts, double buffering, widgets (chips, buttons, list view with sortable
-                           columns + draggable scrollbar + keyboard nav, detail pane, search box, progress), Confirm()
-    sys/                   Worker, elevation/relaunch, privileges, long paths, settings, logging, crash dumps,
-                           zip writer (UTF-8 flag), firmware.h (IFirmwareVars), win_compat.h
+                           columns + draggable scrollbar + keyboard nav, detail pane, search box, progress). No
+                           Confirm(): each module shows its plan and confirm in its own view
+    sys/                   Worker, elevation check (no relaunch), privileges, long paths, settings, logging, crash
+                           dumps, PNG writer, win_compat.h. No zip writer: services has its own stored-only one
+                           (modules/services/recovery.cpp); firmware.h (IFirmwareVars) is in modules/bios
     fs/                    plan -> confirm -> execute -> undo log, trash, folder lock, reparse/cloud/hard-link checks
   modules/<id>/
     module.cpp             implements hx::Module
@@ -17,7 +19,7 @@ hadron/
     resources/<id>.rc      resource fragment; every resource name is prefixed with the module id (BIOS_SETTINGS)
     tests/                 console test exe (hadron_<id>_tests.exe), fixtures, golden comparisons
   app/hadron.cpp           suite WinMain
-  tools/                   offline generators (BIOS pipeline, Python)
+  tools/                   offline generators and KB gates (Python): BIOS pipeline, services KB
   tests/fixtures, tests/golden
   legacy/                  original single-file tools, kept as the reference while porting
 ```
@@ -76,7 +78,8 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
 - **Focus and input.** The host saves `GetFocus()` on deactivate and restores it on activate, and forwards
   `WM_MOUSEWHEEL` to the active module. It owns Ctrl+Tab, Ctrl+1..9, and Ctrl+Shift+L / Ctrl+Shift+T
   (layout and theme switch), which it takes before `PreTranslateMessage`.
-- **Dialogs.** Every dialog is owned by `IHost::Frame()` and disables the whole suite. Use `hx::ui::Confirm()`.
+- **Dialogs.** Every dialog is owned by `IHost::Frame()` and disables the whole suite. There is no shared
+  confirm dialog: a module shows its plan and its Apply button in its own view (see `core/ui` above).
 - **DPI.** The host handles `WM_DPICHANGED` using the suggested rect, then calls `OnDpiChanged`. Every metric
   goes through `S(px)` with the current DPI. All legacy tools are system-DPI only, so this is real port work.
 - **Worker.** `core/sys` `Worker`: an atomic progress counter, read by the module on a timer, plus cancel and join.
@@ -134,6 +137,13 @@ off-by-default toggle. The old `Admin::Optional` / `RequestElevation()` / single
 ## Settings, logs, crashes
 - Settings: `%LOCALAPPDATA%\Hadron\settings.ini`, or portable mode when `Hadron.ini` sits next to the exe.
 - Logs: `%LOCALAPPDATA%\Hadron\logs\` (session log).
+- Services module data: `%ProgramData%\Hadron\services\` (machine-wide, because start types are). It holds
+  `first.txt`, `snap-<stamp>.txt`, `undo-<stamp>.log`, `recovery\<stamp>\`, `recovery\first\` and
+  `recovery-<stamp>.zip`. Unlike the per-user folders it has its own rules: owner Administrators; created
+  admin-only (a protected DACL: Administrators + SYSTEM), and an existing one must already be; no reparse point on
+  the path; every folder above it owned by Administrators, SYSTEM or TrustedInstaller, with no other account
+  able to rename, delete or re-permission it; every file `CREATE_NEW` and flushed. If a check fails the module reads and writes nothing
+  there and turns changes off. `--data-dir` moves it. See `docs/design/services.md` "Data dir".
 - Crash dumps: `SetUnhandledExceptionFilter` + `MiniDumpWriteDump`.
 - Exports go through a Save dialog. Never write "next to the exe", which fails when run from inside a zip.
 
@@ -152,7 +162,7 @@ and their output is committed so a C++-only build works. Copyrighted inputs (ven
   base hue rotated +90/+180/+270 (`RotateHue`, own HSL maths) — a square/tetradic split. When the Windows accent is
   achromatic (grey/black/white, `IsAchromatic`), the theme's own `FallbackAccent()` is used. `ResolveLive(id)` does
   this; `Resolve(id, accent)` is the deterministic form used by `--screenshot`/`--selftest` so goldens are stable.
-- **Host owns theme + layout**, chosen by `--theme light|dark|fun|boring` and `--layout baseline|console`. Modules
+- **Host owns theme + layout**, chosen by `--theme light|dark|fun|boring` and `--layout baseline|console`. `--accent RRGGBB` (screenshot only) stands in for the Windows accent so design review can show accent-following deterministically; an achromatic value takes the theme fallback, as live. Modules
   read them through `IHost::Theme()`, `IHost::Fonts()`, `IHost::Layout()`; the suite chrome themes too. High contrast
   (`Theme::highContrast`) makes widgets fall back to the system colours. In an interactive run the status bar has
   two chips, "Layout" (toggle) and "Theme" (click: next, right-click: previous), also on Ctrl+Shift+L / Ctrl+Shift+T.

@@ -1,0 +1,12 @@
+HXSVC	1	undo
+B	20261110-210000	preset:bloat:services	3	6f1c2a4e-fixture-0000-0000-000000000001	19045	9D2272F3
+P	1	stornvme	start	4/-	0/-	admin	BB356180
+I	1	4/-	admin	29F64A9D
+D	1	ok	0/-	admin	CDC2C375
+P	2	RpcSs	start	4/-	2/-	admin	42D450FC
+I	2	4/-	admin	B0142C9C
+D	2	ok	2/-	admin	9F55CE28
+P	3	disk	start	4/-	0/-	admin	7C3D1029
+I	3	4/-	admin	719AF35C
+D	3	ok	0/-	admin	2CAC07D8
+E	20261110-210000	3	0	0	done	E36F56E0

@@ -1,0 +1,2 @@
+// The Services page knowledge base (tools/services/genkb.py output), embedded as RCDATA SERVICES_KB.
+SERVICES_KB RCDATA "modules/services/data/services.db"

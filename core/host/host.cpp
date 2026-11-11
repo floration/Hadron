@@ -1,6 +1,7 @@
 // core/host/host.cpp — the shared host. Implements IHost, owns the frame, the message loop, DPI,
 // COM, logging and the deterministic --screenshot path. Standalone and suite differ only in whether
 // the sidebar is drawn and how many modules are present.
+#include <algorithm>
 #include <cstdio>
 #include "core/host/run.h"
 #include "core/host/cmdline.h"
@@ -121,6 +122,9 @@ public:
     ui::Layout Layout() override { return layout_; }
 
 private:
+    // Smallest content area any module is laid out for, in 96-DPI units (scaled by the window's DPI). The
+    // frame's minimum track size is this plus the sidebar and the status bar; modules degrade down to it.
+    static constexpr int kMinContentW = 800, kMinContentH = 560;
     int sidebarW() const { return suite_ ? S(188, dpi_) : 0; }
     int statusH() const { return S(28, dpi_); }
     RECT SidebarRect(const RECT& cl) const { return {0, 0, sidebarW(), cl.bottom - statusH()}; }
@@ -159,7 +163,7 @@ private:
     int active_ = -1;
     HWND frame_ = nullptr;
     UINT dpi_ = 96;
-    bool elevated_ = false, busy_ = false;
+    bool elevated_ = false, busy_ = false, shooting_ = false;
     std::wstring caption_ = L"Hadron", status_;
     sys::SettingsStore store_;
     std::vector<sys::Settings> prefs_;
@@ -172,10 +176,17 @@ private:
 
     // Build fonts for the active layout and resolve the palette. deterministic => use the theme's own
     // accent (stable goldens for --screenshot/--selftest); otherwise follow the live Windows accent.
+    // accentOverride_ (--accent, screenshots only) stands in for the Windows accent, with the same
+    // achromatic fallback the live path uses, so design review can show accent-following deterministically.
     void BuildTheme(bool deterministic) {
         fonts_.Build(dpi_, layout_);
-        theme_ = deterministic ? Resolve(themeId_, FallbackAccent(themeId_)) : ResolveLive(themeId_);
+        if (deterministic && hasAccentOverride_)
+            theme_ = Resolve(themeId_, ui::IsAchromatic(accentOverride_) ? FallbackAccent(themeId_) : accentOverride_);
+        else
+            theme_ = deterministic ? Resolve(themeId_, FallbackAccent(themeId_)) : ResolveLive(themeId_);
     }
+    bool     hasAccentOverride_ = false;
+    COLORREF accentOverride_ = 0;
 };
 
 const wchar_t* kFrameClass = L"Hadron.Frame";
@@ -331,6 +342,23 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         InvalidateChrome();
         return 0;
     }
+    case WM_GETMINMAXINFO: {
+        if (shooting_) break;   // --screenshot sets its own exact client size
+        RECT r{0, 0, sidebarW() + S(kMinContentW, dpi_), S(kMinContentH, dpi_) + statusH()};
+        AdjustWindowRectEx(&r, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrW(h, GWL_EXSTYLE));
+        auto* mm = reinterpret_cast<MINMAXINFO*>(l);
+        LONG minW = r.right - r.left, minH = r.bottom - r.top;
+        // Never larger than the monitor's work area (mini-review N3: 1366x768 at 125% would put the minimum off-screen).
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi)) {
+            minW = std::min<LONG>(minW, mi.rcWork.right - mi.rcWork.left);
+            minH = std::min<LONG>(minH, mi.rcWork.bottom - mi.rcWork.top);
+        }
+        mm->ptMinTrackSize.x = minW;
+        mm->ptMinTrackSize.y = minH;
+        return 0;
+    }
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
@@ -391,8 +419,11 @@ int Host::Screenshot(const CommandLine& cl) {
     // composed into a top-down DIB and written as PNG. No PrintWindow, so Wine and Windows match.
     const int W = 1280, H = 800;
     dpi_ = 96;
+    shooting_ = true;
     themeId_ = cl.theme;
     layout_  = cl.layout;
+    hasAccentOverride_ = cl.hasAccent;
+    accentOverride_    = cl.accent;
     BuildTheme(/*deterministic=*/true);
     RECT want{0, 0, W, H};
     DWORD style = WS_OVERLAPPEDWINDOW;
