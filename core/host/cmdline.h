@@ -18,6 +18,7 @@ struct CommandLine {
     std::wstring fixture;         // --fixture <dir>: data the screenshot/selftest loads
     ui::ThemeId theme = ui::ThemeId::Dark;        // --theme light|dark|fun|boring
     ui::Layout  layout = ui::Layout::Baseline;    // --layout baseline|console
+    bool themeGiven = false, layoutGiven = false; // the flag was passed (overrides the saved choice)
     std::vector<std::wstring> rest;   // everything else, passed to RunCli
 
     // Parses GetCommandLineW()-style input. Paths in --screenshot and --fixture are made absolute.
