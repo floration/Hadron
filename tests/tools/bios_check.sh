@@ -24,17 +24,20 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(p, os.path.relpath(p, src))
 EOF
 export WINEDEBUG=-all
+# Ubuntu's wine64 package doesn't put wineserver on PATH; find it, or skip the wait.
+WS="$(command -v wineserver || command -v wineserver64 || ls /usr/lib/wine/wineserver* 2>/dev/null | head -1 || true)"
+wswait() { if [ -n "$WS" ]; then "$WS" -w || true; fi; }
 
 echo "== selftest (standalone, folder fixture)"
 wine "$BUILD/HadronBios.exe" --selftest --fixture "$FIX/snap"
 echo "== selftest (suite, zip fixture)"
 wine "$BUILD/Hadron.exe" --solo bios --selftest --snapshot "$FIX/snap.zip" | tail -1
-wineserver -w
+wswait
 
 shot() {   # name exe args...
     local name="$1"; shift
     xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" wine "$@" --screenshot "$OUT/$name.png" > /dev/null 2>&1 || true
-    wineserver -w
+    wswait
     if [ -s "$OUT/$name.png" ]; then echo "wrote $OUT/$name.png"; else echo "MISSING $OUT/$name.png"; exit 1; fi
 }
 for th in dark light; do
