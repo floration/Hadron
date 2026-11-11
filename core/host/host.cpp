@@ -345,7 +345,7 @@ int Host::Run(const CommandLine& cl) {
 
     static PFnSetDpiCtx setDpi =
         (PFnSetDpiCtx)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
-    if (setDpi) setDpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (setDpi) setDpi(HX_DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     sys::InstallCrashHandler();
     sys::OpenLog();
@@ -378,7 +378,7 @@ int Host::Run(const CommandLine& cl) {
                              x, y, cw, ch, nullptr, nullptr, wc.hInstance, this);
     if (!frame_) return 2;
     BOOL dark = TRUE;
-    DwmSetWindowAttribute(frame_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    DwmSetWindowAttribute(frame_, HX_DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     Activate(PickInitial(cl));
     ShowWindow(frame_, SW_SHOW);
     UpdateWindow(frame_);
