@@ -1,6 +1,6 @@
 ---
 name: module-builder-careful
-description: Implements or ports Hadron code that moves, renames or deletes files: core/fs, the rescue module, and any undo or trash logic. Higher effort because mistakes destroy user data.
+description: Implements or ports Hadron code that moves, renames or deletes files: core/fs and any module or feature with move, undo or trash logic. Higher effort because mistakes destroy user data.
 model: claude-opus-5-5
 effort: high
 isolation: worktree

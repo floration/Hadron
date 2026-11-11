@@ -24,7 +24,7 @@ legacy behaviour except for approved fixes.
 - Check that the config is honoured on the first delegation: the subagent model and effort (`/agents` or the run
   details), and your own model (`/status`). Note the result in DECISIONS.md.
 - Check what the sandbox has: mingw-w64, cmake, wine, xvfb, ImageMagick, python3. Install what's missing.
-- Real-Windows behaviour (UEFI variables, the USN journal, UAC, reparse points, DPI changes) can't be tested under
+- Real-Windows behaviour (UEFI variables, UAC, reparse points, DPI changes) can't be tested under
   Wine. Test it on my PC (read-only for firmware; fixtures for anything that moves files) and in a `windows-latest`
   CI job, which also covers MSVC.
 
@@ -54,8 +54,6 @@ status at each merge: what merged, what's next, what's blocked.
 - Port the app.
 - Move the pipeline into `tools/`, adding a `basis` to every tier-1 entry and number. `kb-auditor` reviews it.
 - Add snapshots, snapshot compare and the SMBIOS version guard.
-
-`rescue` waits for my decision.
 
 **Phase 3: release.** `Hadron-<version>.zip` with the README (including the Unblock note). Copy it to my Downloads
 when this session is linked to my PC.

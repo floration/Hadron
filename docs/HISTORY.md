@@ -9,10 +9,9 @@ They work, and the owner uses them. Porting them to the module contract is the f
 | DiskMap | `legacy/diskmap` | Drive-space visualiser: scans a drive, shows a treemap and a sortable folder list | Read-only. Worker thread + treemap; the first port and the proof of the contract |
 | BIOS Settings Explorer | `legacy/bios-explorer` | All 5,368 setup settings of the owner's BIOS (vAF): live values, defaults, explanations, per-goal advice | Details below. `Admin::Optional` |
 | UEFI dump | `legacy/uefi-dump` | Read-only PowerShell dump of every UEFI variable to a zip | Becomes "Save snapshot" / "Compare snapshots" in `bios`. Retire the script after that (it uses `net session`) |
-| OrganizerRescue | `legacy/organizer-rescue` | Restores file moves by reading the NTFS change journal (USN) | Built to undo the old Organizer tool's moves. `rescue_core.h` is platform-independent and unit-tested. Status: waiting on the owner (see MODULES.md) |
 
-The old Organizer (sorts files into category folders) and SaveFinder (finds game saves in a Steam library) were
-dropped from Hadron by the owner. They are not in this repo.
+The owner dropped the old Organizer (sorted files into category folders), OrganizerRescue (undid Organizer's moves using
+the NTFS change journal) and SaveFinder (found game saves in a Steam library). They are not in this repo.
 
 ## BIOS Settings Explorer in detail
 Pipeline (`legacy/bios-explorer/pipeline`, Python 3, no dependencies):
@@ -48,16 +47,11 @@ The owner's BIOS state (from his dump):
   - the CSV parser ignores `""` escapes;
   - no SMBIOS version guard (the BIOS-version warning lives only in README.txt).
 - `uefi-dump/Run-Dump.bat`: uses `net session`, which is incident 3.
-- `rescue.cpp`:
-  - moves files with no undo log and no reparse checks;
-  - writes `_organizer_rescue_preview.txt` to the drive root;
-  - `Long()` (line ~96) turns UNC paths into `\\?\\\server`;
-  - `GetModuleFileNameW` is called with `MAX_PATH`.
 - All tools: system-DPI only (`SetProcessDPIAware`); per-monitor V2 is new work.
 
 ## Incidents and the rules they produced
 1. **The old Organizer scattered a Minecraft server.** It sorted the server's files into category folders by type,
-   which broke the server. Repaired with scripts and OrganizerRescue. Rule: plan, confirm, undo log (`core/fs`).
+   which broke the server. Repaired with scripts and a change-journal rescue tool. Rule: plan, confirm, undo log (`core/fs`).
 2. **A cleanup deleted most of C:\ProgramData.** Deleting an old Windows install on H:\ followed symlinks
    (`H:\Users\All Users` -> `C:\ProgramData`), and `robocopy /XJ` doesn't skip symlinks. Rule: reparse points are
    leaves; never traverse links.

@@ -13,7 +13,7 @@ he's wrong. Change your mind when *he* brings evidence.
 - **Lead (main thread): Claude Fable 5.2.** Owns the architecture, `core/`, specs, review, merges and talking to the owner.
 - **Subagents (`.claude/agents/`):**
   - `module-builder`: medium effort; read-only modules and features.
-  - `module-builder-careful`: high effort; `core/fs`, rescue, anything that moves or deletes files.
+  - `module-builder-careful`: high effort; `core/fs` and anything that moves or deletes files.
   - `reviewer`: high effort, read-only.
   - `tester`: medium effort; builds, tests, renders screenshots.
   - `kb-auditor`: high effort; checks the honesty of the BIOS knowledge base.
@@ -116,7 +116,7 @@ Subagents start cold. Every spec includes:
 - what to return.
 
 Builders commit on their branch and never merge. The reviewer gets the spec, `git diff main...<branch>` and the legacy
-notes, **never the builder's report**. For `core/fs` and rescue, the lead also reviews the file-operation code personally.
+notes, **never the builder's report**. For `core/fs` and any file-changing module, the lead also reviews the file-operation code personally.
 A change has **passed review** when it has no open reviewer findings in categories 1–4.
 
 ## Workflow

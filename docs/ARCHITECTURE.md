@@ -9,7 +9,7 @@ hadron/
     ui/                    theme, per-DPI fonts, double buffering, widgets (chips, buttons, list view with sortable
                            columns + draggable scrollbar + keyboard nav, detail pane, search box, progress), Confirm()
     sys/                   Worker, elevation/relaunch, privileges, long paths, settings, logging, crash dumps,
-                           zip writer (UTF-8 flag), firmware.h (IFirmwareVars), usn.h (IUsnSource), win_compat.h
+                           zip writer (UTF-8 flag), firmware.h (IFirmwareVars), win_compat.h
     fs/                    plan -> confirm -> execute -> undo log, trash, folder lock, reparse/cloud/hard-link checks
   modules/<id>/
     module.cpp             implements hx::Module
@@ -104,17 +104,12 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
   - the CSV parser handles `""` escapes;
   - zips set UTF-8 flag bit 11.
 
-## USN journal (`core/sys/usn.h`)
-`IUsnSource` has a live implementation (volume handle, needs admin) and a fixture implementation (a recorded record buffer).
-The analysis code stays platform-independent, like legacy `rescue_core.h`. NTFS only; ReFS is not supported.
-128-bit file IDs are truncated to 64 bits, which is valid on NTFS.
-
 ## Build outputs and resources
 | Target | File | Manifest execution level |
 |---|---|---|
 | Suite | `Hadron.exe` | requireAdministrator |
 | Module with `Admin::None` or `Admin::Optional` | `Hadron<Name>.exe` | asInvoker |
-| Module with `Admin::Required` (rescue) | `Hadron<Name>.exe` | requireAdministrator |
+| Module with `Admin::Required` | `Hadron<Name>.exe` | requireAdministrator |
 
 - Each exe's `.rc` and manifest are generated with `configure_file`. They contain:
   - VERSIONINFO from `project(VERSION)`;
