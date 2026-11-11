@@ -226,6 +226,18 @@ def check_entry(e, kb, errors, warnings=None):
             errors.append('%s: stock on a storage driver (Windows sets those per PC)' % where)
         if e.get('stock_basis') not in B.NUMBER_KINDS:
             errors.append('%s: stock needs an owner-measured or published stock_basis' % where)
+        # Reviewer F2: the module words a published stock value as "from a Microsoft page (it names no build)", so a
+        # published stock note must cite only learn.microsoft.com pages and say that its page names no build.
+        if e.get('stock_basis') == 'published':
+            keys = B.KEY_RE.findall(e.get('stock_note', ''))
+            if not keys or any(not kb.SOURCES.get(k, '').startswith('https://learn.microsoft.com/') for k in keys):
+                errors.append('%s: a published stock note must cite learn.microsoft.com pages only (the UI says "a '
+                              'Microsoft page")' % where)
+            if 'names no build' not in e.get('stock_note', ''):
+                errors.append('%s: a published stock note must say its page "names no build" (the UI says so)' % where)
+        # Reviewer N1: a driver with a stock value is planned like one in a level, so it needs sysok.
+        if e.get('kind') == 'drv' and not e.get('sysok'):
+            errors.append('%s: stock on a driver without sysok' % where)
         render_basis(e.get('stock_basis', ''), e.get('stock_note', ''), '%s stock' % where, kb, errors, warnings)
     elif e.get('stock_basis') or e.get('stock_note'):
         errors.append('%s: stock_basis without a stock value' % where)
@@ -400,6 +412,14 @@ def selftest():
         ('a fifth', good(expl='Cuts boot time by a fifth.')),
         ('one tenth', good(expl='Uses one tenth of the RAM.')),
         ('a millisecond', good(expl='Saves a millisecond per frame.')),
+        # Reviewer F2 / N1: the stock wording the UI relies on, and drivers.
+        ('published stock note citing a non-Microsoft page',
+         good(stock='3/-', stock_basis='published', stock_note='@VDOT sets it to Manual. The page names no build.')),
+        ('published stock note without "names no build"',
+         good(stock='3/-', stock_basis='published', stock_note='@IOT says the default is Manual.')),
+        ('stock on a driver without sysok',
+         good(name='usbprint', kind='drv', levels={}, pbasis='', pbasis_note='', stock='3/-', stock_basis='published',
+              stock_note='@USBPRINT: Manual. The page names no build.')),
     ]
     for what, e in bad:
         expect(errors_for(e, base) != [], 'fails: ' + what)
@@ -417,7 +437,8 @@ def selftest():
     for f, e in (('expl', good(expl='Frees [[200 MB|published|@IOT]] of RAM.')),
                  ('basis note', good(basis_note='@IOT says [[200 MB|published|@IOT]].')),
                  ('stock note', good(stock='3/-', stock_basis='published',
-                                     stock_note='@IOT: Start "is set to [[3|published|@IOT]] by default".'))):
+                                     stock_note='@IOT: Start "is set to [[3|published|@IOT]] by default". The page '
+                                                'names no build.'))):
         errs = []
         ln = check_entry(e, FakeKb([e], base), errs)
         expect(errs == [] and '[[' not in ln and ']]' not in ln and ('200 MB' in ln or 'set to 3 by' in ln),

@@ -341,7 +341,9 @@ private:
     int PresetChips(HDC dc, int x0, int y, int right, int wrapRight, int rowH, bool draw);
     int TiToggle(HDC dc, int right, int y, int h);   // the TrustedInstaller switch, right-anchored; returns its width
     std::wstring FirstChipLabel() const;   // "Default: as first seen (2026-11-01)" (Finalize Q3)
-    std::wstring StockChipLabel() const;   // "... (no data for this build yet)" while no entry has a value (Q2)
+    std::wstring StockChipLabel() const;   // "(N sourced)", "(no data on this tab)" or "(no data for this build yet)" (Q2)
+    bool StockForBuild() const;   // the KB has a Windows-stock value for this build on any item (reviewer F1)
+    std::wstring StockNone() const;   // "no data on this tab" or "no data for this build yet"
     int StockKnown() const;   // items on the current tab with a Windows-stock value for this build in the KB
 
     // Console layout (docs/pipeline/svcdrv/design/console.md): its own dense grid (18 px rows; core's ListView
@@ -2051,7 +2053,7 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
         kv(L"Windows stock", StartLabel(StartCfg{e->stock, e->stockDelayed}, false) + L" (" + BasisLabel(e->stockBasis) +
                                  (e->stockBasis == L"published" ? L"; the page names no build)" : L")"));
     else if (!IsStorageDriver(s.name))   // the chip's and F8's words (mini-design 12)
-        kv(L"Windows stock", StockKnown() ? L"no data for this item yet" : L"no data for this build yet", p.mute);
+        kv(L"Windows stock", StockKnown() ? L"no data for this item yet" : StockNone(), p.mute);
     if (s.trigger) kv(L"Triggers", s.triggers.empty() ? L"yes" : s.triggers);
     kv(L"Company (file claim)", s.company.empty() && companyPending_ ? L"still being read" : s.company);
     ImageInfo im = NormalizeImage(s.image, WindowsDir(), s.name, IsDriverType(s.type));
@@ -2329,6 +2331,17 @@ int ServicesModule::StockKnown() const {
     return n;
 }
 
+bool ServicesModule::StockForBuild() const {
+    if (!kbOk_) return false;
+    for (auto& e : kb_.entries)
+        if (e.stock >= 0 && e.ForBuild(build_) && !IsStorageDriver(e.name)) return true;
+    return false;
+}
+
+std::wstring ServicesModule::StockNone() const {
+    return StockForBuild() ? L"no data on this tab" : L"no data for this build yet";
+}
+
 std::wstring ServicesModule::FirstChipLabel() const {
     if (!hasFirst_) return L"Default: as first seen";
     auto cr = first_.meta.find(L"created");
@@ -2339,7 +2352,7 @@ std::wstring ServicesModule::FirstChipLabel() const {
 std::wstring ServicesModule::StockChipLabel() const {
     // kb-audit svcdrv-kb s8: the count, so a partial table doesn't read as a full reset to stock.
     const int n = StockKnown();
-    return n ? L"Default: Windows stock (" + std::to_wstring(n) + L" items)" : L"Default: Windows stock (no data for this build yet)";
+    return n ? L"Default: Windows stock (" + std::to_wstring(n) + L" sourced)" : L"Default: Windows stock (" + StockNone() + L")";
 }
 
 int ServicesModule::PresetChips(HDC dc, int x0, int y, int right, int wrapRight, int rowH, bool draw) {
@@ -3486,7 +3499,7 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
         {L"LIST", L"bottom right: the list (LIST), the item keys (ITEM) or a plan (PLAN)"}};
     const int nStock = StockKnown();
     std::wstring stock = nStock ? L"Plan: Default, Windows stock (only the " + std::to_wstring(nStock) + L" items with a sourced value)"
-                                : L"Plan: Default, Windows stock (no data for this build yet)";
+                                : L"Plan: Default, Windows stock (" + StockNone() + L")";
     std::vector<KV> a, b;
     if (mode_ == Mode::Plan) a.assign(std::begin(kPlan), std::end(kPlan));
     else a.assign(std::begin(kList), std::end(kList));
@@ -4007,7 +4020,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         check(m->FirstChipLabel() == L"Default: as first seen (2026-11-01)", L"ui: first-snapshot chip reads \"" + m->FirstChipLabel() + L"\"");
         // Services: the KB has published stock values (WSearch and others on the fixture); Drivers: none.
         const bool svcStock = m->StockKnown() > 0 &&
-                              m->StockChipLabel() == L"Default: Windows stock (" + std::to_wstring(m->StockKnown()) + L" items)";
+                              m->StockChipLabel() == L"Default: Windows stock (" + std::to_wstring(m->StockKnown()) + L" sourced)";
         bool f7 = false, f8 = false, f8d = false;
         h.Use(ui::Layout::Console, 96);
         for (auto& k : m->ConsoleKeys()) {
@@ -4015,13 +4028,13 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
             if (k.cap == L"F8") f8 = k.label == L"Stock (" + std::to_wstring(m->StockKnown()) + L")";
         }
         m->OnClickId(ID_TAB_DRV);
-        const bool drvNone = m->StockKnown() == 0 && m->StockChipLabel() == L"Default: Windows stock (no data for this build yet)";
+        const bool drvNone = m->StockKnown() == 0 && m->StockChipLabel() == L"Default: Windows stock (no data on this tab)";
         for (auto& k : m->ConsoleKeys())
             if (k.cap == L"F8") f8d = k.label == L"Stock (no data)";
         m->OnClickId(ID_TAB_SVC);
         h.Use(ui::Layout::Baseline, 96);
-        check(svcStock && drvNone, L"ui: Windows-stock chip: \"(N items)\" on Services (KB stock values), \"(no data for this build yet)\" "
-                                   L"on Drivers (none)");
+        check(svcStock && drvNone, L"ui: Windows-stock chip: \"(N sourced)\" on Services (KB stock values), \"(no data on this tab)\" "
+                                   L"on Drivers (none on this build's drivers)");
         check(f7 && f8 && f8d, L"ui: Console F7 reads \"1st seen\"; F8 \"Stock (N)\" on Services and \"Stock (no data)\" on Drivers");
         const SvcItem* ex = nullptr;
         for (auto& s : m->items_) if (IEq(s.name, L"ExampleUpdater")) ex = &s;
@@ -4227,7 +4240,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         h.Use(ly, 96);
         auto m = fresh(h, fixture);
         m->OnClickId(ID_TAB_DRV);
-        m->OnClickId(ID_PRESET + 1);   // Windows stock on Drivers: no data for build 19045
+        m->OnClickId(ID_PRESET + 1);   // Windows stock on Drivers: no value on this tab
         Canvas cs(1280, 800);
         if (!cs.ok()) continue;
         m->Paint(cs.dc, full);
@@ -4261,7 +4274,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         if (nv)
             for (auto& para : m->ItemDoc(*nv)) {
                 if (para.text.find(L"preset") != std::wstring::npos) nev++;
-                if (para.label == L"Windows stock" && para.text == L"no data for this build yet") stockWords = true;
+                if (para.label == L"Windows stock" && para.text == L"no data on this tab") stockWords = true;
             }
         m->OnClickId(ID_TAB_SVC);   // Services has some: a row without one says so for the item, WSearch shows its value
         for (auto& s : m->items_) {
@@ -4274,8 +4287,8 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         }
         check(nv && nev == 1, L"ui mini-design 10: nvlddmkm's detail says it is never in a preset once, not twice");
         check(stockWords && itemWords && wsWords,
-              L"ui mini-design 12: the detail's Windows stock line uses the chip's words (Drivers: no data for this build "
-              L"yet; Services: no data for this item yet, or the value with its basis)");
+              L"ui mini-design 12: the detail's Windows stock line uses the chip's words (Drivers: no data on this "
+              L"tab; Services: no data for this item yet, or the value with its basis)");
         // 14: "+t" when the Start type column can't hold "+trigger".
         SvcItem t;
         t.name = L"HxTrig";

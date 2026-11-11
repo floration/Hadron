@@ -2367,10 +2367,10 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         Ctx co = a.ctx;
         co.build = L"22631";
         Plan s1 = BuildDefault(true, TAB_DRIVERS, a.items, co);
-        const std::wstring want0 = L"Hadron has no Windows-stock data for build 19045 yet: nothing will be changed.";
+        const std::wstring want0 = L"Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed.";
         check(s0.rows.empty() && s0.emptyText == want0 && s0.notes.size() == 1 && s0.notes[0] == want0 &&
                   s1.emptyText == L"Hadron has no Windows-stock data for build 22631 yet: nothing will be changed.",
-              L"R20: Windows stock with no data says so (never a bare \"Nothing to change.\"), on any build");
+              L"R20: Windows stock with no data says so (never a bare \"Nothing to change.\"): no value on this tab (19045), no data for another build");
         std::vector<SvcItem> gi = {Mk(L"gmem", 3, {}), Mk(L"gdep", 3, {L"+grp"})};
         gi[0].group = L"GRP";
         FakeBackend fb;

@@ -1490,8 +1490,8 @@ STOCK = [
      'stock value.'),
     ('WSearch', '2/1',
      '@SEARCHPERF (supported Windows client versions): "The service should have the following configuration", '
-     'Status Running and "Startup Type: Automatic (Delayed Start)". That is the setting the page expects, not a '
-     'statement about a build; Hadron uses it as the Windows 10 stock value.'),
+     'Status Running and "Startup Type: Automatic (Delayed Start)". That is the setting the page expects; the page '
+     'names no build. Hadron uses it as the Windows 10 stock value.'),
     ('BrokerInfrastructure', '2/0',
      '@STARTMENU (a Start menu symptom on Windows 10 and two Windows Server releases): '
      '"BrokerInfrastructure is an automatic service." The page does not mention delayed start; Hadron reads it as '

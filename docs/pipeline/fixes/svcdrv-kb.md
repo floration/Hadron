@@ -155,3 +155,14 @@ preset"), and every explanation-only entry is `never`, so of the five stock valu
   TrustedInstaller (named never-preset) stay blocked; no preset offers TimeBrokerSvc and Default as first seen
   leaves it.
 - `plan-services-stock.txt`: the TimeBrokerSvc row is now `[x]` (2 ticked, 0 kept).
+
+## 6. Review
+The reviewer found no category 1-4 issues. The small ones, all applied:
+- **F1**: on 19045, a tab with no stock value (Drivers) no longer says "no data for this build": the plan says
+  "Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed." and the chip and
+  detail say "(no data on this tab)". Other builds keep the build sentence. R20 and the UI selftests updated;
+  `plan-drivers-stock.txt` regenerated.
+- **F2**: genkb fails a published stock note that cites a non-learn.microsoft.com page or lacks "names no build"
+  (two must-fail cases). WSearch's note now says "the page names no build".
+- **F3**: the chip reads "Default: Windows stock (N sourced)".
+- **N1**: genkb fails `stock` on a driver without `sysok` (one must-fail case).

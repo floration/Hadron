@@ -262,11 +262,16 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   - The plan writes only items with a stock value; the note says how many of the tab's items have one.
   - An explanation-only (`never`) KB entry doesn't block its stock row: `never` means not in a preset level.
     Never-touch items, protected services and the named never-preset list still block (DECISIONS 2026-11-11).
-  - With no stock value on a tab or build the plan is empty and says "Hadron has no Windows-stock data for build N
-    yet: nothing will be changed." (R20, proxy Q2), with no Apply button and no sum; the chip says "(no data for
-    this build yet)" and the detail's Windows stock line uses the same words. `StockKnown()` counts per tab, so
-    with this table the Services tab shows the plain chip and Drivers the "(no data ...)" one; a service without
-    a value says "no data for this item yet".
+  - With no stock value the plan is empty, with no Apply button and no sum, and never a bare "Nothing to change."
+    (R20, proxy Q2). On a build the KB has no stock values for, it says "Hadron has no Windows-stock data for build N
+    yet: nothing will be changed." and the chip "(no data for this build yet)". On 19045, a tab with no value (Drivers)
+    says "Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed." and the chip
+    "(no data on this tab)". The detail's Windows stock line uses the chip's words; a row without a value on a tab
+    that has some says "no data for this item yet". `StockKnown()` counts per tab; the Services chip reads
+    "Default: Windows stock (N sourced)".
+  - A published stock value is worded "from a Microsoft page (it names no build)". genkb enforces that: a published
+    stock note cites learn.microsoft.com pages only and says its page "names no build"; a driver with a stock value
+    needs `sysok`.
   - The mechanism is also selftested with an in-memory KB.
   - Stock values are never applied to storage drivers.
 - **"Default: as first seen"** (the first-run snapshot).

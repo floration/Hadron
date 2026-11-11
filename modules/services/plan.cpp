@@ -409,9 +409,10 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
             p.rows.push_back(std::move(r));
         }
-        if (withStock == 0) {
-            p.notes.push_back(none);
-            p.emptyText = none;
+        if (withStock == 0) {   // reviewer F1: this build has stock values, only not on this tab
+            const std::wstring tabNone = L"Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed.";
+            p.notes.push_back(tabNone);
+            p.emptyText = tabNone;
             return p;
         }
         p.notes.push_back(std::to_wstring(withStock) + L" of " + std::to_wstring(total) +

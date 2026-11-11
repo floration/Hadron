@@ -7,7 +7,7 @@ The KB has three files:
 
 Commands:
 ```
-python3 tools/services/genkb.py --selftest          # 62 must-fail cases, 17 ok texts, 3 marker cases, a warning case, the committed KB
+python3 tools/services/genkb.py --selftest          # 65 must-fail cases, 17 ok texts, 3 marker cases, a warning case, the committed KB
 python3 tools/services/genkb.py                     # regenerates modules/services/data/services.db
 python3 tools/services/genkb.py /tmp/services.db    # writes elsewhere (CI then runs cmp against the committed file)
 ```
@@ -51,6 +51,9 @@ The Windows stock table:
   type. The note quotes it and says what the page applies to. "Automatic" without "(Delayed Start)" is written
   `2/0` (the plan then clears a lingering DelayedAutostart), so a page that doesn't say which one needs a
   "(reasoning)" clause in the note.
+- genkb fails a `published` stock note that cites anything but learn.microsoft.com pages, or that doesn't say its
+  page "names no build": the module words every published stock value as "from a Microsoft page (it names no
+  build)". A driver with a stock value needs `sysok`.
 - Not usable as client stock: the `@IOT` and `@PERUSER` "Startup Type (Default)" columns ("the current version of
   Windows"; they disagree with each other), `@WS16` (Server 2016) and BITS (its page gives a start type that
   depends on queued jobs). `docs/pipeline/fixes/svcdrv-kb.md` has the details.
