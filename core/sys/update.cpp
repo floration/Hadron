@@ -241,7 +241,7 @@ bool HttpHop(const std::wstring& url, uint64_t maxBytes, uint64_t deadline, std:
     if (!req.h) { *err = HttpErr(L"WinHttpOpenRequest", GetLastError()); return false; }
     // Let AbortNetwork() (the UI thread, on close or opt-out) close this request: WinHTTP then fails the
     // blocking call at once instead of waiting out its timeout. Known window: an abort landing between two
-    // calls makes the next call use a closed handle, which WinHTTP rejects with ERROR_INVALID_HANDLE; no new
+    // calls makes the next call use a closed handle, which WinHTTP in practice rejects with ERROR_INVALID_HANDLE; no new
     // handle is created on that path (the hop returns and the next one sees `cancel`), so it can't be reused.
     struct Reg {
         HInet& r;
@@ -649,7 +649,9 @@ Result CheckAndInstall(bool install, const std::atomic<bool>* cancel) {
     if (cancel && cancel->load()) { r.outcome = Outcome::Cancelled; r.message = L"Update cancelled"; return r; }
 
     if (!Install(body, rel.version, exe, &err, cancel)) {
-        r.outcome = cancel && cancel->load() ? Outcome::Cancelled : Outcome::Failed;
+        // Only Install's own lock-wait cancel counts as cancelled; any other failure keeps its text (it may
+        // be the one message that says where the previous exe is).
+        r.outcome = err == L"cancelled" ? Outcome::Cancelled : Outcome::Failed;
         r.message = r.outcome == Outcome::Cancelled ? std::wstring(L"Update cancelled") : L"Update failed: " + err;
         return r;
     }
