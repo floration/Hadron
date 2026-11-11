@@ -44,7 +44,7 @@ Or start Hadron in Safe Mode and use Default: as first seen.
 C. Names the scripts can't carry
 None.
 
-D. Values (96 items)
+D. Values (97 items)
   DiagTrack  Start=2 (Auto)
   dmwappushservice  Start=3 (Manual)  (needed TrustedInstaller: see E)
   MapsBroker  Start=2 (Auto)  DelayedAutostart=1
@@ -128,6 +128,7 @@ D. Values (96 items)
   UsoSvc  Start=2 (Auto)  DelayedAutostart=1
   WaaSMedicSvc  Start=3 (Manual)  (needed TrustedInstaller: see E)
   InstallService  Start=3 (Manual)
+  TimeBrokerSvc  Start=4 (Disabled)
   Schedule  Start=2 (Auto)
   NVDisplay.ContainerLocalSystem  Start=2 (Auto)
   ExampleUpdater  Start=2 (Auto)  DelayedAutostart=1

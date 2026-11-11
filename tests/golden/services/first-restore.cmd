@@ -104,6 +104,7 @@ call :put "wuauserv" 3 -   & rem Manual
 call :put "UsoSvc" 2 1   & rem Auto (delayed)
 call :put "WaaSMedicSvc" 3 -   & rem Manual
 call :put "InstallService" 3 -   & rem Manual
+call :put "TimeBrokerSvc" 4 -   & rem Disabled
 call :put "Schedule" 2 -   & rem Auto
 call :put "NVDisplay.ContainerLocalSystem" 2 -   & rem Auto
 call :put "ExampleUpdater" 2 1   & rem Auto (delayed)
