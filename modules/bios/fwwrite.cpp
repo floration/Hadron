@@ -169,103 +169,24 @@ bool EnsureDir(const std::wstring& path, int depth = 0) {
 
 // Holds the write-lock mutex from Take() until destruction (released whenever it was acquired, the
 // abandoned case included).
-class WriteLock {
+// An owned Win32 handle (INVALID_HANDLE_VALUE / null = none).
+class Handle {
 public:
-    ~WriteLock() {
-        if (owned_) ReleaseMutex(h_);
-        if (h_) CloseHandle(h_);
+    Handle() = default;
+    explicit Handle(HANDLE h) : h_(h) {}
+    ~Handle() { Reset(); }
+    Handle(Handle&& o) noexcept : h_(o.h_) { o.h_ = INVALID_HANDLE_VALUE; }
+    Handle& operator=(Handle&& o) noexcept {
+        if (this != &o) { Reset(); h_ = o.h_; o.h_ = INVALID_HANDLE_VALUE; }
+        return *this;
     }
-    bool Take(const std::wstring& name, std::wstring* err) {
-        h_ = CreateMutexW(nullptr, FALSE, name.c_str());
-        if (!h_) {
-            *err = L"Couldn't create or open the write lock " + name + L": " + sys::ErrorText(GetLastError()) + L" Nothing was written.";
-            return false;
-        }
-        DWORD w = WaitForSingleObject(h_, 0);
-        if (w == WAIT_OBJECT_0) { owned_ = true; return true; }
-        if (w == WAIT_ABANDONED) {
-            // Its last holder ended mid-run: a write may have stopped between BEGIN and OK. Don't write
-            // over that; the "didn't finish" banner offers its backup.
-            owned_ = true;
-            *err = L"Another Hadron window stopped in the middle of a BIOS write. Nothing was written. Check its backup.";
-            return false;
-        }
-        if (w == WAIT_TIMEOUT) { *err = L"Another Hadron window is writing BIOS settings. Nothing was written."; return false; }
-        *err = L"Couldn't take the write lock: " + sys::ErrorText(GetLastError()) + L" Nothing was written.";
-        return false;
-    }
+    Handle(const Handle&) = delete;
+    Handle& operator=(const Handle&) = delete;
+    HANDLE Get() const { return h_; }
+    bool Ok() const { return h_ != INVALID_HANDLE_VALUE && h_ != nullptr; }
+    void Reset() { if (Ok()) CloseHandle(h_); h_ = INVALID_HANDLE_VALUE; }
 private:
-    HANDLE h_ = nullptr;
-    bool owned_ = false;
-};
-
-// Reads a whole small file (refusing anything over cap).
-bool ReadCapped(const std::wstring& path, size_t cap, std::string* out, std::wstring* err) {
-    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) { *err = sys::ErrorText(GetLastError()); return false; }
-    LARGE_INTEGER sz{};
-    bool ok = GetFileSizeEx(h, &sz) != 0;
-    if (!ok) *err = sys::ErrorText(GetLastError());
-    else if (sz.QuadPart < 0 || (unsigned long long)sz.QuadPart > cap) { ok = false; *err = L"the file is too large"; }
-    if (ok) {
-        out->assign((size_t)sz.QuadPart, '\0');
-        DWORD got = 0;
-        if (!out->empty()) {
-            if (!ReadFile(h, &(*out)[0], (DWORD)out->size(), &got, nullptr)) { *err = sys::ErrorText(GetLastError()); ok = false; }
-            else if (got != out->size()) { *err = L"the file ended early"; ok = false; }
-        }
-    }
-    CloseHandle(h);
-    return ok;
-}
-
-// The final (link-resolved) path of an existing folder, without a trailing backslash.
-bool FinalFolderPath(const std::wstring& path, std::wstring* out, std::wstring* err) {
-    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (h == INVALID_HANDLE_VALUE) { *err = sys::ToShell(path) + L": " + sys::ErrorText(GetLastError()); return false; }
-    std::vector<wchar_t> buf(512);
-    DWORD n = 0;
-    for (;;) {
-        n = GetFinalPathNameByHandleW(h, buf.data(), (DWORD)buf.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-        if (n == 0 || n < buf.size()) break;
-        buf.resize((size_t)n + 1);
-    }
-    DWORD e = GetLastError();
-    CloseHandle(h);
-    if (n == 0) { *err = sys::ToShell(path) + L": " + sys::ErrorText(e); return false; }
-    *out = std::wstring(buf.data(), n);
-    while (out->size() > 1 && (out->back() == L'\\' || out->back() == L'/')) out->pop_back();
-    return true;
-}
-
-bool SamePath(const std::wstring& a, const std::wstring& b) {
-    return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
-}
-
-constexpr const char* kManifestHeader = "Hadron BIOS backup manifest 2";
-
-// kBackupSddl as a self-relative descriptor plus the SECURITY_ATTRIBUTES that carry it.
-class BackupSd {
-public:
-    ~BackupSd() { if (sd_) LocalFree(sd_); }
-    bool Make(std::wstring* err) {
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kBackupSddl, SDDL_REVISION_1, &sd_, nullptr)) {
-            sd_ = nullptr;
-            *err = L"Couldn't build the backup folder's security descriptor: " + sys::ErrorText(GetLastError());
-            return false;
-        }
-        sa_.nLength = sizeof(sa_);
-        sa_.lpSecurityDescriptor = sd_;
-        sa_.bInheritHandle = FALSE;
-        return true;
-    }
-    PSECURITY_DESCRIPTOR Sd() const { return sd_; }
-    SECURITY_ATTRIBUTES* Sa() { return &sa_; }
-private:
-    PSECURITY_DESCRIPTOR sd_ = nullptr;
-    SECURITY_ATTRIBUTES sa_{};
+    HANDLE h_ = INVALID_HANDLE_VALUE;
 };
 
 bool IsWellKnown(PSID sid, WELL_KNOWN_SID_TYPE type) {
@@ -285,6 +206,297 @@ std::wstring SidText(PSID sid) {
     return r;
 }
 
+// An SDDL string as a self-relative descriptor plus the SECURITY_ATTRIBUTES that carry it.
+class SddlSd {
+public:
+    ~SddlSd() { if (sd_) LocalFree(sd_); }
+    bool Make(const wchar_t* sddl, std::wstring* err) {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd_, nullptr)) {
+            sd_ = nullptr;
+            *err = L"Couldn't build a security descriptor: " + sys::ErrorText(GetLastError());
+            return false;
+        }
+        sa_.nLength = sizeof(sa_);
+        sa_.lpSecurityDescriptor = sd_;
+        sa_.bInheritHandle = FALSE;
+        return true;
+    }
+    SECURITY_ATTRIBUTES* Sa() { return &sa_; }
+private:
+    PSECURITY_DESCRIPTOR sd_ = nullptr;
+    SECURITY_ATTRIBUTES sa_{};
+};
+// kBackupSddl: every backup folder and file.
+class BackupSd : public SddlSd {
+public:
+    bool Make(std::wstring* err) { return SddlSd::Make(kBackupSddl, err); }
+};
+
+// Holds the write-lock mutex from Take() until destruction (released whenever it was acquired, the
+// abandoned case included). Created with kLockSddl; an existing one must be owned by Administrators or
+// SYSTEM, so a non-admin process can't pre-create it and decide who writes.
+class WriteLock {
+public:
+    ~WriteLock() {
+        if (owned_) ReleaseMutex(h_);
+        if (h_) CloseHandle(h_);
+    }
+    bool Take(const std::wstring& name, std::wstring* err) {
+        SddlSd sd;
+        std::wstring e;
+        if (!sd.Make(kLockSddl, &e)) { *err = e + L" Nothing was written."; return false; }
+        h_ = CreateMutexW(sd.Sa(), FALSE, name.c_str());
+        DWORD ce = GetLastError();
+        if (!h_) {
+            *err = L"Couldn't create or open the BIOS write lock " + name + L": " + sys::ErrorText(ce) + L" Nothing was written.";
+            return false;
+        }
+        if (ce == ERROR_ALREADY_EXISTS) {
+            PSID owner = nullptr;
+            PSECURITY_DESCRIPTOR psd = nullptr;
+            DWORD ge = GetSecurityInfo(h_, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &psd);
+            bool admin = ge == ERROR_SUCCESS && IsAdminOrSystem(owner);
+            std::wstring who = ge == ERROR_SUCCESS ? SidText(owner) : std::wstring();
+            if (psd) LocalFree(psd);
+            if (ge != ERROR_SUCCESS) {
+                *err = L"Couldn't read the owner of the BIOS write lock: " + sys::ErrorText(ge) + L" Nothing was written.";
+                return false;
+            }
+            if (!admin) {
+                *err = L"The BIOS write lock was created by a non-admin process (owner " + who + L"). Nothing was written.";
+                return false;
+            }
+        }
+        DWORD w = WaitForSingleObject(h_, 0);
+        if (w == WAIT_OBJECT_0) { owned_ = true; return true; }
+        if (w == WAIT_ABANDONED) {
+            // Its last holder ended while holding it: possibly a write stopped between BEGIN and OK. Don't
+            // write over that; the "didn't finish" banner offers that session's backup if its journal says so.
+            owned_ = true;
+            *err = L"The BIOS write lock was left by a process that ended while holding it (a Hadron window may have "
+                   L"stopped in the middle of a BIOS write). Nothing was written. Check the newest backup.";
+            return false;
+        }
+        if (w == WAIT_TIMEOUT) {
+            *err = L"The BIOS write lock is held by another process (another Hadron window may be writing BIOS settings). "
+                   L"Nothing was written.";
+            return false;
+        }
+        *err = L"Couldn't take the BIOS write lock: " + sys::ErrorText(GetLastError()) + L" Nothing was written.";
+        return false;
+    }
+private:
+    HANDLE h_ = nullptr;
+    bool owned_ = false;
+};
+
+bool SamePath(const std::wstring& a, const std::wstring& b) {
+    return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
+}
+std::wstring ParentOf(const std::wstring& p) {
+    size_t k = p.find_last_of(L'\\');
+    return k == std::wstring::npos ? std::wstring() : p.substr(0, k);
+}
+
+bool HandleFinalPath(HANDLE h, std::wstring* out, DWORD* err) {
+    std::vector<wchar_t> buf(512);
+    DWORD n = 0;
+    for (;;) {
+        n = GetFinalPathNameByHandleW(h, buf.data(), (DWORD)buf.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (n == 0 || n < buf.size()) break;
+        buf.resize((size_t)n + 1);
+    }
+    if (n == 0) { *err = GetLastError(); return false; }
+    *out = std::wstring(buf.data(), n);
+    while (out->size() > 1 && out->back() == L'\\') out->pop_back();
+    return true;
+}
+
+// Why OpenChecked refused.
+enum class OpenFail { None, Open, Kind, Link, Place, Trust };
+
+// Opens path once, never following a link at its last component (FILE_FLAG_OPEN_REPARSE_POINT; plus
+// BACKUP_SEMANTICS for a folder), sharing read only (no write or delete sharing while it is held), and
+// checks the handle itself: the expected kind and not a reparse point; its final path equals
+// expectFinal (when given) and its parent's final path equals expectParent (when given); and trust.
+bool OpenChecked(const std::wstring& path, bool dir, const std::wstring& expectFinal, const std::wstring& expectParent,
+                 const TrustFn& trust, Handle* out, std::wstring* finalOut, std::wstring* why, OpenFail* fail = nullptr,
+                 DWORD* openErr = nullptr) {
+    OpenFail dummy;
+    if (!fail) fail = &dummy;
+    *fail = OpenFail::None;
+    std::wstring shown = sys::ToShell(sys::ToExtended(path));
+    DWORD access = dir ? (READ_CONTROL | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE) : GENERIC_READ;
+    Handle h(CreateFileW(sys::ToExtended(path).c_str(), access, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                         FILE_FLAG_OPEN_REPARSE_POINT | (dir ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr));
+    if (!h.Ok()) {
+        DWORD e = GetLastError();
+        if (openErr) *openErr = e;
+        *fail = OpenFail::Open;
+        *why = L"Can't open " + shown + L": " + sys::ErrorText(e);
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION fi{};
+    if (!GetFileInformationByHandle(h.Get(), &fi)) {
+        *fail = OpenFail::Open;
+        *why = L"Can't read " + shown + L": " + sys::ErrorText(GetLastError());
+        return false;
+    }
+    if (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        *fail = OpenFail::Link;
+        *why = shown + L" is a link (reparse point), so it isn't trusted.";
+        return false;
+    }
+    if (((fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != dir) {
+        *fail = OpenFail::Kind;
+        *why = shown + (dir ? L" is a file, not a folder." : L" is a folder, not a file.");
+        return false;
+    }
+    std::wstring fin;
+    DWORD fe = 0;
+    if (!HandleFinalPath(h.Get(), &fin, &fe)) {
+        *fail = OpenFail::Open;
+        *why = L"Can't resolve " + shown + L": " + sys::ErrorText(fe);
+        return false;
+    }
+    if (!expectFinal.empty() && !SamePath(fin, expectFinal)) {
+        *fail = OpenFail::Place;
+        *why = shown + L" resolves to " + sys::ToShell(fin) + L", not " + sys::ToShell(expectFinal) + L".";
+        return false;
+    }
+    if (!expectParent.empty() && !SamePath(ParentOf(fin), expectParent)) {
+        *fail = OpenFail::Place;
+        *why = sys::ToShell(fin) + L" isn't directly inside " + sys::ToShell(expectParent) + L".";
+        return false;
+    }
+    std::wstring tw;
+    if (!trust(h.Get(), fin, &tw)) {
+        *fail = OpenFail::Trust;
+        *why = L"This backup folder can be changed without admin rights, so it isn't trusted (" + sys::ToShell(fin) + L": " + tw + L").";
+        return false;
+    }
+    *out = std::move(h);
+    if (finalOut) *finalOut = fin;
+    return true;
+}
+
+// Reads every byte through the handle (refusing anything over cap).
+bool ReadAllFrom(HANDLE h, size_t cap, std::string* out, std::wstring* why) {
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(h, &sz)) { *why = sys::ErrorText(GetLastError()); return false; }
+    if (sz.QuadPart < 0 || (unsigned long long)sz.QuadPart > cap) { *why = L"the file is too large"; return false; }
+    out->assign((size_t)sz.QuadPart, '\0');
+    size_t done = 0;
+    while (done < out->size()) {
+        DWORD chunk = (DWORD)std::min<size_t>(out->size() - done, 1u << 20), got = 0;
+        if (!ReadFile(h, &(*out)[done], chunk, &got, nullptr)) { *why = sys::ErrorText(GetLastError()); return false; }
+        if (got == 0) { *why = L"the file ended early"; return false; }
+        done += got;
+    }
+    return true;
+}
+
+struct DirEntry {
+    std::wstring name;
+    DWORD attr = 0;
+    long long created = 0;
+};
+// Lists a folder through its handle (FileIdBothDirectoryInfo), so the listing is of the folder that was
+// checked, not of whatever a path names now.
+bool ListDir(HANDLE h, std::vector<DirEntry>* out, std::wstring* why, size_t max = 4096) {
+    out->clear();
+    std::vector<unsigned long long> buf(64 * 1024 / sizeof(unsigned long long));
+    bool first = true;
+    for (;;) {
+        BOOL r = GetFileInformationByHandleEx(h, first ? FileIdBothDirectoryRestartInfo : FileIdBothDirectoryInfo, buf.data(),
+                                              (DWORD)(buf.size() * sizeof(buf[0])));
+        first = false;
+        if (!r) {
+            DWORD e = GetLastError();
+            if (e == ERROR_NO_MORE_FILES) return true;
+            *why = L"Can't list a backup folder: " + sys::ErrorText(e);
+            return false;
+        }
+        const BYTE* p = reinterpret_cast<const BYTE*>(buf.data());
+        const BYTE* end = p + buf.size() * sizeof(buf[0]);
+        for (;;) {
+            if (p + sizeof(FILE_ID_BOTH_DIR_INFO) > end) break;
+            const FILE_ID_BOTH_DIR_INFO* fi = reinterpret_cast<const FILE_ID_BOTH_DIR_INFO*>(p);
+            if ((const BYTE*)fi->FileName + fi->FileNameLength > end) break;
+            DirEntry de;
+            de.name.assign(fi->FileName, fi->FileNameLength / sizeof(wchar_t));
+            de.attr = fi->FileAttributes;
+            de.created = fi->CreationTime.QuadPart;
+            if (de.name != L"." && de.name != L"..") {
+                if (out->size() >= max) { *why = L"A backup folder holds too many entries."; return false; }
+                out->push_back(std::move(de));
+            }
+            if (!fi->NextEntryOffset) break;
+            p += fi->NextEntryOffset;
+        }
+    }
+}
+
+// The backup root is <anchor>\<parent>\<root> (in use: %ProgramData%\Hadron\bios-backups). Opens and
+// checks parent and root by handle: real folders (not links) at exactly <anchor's final path>\<parent>
+// and ...\<root>, each passing trust. With create, each missing one is first created with kBackupSddl
+// (the parent is checked before the root is created inside it). Never changes the security of anything
+// that already exists. *parentH and *rootH stay open (no write/delete sharing) while the caller works.
+bool OpenRoot(const std::wstring& root, bool create, const TrustFn& trust, Handle* parentH, Handle* rootH,
+              std::wstring* rootFinal, std::wstring* why, OpenFail* fail = nullptr, DWORD* openErr = nullptr) {
+    std::wstring r = sys::ToExtended(root);
+    while (r.size() > 1 && (r.back() == L'\\' || r.back() == L'/')) r.pop_back();
+    size_t k2 = r.find_last_of(L'\\');
+    size_t k1 = k2 == std::wstring::npos || k2 == 0 ? std::wstring::npos : r.find_last_of(L'\\', k2 - 1);
+    if (k1 == std::wstring::npos || k1 + 1 >= k2 || k2 + 1 >= r.size()) {
+        *why = L"The backup folder " + sys::ToShell(r) + L" isn't a <folder>\\<name>\\<name> path.";
+        return false;
+    }
+    std::wstring anchor = r.substr(0, k1), parent = r.substr(0, k2);
+    std::wstring n1 = r.substr(k1 + 1, k2 - k1 - 1), n2 = r.substr(k2 + 1);
+    if (!anchor.empty() && anchor.back() == L':') anchor += L'\\';   // a drive root
+    std::wstring anchorFinal;
+    {
+        // The anchor (%ProgramData%) is only resolved, not trusted: the trust starts at <parent>.
+        if (create && !EnsureDir(anchor)) { *why = L"Can't create " + sys::ToShell(anchor) + L": " + sys::ErrorText(GetLastError()); return false; }
+        Handle a(CreateFileW(anchor.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        DWORD fe = GetLastError();
+        if (!a.Ok() || !HandleFinalPath(a.Get(), &anchorFinal, &fe)) {
+            if (fail) *fail = OpenFail::Open;
+            if (openErr) *openErr = fe;
+            *why = L"Can't open " + sys::ToShell(anchor) + L": " + sys::ErrorText(fe);
+            return false;
+        }
+    }
+    BackupSd sd;
+    if (create && !sd.Make(why)) return false;
+    auto mk = [&](const std::wstring& p) {
+        if (!create || CreateDirectoryW(p.c_str(), sd.Sa())) return true;
+        DWORD e = GetLastError();
+        if (e == ERROR_ALREADY_EXISTS) return true;   // checked by handle next, never re-secured
+        *why = L"Can't create " + sys::ToShell(p) + L": " + sys::ErrorText(e);
+        return false;
+    };
+    std::wstring parentFinal;
+    if (!mk(parent) || !OpenChecked(parent, true, anchorFinal + L"\\" + n1, L"", trust, parentH, &parentFinal, why, fail, openErr))
+        return false;
+    if (!mk(r) || !OpenChecked(r, true, parentFinal + L"\\" + n2, L"", trust, rootH, rootFinal, why, fail, openErr)) return false;
+    return true;
+}
+
+// FileSource over files already read into memory (keys: lower-case, '/'-separated, relative).
+struct MemSource : FileSource {
+    std::map<std::wstring, std::string> files;
+    bool Read(const std::wstring& rel, std::string* out, size_t cap, std::wstring* err) override {
+        auto it = files.find(Lower(rel));
+        if (it == files.end()) { *err = rel + L": not in the backup"; return false; }
+        if (it->second.size() > cap) { *err = rel + L": too large"; return false; }
+        *out = it->second;
+        return true;
+    }
+};
+
 std::wstring TrimLine(std::wstring s) {   // the same trimming as snapshot.cpp's system.txt reader
     while (!s.empty() && (s.back() == L' ' || s.back() == L'\r' || s.back() == L'\t')) s.pop_back();
     size_t a = 0;
@@ -292,27 +504,8 @@ std::wstring TrimLine(std::wstring s) {   // the same trimming as snapshot.cpp's
     return s.substr(a);
 }
 
-// Every folder and file under dir (dir itself too) passes trust; links are refused, never followed.
-bool TreeTrusted(const std::wstring& dir, const TrustFn& trust, std::wstring* why, int depth = 0) {
-    if (depth > 4) { *why = L"the backup folder is nested too deeply"; return false; }
-    if (!trust(dir, why)) return false;
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(sys::ToExtended(dir + L"\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) { *why = sys::ToShell(dir) + L": " + sys::ErrorText(GetLastError()); return false; }
-    bool ok = true;
-    do {
-        std::wstring n = fd.cFileName;
-        if (n == L"." || n == L"..") continue;
-        std::wstring p = dir + L"\\" + n;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { *why = sys::ToShell(p) + L" is a link"; ok = false; break; }
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = TreeTrusted(p, trust, why, depth + 1);
-        else ok = trust(p, why);
-    } while (ok && FindNextFileW(h, &fd));
-    FindClose(h);
-    return ok;
-}
+constexpr const char* kManifestHeader = "Hadron BIOS backup manifest 2";
 
-const wchar_t* kUntrusted = L"This backup folder can be changed without admin rights, so it isn't trusted";
 
 }  // namespace
 
@@ -693,9 +886,11 @@ std::wstring ExecResult::Summary() const {
 }
 
 std::wstring DefaultBackupRoot() {
+    // %ProgramData%, not %LOCALAPPDATA%: the user owns everything under their profile, so a non-admin
+    // could redirect or swap a folder there; ProgramData\Hadron is created admin-only by Hadron.
     PWSTR p = nullptr;
     std::wstring r;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p)) && p) r = std::wstring(p) + L"\\Hadron\\bios-backups";
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &p)) && p) r = std::wstring(p) + L"\\Hadron\\bios-backups";
     if (p) CoTaskMemFree(p);
     return r;
 }
@@ -707,12 +902,12 @@ bool SdTrusted(PSECURITY_DESCRIPTOR sd, std::wstring* why) {
     PSID owner = nullptr;
     BOOL ownerDef = FALSE;
     if (!GetSecurityDescriptorOwner(sd, &owner, &ownerDef)) { *why = L"the owner can't be read: " + sys::ErrorText(GetLastError()); return false; }
-    if (!owner) { *why = L"it has no owner"; return false; }
+    if (!owner) { *why = L"it has no owner"; return false; }   // not an API failure: no GetLastError here
     if (!IsAdminOrSystem(owner)) { *why = L"it is owned by " + SidText(owner) + L", not Administrators or SYSTEM"; return false; }
     BOOL present = FALSE, daclDef = FALSE;
     PACL dacl = nullptr;
     if (!GetSecurityDescriptorDacl(sd, &present, &dacl, &daclDef)) { *why = L"the DACL can't be read: " + sys::ErrorText(GetLastError()); return false; }
-    if (!present || !dacl) { *why = L"it has no DACL (everyone has full access)"; return false; }
+    if (!present || !dacl) { *why = L"it has no DACL (everyone has full access)"; return false; }   // likewise
     // Every right that changes, adds, removes or re-permissions something.
     const ACCESS_MASK kWrite = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD |
                                DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED;
@@ -742,67 +937,60 @@ bool SdTrusted(PSECURITY_DESCRIPTOR sd, std::wstring* why) {
     return true;
 }
 
-bool PathTrusted(const std::wstring& path, std::wstring* why) {
+bool HandleTrusted(HANDLE h, std::wstring* why) {
     std::wstring dummy;
     if (!why) why = &dummy;
     PSECURITY_DESCRIPTOR sd = nullptr;
-    std::wstring x = sys::ToExtended(path);
-    DWORD e = GetNamedSecurityInfoW(&x[0], SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                                    nullptr, nullptr, nullptr, nullptr, &sd);
-    if (e != ERROR_SUCCESS) { *why = sys::ToShell(x) + L": its permissions can't be read (" + sys::ErrorText(e) + L")"; return false; }
+    DWORD e = GetSecurityInfo(h, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                              nullptr, nullptr, &sd);
+    if (e != ERROR_SUCCESS) { *why = L"its permissions can't be read (" + sys::ErrorText(e) + L")"; return false; }
     bool ok = SdTrusted(sd, why);
     LocalFree(sd);
-    if (!ok) *why = sys::ToShell(x) + L": " + *why;
     return ok;
 }
 
-bool PrepareBackupRoot(const std::wstring& root, std::wstring* err) {
-    if (root.empty()) { *err = L"No backup folder (the local app data folder couldn't be resolved)."; return false; }
-    std::wstring r = root;
-    while (r.size() > 1 && (r.back() == L'\\' || r.back() == L'/')) r.pop_back();
-    BackupSd sd;
-    if (!sd.Make(err)) return false;
-    size_t k = r.find_last_of(L"\\/");
-    if (k != std::wstring::npos && k > 0 && !EnsureDir(r.substr(0, k))) {
-        *err = L"Can't create " + sys::ToShell(r.substr(0, k)) + L": " + sys::ErrorText(GetLastError());
-        return false;
-    }
-    std::wstring x = sys::ToExtended(r);
-    if (CreateDirectoryW(x.c_str(), sd.Sa())) return true;
-    DWORD e = GetLastError();
-    if (e != ERROR_ALREADY_EXISTS) { *err = L"Can't create " + sys::ToShell(x) + L": " + sys::ErrorText(e); return false; }
-    // It exists: it must be a real folder, and it gets our owner and protected DACL again.
-    DWORD a = GetFileAttributesW(x.c_str());
-    if (a == INVALID_FILE_ATTRIBUTES) { *err = L"Can't open " + sys::ToShell(x) + L": " + sys::ErrorText(GetLastError()); return false; }
-    if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { *err = sys::ToShell(x) + L" is a file, not the backup folder."; return false; }
-    if (a & FILE_ATTRIBUTE_REPARSE_POINT) { *err = sys::ToShell(x) + L" is a link; the backup folder must be a real folder."; return false; }
-    PSID owner = nullptr;
-    PACL dacl = nullptr;
-    BOOL def = FALSE, present = FALSE;
-    if (!GetSecurityDescriptorOwner(sd.Sd(), &owner, &def) || !GetSecurityDescriptorDacl(sd.Sd(), &present, &dacl, &def) || !owner || !dacl) {
-        *err = L"The backup folder's security descriptor is incomplete: " + sys::ErrorText(GetLastError());
-        return false;
-    }
-    e = SetNamedSecurityInfoW(&x[0], SE_FILE_OBJECT,
-                              OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                              owner, nullptr, dacl, nullptr);
-    if (e != ERROR_SUCCESS) {
-        *err = L"Can't make " + sys::ToShell(x) + L" admin-only: " + sys::ErrorText(e);
+namespace {
+const TrustFn& DefaultTrust() {
+    static const TrustFn f = [](HANDLE h, const std::wstring&, std::wstring* why) { return HandleTrusted(h, why); };
+    return f;
+}
+const TrustFn& Pick(const TrustFn& t) { return t ? t : DefaultTrust(); }
+}  // namespace
+
+bool PrepareBackupRoot(const std::wstring& root, std::wstring* err, const TrustFn& trust) {
+    if (root.empty()) { *err = L"No backup folder (the ProgramData folder couldn't be resolved)."; return false; }
+    Handle ph, rh;
+    std::wstring rf, why;
+    if (!OpenRoot(root, true, Pick(trust), &ph, &rh, &rf, &why)) {
+        *err = L"The backup folder can't be used: " + why;
         return false;
     }
     return true;
 }
 
-bool CreateBackupSession(const std::wstring& root, const std::wstring& stamp, std::wstring* dir, std::wstring* err) {
-    if (!PrepareBackupRoot(root, err)) return false;
+bool CreateBackupSession(const std::wstring& root, const std::wstring& stamp, std::wstring* dir, std::wstring* err,
+                         const TrustFn& trust) {
+    if (root.empty()) { *err = L"No backup folder (the ProgramData folder couldn't be resolved)."; return false; }
+    // The checked parent and root stay open (no delete sharing) while the session folder is made in them.
+    Handle ph, rh;
+    std::wstring rootFinal, why;
+    if (!OpenRoot(root, true, Pick(trust), &ph, &rh, &rootFinal, &why)) { *err = L"The backup folder can't be used: " + why; return false; }
     BackupSd sd;
     if (!sd.Make(err)) return false;
-    std::wstring base = root;
-    if (base.back() != L'\\') base += L'\\';
+    std::wstring base = sys::ToExtended(root);
+    while (base.size() > 1 && base.back() == L'\\') base.pop_back();
     for (int n = 1; n < 1000; n++) {
-        std::wstring cand = base + stamp + (n > 1 ? L"-" + std::to_wstring(n) : L"");
-        if (CreateDirectoryW(sys::ToExtended(cand).c_str(), sd.Sa())) { *dir = cand; return true; }
-        DWORD e = GetLastError();
+        std::wstring name = stamp + (n > 1 ? L"-" + std::to_wstring(n) : L"");
+        std::wstring cand = base + L"\\" + name;
+        if (CreateDirectoryW(cand.c_str(), sd.Sa())) {
+            Handle sh;
+            if (!OpenChecked(cand, true, rootFinal + L"\\" + name, L"", Pick(trust), &sh, nullptr, &why)) {
+                *err = L"The new backup folder can't be used: " + why;
+                return false;
+            }
+            *dir = cand;
+            return true;
+        }        DWORD e = GetLastError();
         if (e != ERROR_ALREADY_EXISTS) { *err = L"Can't create " + sys::ToShell(cand) + L": " + sys::ErrorText(e); return false; }
     }
     *err = L"Too many backup sessions with the stamp " + stamp + L".";
@@ -857,7 +1045,7 @@ bool ManifestText(const std::vector<FwVar>& vars, const SmbiosInfo& smb, std::st
 }
 
 bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, SnapLoad* out, const TrustFn& trust) {
-    const TrustFn check = trust ? trust : TrustFn(PathTrusted);
+    const TrustFn& check = Pick(trust);
     *out = SnapLoad{};
     out->label = sys::ToShell(sys::ToExtended(dir));
     auto refuse = [&](const std::wstring& why) {
@@ -868,28 +1056,61 @@ bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, 
         LogLine(LogLevel::Warn, L"restore refused for " + out->label + L": " + why);
         return false;
     };
-    if (backupRoot.empty()) return refuse(L"There is no backup folder to restore from (the local app data folder couldn't be resolved).");
-    DWORD a = GetFileAttributesW(sys::ToExtended(dir).c_str());
-    if (a == INVALID_FILE_ATTRIBUTES) return refuse(L"Can't open " + out->label + L": " + sys::ErrorText(GetLastError()));
-    if (!(a & FILE_ATTRIBUTE_DIRECTORY)) return refuse(L"Choose a backup session folder, not a file.");
-    if (a & FILE_ATTRIBUTE_REPARSE_POINT) return refuse(L"The chosen folder is a link (junction or symbolic link); choose the session folder itself.");
+    if (backupRoot.empty()) return refuse(L"There is no backup folder to restore from (the ProgramData folder couldn't be resolved).");
+    // Every folder and file is opened once, checked by its handle (not a link, where it should be,
+    // admin-only) and read through that same handle; the folder handles stay open, without write or
+    // delete sharing, until everything is read. Nothing is reopened by path after its check.
+    Handle parentH, rootH, dirH, varsH;
     std::wstring rootFinal, dirFinal, e;
-    if (!FinalFolderPath(backupRoot, &rootFinal, &e)) return refuse(L"Can't resolve the backup folder: " + e);
-    if (!FinalFolderPath(dir, &dirFinal, &e)) return refuse(L"Can't resolve the chosen folder: " + e);
-    size_t cut = dirFinal.find_last_of(L'\\');
-    if (cut == std::wstring::npos || !SamePath(dirFinal.substr(0, cut), rootFinal))
-        return refuse(L"Only Hadron's own backup sessions can be restored: choose a folder directly inside " +
-                      sys::ToShell(rootFinal) + L".");
-    // Admin-only, all the way down, before anything is read: a standard user can't have planted or
-    // changed any of it (and can't change it after this check).
-    if (!check(backupRoot, &e) || !TreeTrusted(dir, check, &e)) return refuse(std::wstring(kUntrusted) + L" (" + e + L").");
-    if (GetFileAttributesW(sys::ToExtended(dir + L"\\journal.txt").c_str()) == INVALID_FILE_ATTRIBUTES)
-        return refuse(L"This folder has no journal.txt, so it isn't a Hadron write backup.");
-    std::string man;
-    if (!ReadCapped(dir + L"\\manifest.txt", 1u << 20, &man, &e))
-        return refuse(L"This folder has no readable manifest.txt (" + e + L"), so it isn't a Hadron write backup.");
-    if (!LoadSnapshot(sys::ToExtended(dir), out)) return refuse(out->error.empty() ? L"The backup doesn't load." : out->error);
-    out->label = sys::ToShell(sys::ToExtended(dir));
+    if (!OpenRoot(backupRoot, false, check, &parentH, &rootH, &rootFinal, &e)) return refuse(L"The backup folder can't be used: " + e);
+    OpenFail fail = OpenFail::None;
+    if (!OpenChecked(dir, true, L"", rootFinal, check, &dirH, &dirFinal, &e, &fail)) {
+        if (fail == OpenFail::Place || (fail == OpenFail::Kind && SamePath(ParentOf(sys::ToExtended(dir)), rootFinal)))
+            return refuse(L"Only Hadron's own backup sessions can be restored: choose a folder directly inside " +
+                          sys::ToShell(rootFinal) + L".");
+        return refuse(e);
+    }
+    MemSource mem;
+    size_t total = 0;
+    auto readInto = [&](const std::wstring& path, const std::wstring& parentFinal, const std::wstring& rel) {
+        Handle fh;
+        if (!OpenChecked(path, false, L"", parentFinal, check, &fh, nullptr, &e)) return false;
+        std::string bytes;
+        std::wstring why;
+        if (!ReadAllFrom(fh.Get(), kMaxSnapText, &bytes, &why)) { e = sys::ToShell(sys::ToExtended(path)) + L": " + why; return false; }
+        total += bytes.size();
+        if (total > kMaxSnapTotal) { e = L"The backup is larger than a snapshot may be."; return false; }
+        mem.files[Lower(rel)] = std::move(bytes);
+        return true;
+    };
+    std::vector<DirEntry> top, vars;
+    if (!ListDir(dirH.Get(), &top, &e)) return refuse(e);
+    const std::wstring dirPath = sys::ToExtended(dir);
+    for (auto& en : top) {
+        std::wstring p = dirPath + L"\\" + en.name;
+        if (en.attr & FILE_ATTRIBUTE_REPARSE_POINT) return refuse(sys::ToShell(p) + L" is a link (reparse point), so it isn't trusted.");
+        if (!(en.attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (!readInto(p, dirFinal, en.name)) return refuse(e);
+            continue;
+        }
+        if (Lower(en.name) != L"vars") return refuse(L"The backup has an unexpected folder " + sys::ToShell(p) + L".");
+        std::wstring varsFinal;
+        if (!OpenChecked(p, true, dirFinal + L"\\" + en.name, L"", check, &varsH, &varsFinal, &e)) return refuse(e);
+        if (!ListDir(varsH.Get(), &vars, &e)) return refuse(e);
+        for (auto& v : vars) {
+            std::wstring vp = p + L"\\" + v.name;
+            if (v.attr & FILE_ATTRIBUTE_REPARSE_POINT) return refuse(sys::ToShell(vp) + L" is a link (reparse point), so it isn't trusted.");
+            if (v.attr & FILE_ATTRIBUTE_DIRECTORY) return refuse(L"The backup has an unexpected folder " + sys::ToShell(vp) + L".");
+            if (!readInto(vp, varsFinal, L"vars/" + v.name)) return refuse(e);
+        }
+    }
+    if (!mem.files.count(L"journal.txt")) return refuse(L"This folder has no journal.txt, so it isn't a Hadron write backup.");
+    auto mit = mem.files.find(L"manifest.txt");
+    if (mit == mem.files.end()) return refuse(L"This folder has no manifest.txt, so it isn't a Hadron write backup.");
+    const std::string man = mit->second;
+    const std::wstring label = out->label;
+    if (!LoadSnapshotFrom(mem, label, out)) return refuse(out->error.empty() ? L"The backup doesn't load." : out->error);
+    out->label = label;
     if (out->skipped) return refuse(L"The backup lists variables it can't load (" + out->SkipSummary() + L").");
     // Parse and compare the manifest.
     std::wstring t = FromUtf8(man);
@@ -1031,7 +1252,7 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
     // restore and the start-up banner can trust it.
     BackupSd sd;
     if (!sd.Make(&e)) return stop(L"Backup failed: " + e + L" Nothing was written.");
-    if (!CreateBackupSession(backupRoot, stamp, &dir, &e)) return stop(L"Backup failed: " + e + L" Nothing was written.");
+    if (!CreateBackupSession(backupRoot, stamp, &dir, &e, opt.trust)) return stop(L"Backup failed: " + e + L" Nothing was written.");
     out->backupDir = sys::ToShell(sys::ToExtended(dir));
     out->started = true;
     SaveResult sr;
@@ -1166,56 +1387,55 @@ bool JournalIncomplete(const std::string& journal, std::vector<std::wstring>* va
 bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int newest, const TrustFn& trust) {
     *out = IncompleteSession{};
     if (root.empty()) return false;
-    if (GetFileAttributesW(sys::ToExtended(root).c_str()) == INVALID_FILE_ATTRIBUTES) return false;   // no backups yet
-    const TrustFn check = trust ? trust : TrustFn(PathTrusted);
-    std::wstring why;
-    if (!check(root, &why)) {
-        LogLine(LogLevel::Warn, L"unfinished-write check skipped: the backup folder isn't admin-only (" + why + L")");
+    const TrustFn& check = Pick(trust);
+    // Handle-based like LoadBackupSession: the root, each session folder and its journal are opened once,
+    // checked by handle and read through it.
+    Handle parentH, rootH;
+    std::wstring rootFinal, why;
+    OpenFail fail = OpenFail::None;
+    DWORD oe = 0;
+    if (!OpenRoot(root, false, check, &parentH, &rootH, &rootFinal, &why, &fail, &oe)) {
+        bool none = fail == OpenFail::Open && (oe == ERROR_FILE_NOT_FOUND || oe == ERROR_PATH_NOT_FOUND);
+        if (!none) LogLine(LogLevel::Warn, L"unfinished-write check skipped: " + why);   // no backups yet is not worth a line
         return false;
     }
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(sys::ToExtended(root + L"\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    std::vector<DirEntry> entries;
+    if (!ListDir(rootH.Get(), &entries, &why)) { LogLine(LogLevel::Warn, L"unfinished-write check skipped: " + why); return false; }
     // Newest first by the folder's creation time (a stamp in the name follows the local clock, which can
     // jump), the name breaking ties.
-    std::vector<std::pair<FILETIME, std::wstring>> sessions;
-    do {
-        std::wstring n = fd.cFileName;
-        if (n == L"." || n == L"..") continue;
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
-        sessions.push_back({fd.ftCreationTime, n});
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    std::sort(sessions.begin(), sessions.end(), [](const auto& a, const auto& b) {
-        LONG c = CompareFileTime(&a.first, &b.first);
-        return c != 0 ? c > 0 : a.second > b.second;
+    std::vector<DirEntry> sessions;
+    for (auto& en : entries)
+        if ((en.attr & FILE_ATTRIBUTE_DIRECTORY) && !(en.attr & FILE_ATTRIBUTE_REPARSE_POINT)) sessions.push_back(en);
+    std::sort(sessions.begin(), sessions.end(), [](const DirEntry& a, const DirEntry& b) {
+        return a.created != b.created ? a.created > b.created : a.name > b.name;
     });
-    std::vector<std::wstring> names;
-    for (auto& s : sessions) names.push_back(s.second);
-    for (int i = 0; i < (int)names.size() && i < newest; i++) {
-        std::wstring dir = root + L"\\" + names[(size_t)i];
-        const std::wstring jp = dir + L"\\journal.txt";
-        if (GetFileAttributesW(sys::ToExtended(jp).c_str()) == INVALID_FILE_ATTRIBUTES) continue;   // stopped before writing
-        if (!check(dir, &why) || !check(jp, &why)) {
+    const std::wstring base = sys::ToExtended(root);
+    for (int i = 0; i < (int)sessions.size() && i < newest; i++) {
+        std::wstring dir = base + L"\\" + sessions[(size_t)i].name;
+        Handle dh, jh;
+        std::wstring dirFinal;
+        if (!OpenChecked(dir, true, rootFinal + L"\\" + sessions[(size_t)i].name, L"", check, &dh, &dirFinal, &why)) {
             // Not one of Hadron's own sessions (or changed without admin rights): never a banner.
-            LogLine(LogLevel::Warn, L"ignored " + sys::ToShell(sys::ToExtended(dir)) + L": " + kUntrusted + L" (" + why + L")");
+            LogLine(LogLevel::Warn, L"ignored " + sys::ToShell(dir) + L": " + why);
             continue;
         }
-        HANDLE f = CreateFileW(sys::ToExtended(jp).c_str(), GENERIC_READ,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (f == INVALID_HANDLE_VALUE) continue;
-        std::string text(64 * 1024, '\0');
-        DWORD got = 0;
-        BOOL r = ReadFile(f, &text[0], (DWORD)text.size(), &got, nullptr);
-        CloseHandle(f);
-        if (!r) return false;
-        text.resize(got);
-        // Only the newest session with a journal counts: a later write's backup already holds the state
-        // an older incomplete session left, so offering the older backup would undo that later write.
+        DWORD je = 0;
+        if (!OpenChecked(dir + L"\\journal.txt", false, dirFinal + L"\\journal.txt", L"", check, &jh, nullptr, &why, &fail, &je)) {
+            if (fail == OpenFail::Open && je == ERROR_FILE_NOT_FOUND) continue;   // stopped before writing: no journal
+            LogLine(LogLevel::Warn, L"ignored " + sys::ToShell(dir) + L": " + why);
+            continue;
+        }
+        std::string text;
+        if (!ReadAllFrom(jh.Get(), 1u << 20, &text, &why)) {
+            LogLine(LogLevel::Warn, L"ignored " + sys::ToShell(dir) + L": journal.txt: " + why);
+            continue;
+        }
+        // Only the newest trusted session with a journal counts: a later write's backup already holds the
+        // state an older incomplete session left, so offering the older backup would undo that later write.
         std::vector<std::wstring> vars;
         if (!JournalIncomplete(text, &vars)) return false;
-        out->dir = dir;
-        out->stamp = names[(size_t)i];
+        out->dir = sys::ToShell(dir);
+        out->stamp = sessions[(size_t)i].name;
         out->vars = vars;
         return true;
     }

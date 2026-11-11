@@ -256,7 +256,7 @@ private:
     std::unique_ptr<FwBackend> backend_;    // RealBackend, or a MockBackend for the screenshot demo
     bool demo_ = false;                     // --screenshot --write-demo: the mock drives everything
     std::wstring demoMode_;                 // "plan" (overlay open) or "edit"
-    std::wstring backupRoot_;               // %LOCALAPPDATA%\Hadron\bios-backups ("" in tests and the demo)
+    std::wstring backupRoot_;               // %ProgramData%\Hadron\bios-backups ("" in tests and the demo)
     std::wstring backupShown_;              // the same, as shown in the plan
     std::map<int, long long> staged_;       // setting index -> new value
     int editFor_ = -1;                      // the setting the editor below was set up for
@@ -417,7 +417,7 @@ HWND BiosModule::Create(IHost& host, HWND parent, const RECT& rc) {
             host.Log(LogLevel::Warn, m.c_str());
         }
     } else {
-        backupShown_ = L"%LOCALAPPDATA%\\Hadron\\bios-backups";
+        backupShown_ = L"%ProgramData%\\Hadron\\bios-backups";
     }
 
     static bool registered = false;
@@ -2557,25 +2557,21 @@ std::string ReadSmall(const std::wstring& path) {
 struct ExecRun {
     MockBackend* m;
     const Plan* p;
-    std::wstring root, stamp, lockName;
+    std::wstring root;
+    ExecOptions opt;
     ExecResult r;
     bool ok = false;
 };
 DWORD WINAPI ExecRunThread(LPVOID a) {
     ExecRun* x = static_cast<ExecRun*>(a);
-    ExecOptions o;
-    o.stamp = x->stamp;
-    o.lockName = x->lockName;
-    x->ok = Execute(*x->m, *x->p, x->root, {}, {}, &x->r, o);
+    x->ok = Execute(*x->m, *x->p, x->root, {}, {}, &x->r, x->opt);
     return 0;
 }
-// Takes the named mutex and ends without releasing it: the mutex is then abandoned (the caller keeps
-// its own handle open so the mutex outlives this thread).
-DWORD WINAPI AbandonLockThread(LPVOID a) {
-    HANDLE m = CreateMutexW(nullptr, FALSE, static_cast<const wchar_t*>(a));
-    DWORD r = m && WaitForSingleObject(m, 0) == WAIT_OBJECT_0 ? 1 : 0;
-    if (m) CloseHandle(m);   // closing doesn't release ownership
-    return r;
+
+// True under Wine (ntdll exports wine_get_version there, never on Windows).
+bool IsWine() {
+    HMODULE n = GetModuleHandleW(L"ntdll.dll");
+    return n && GetProcAddress(n, "wine_get_version") != nullptr;
 }
 
 // The selftest's own admin-only descriptor (kBackupSddl), for fixtures it plants by hand.
@@ -2594,16 +2590,58 @@ struct TestSd {
     TestSd(const TestSd&) = delete;
     TestSd& operator=(const TestSd&) = delete;
 };
-// Replaces a selftest fixture file's DACL (and optionally owner) from SDDL; ERROR_SUCCESS or the error.
-DWORD SetFixtureSd(const std::wstring& path, const wchar_t* sddl) {
+// Opens one of the selftest's own fixtures by handle (never following a link).
+HANDLE OpenFixture(const std::wstring& path, DWORD access) {
+    return CreateFileW(sys::ToExtended(path).c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+}
+// Replaces a selftest fixture's DACL from SDDL, through a handle (nothing sets security by path);
+// ERROR_SUCCESS or the error.
+DWORD SetFixtureDacl(const std::wstring& path, const wchar_t* sddl) {
     TestSd t(sddl);
     if (!t.sd) return GetLastError();
     PACL dacl = nullptr;
     BOOL present = FALSE, def = FALSE;
     if (!GetSecurityDescriptorDacl(t.sd, &present, &dacl, &def)) return GetLastError();
-    std::wstring x = sys::ToExtended(path);
-    return SetNamedSecurityInfoW(&x[0], SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                 nullptr, nullptr, dacl, nullptr);
+    HANDLE h = OpenFixture(path, READ_CONTROL | WRITE_DAC);
+    if (h == INVALID_HANDLE_VALUE) return GetLastError();
+    DWORD e = SetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                              dacl, nullptr);
+    CloseHandle(h);
+    return e;
+}
+// HandleTrusted on a fixture.
+bool FixtureTrusted(const std::wstring& path, std::wstring* why) {
+    HANDLE h = OpenFixture(path, READ_CONTROL);
+    if (h == INVALID_HANDLE_VALUE) { *why = Shell(path) + L": " + sys::ErrorText(GetLastError()); return false; }
+    bool ok = HandleTrusted(h, why);
+    CloseHandle(h);
+    return ok;
+}
+// "O:<this process's user SID>": a non-admin owner the token may assign.
+std::wstring UserOwnerSddl() {
+    HANDLE tok = nullptr;
+    std::wstring r;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return r;
+    BYTE buf[256];
+    DWORD n = 0;
+    LPWSTR s = nullptr;
+    if (GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &n) &&
+        ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf)->User.Sid, &s) && s) {
+        r = std::wstring(L"O:") + s;
+        LocalFree(s);
+    }
+    CloseHandle(tok);
+    return r;
+}
+// Takes the named mutex (created like Hadron's, with kLockSddl) and ends without releasing it: the
+// mutex is then abandoned (the caller keeps its own handle open so the mutex outlives this thread).
+DWORD WINAPI AbandonLockThread(LPVOID a) {
+    TestSd sd(kLockSddl);
+    HANDLE m = CreateMutexW(sd.sd ? &sd.sa : nullptr, FALSE, static_cast<const wchar_t*>(a));
+    DWORD r = m && WaitForSingleObject(m, 0) == WAIT_OBJECT_0 ? 1 : 0;
+    if (m) CloseHandle(m);   // closing doesn't release ownership
+    return r;
 }
 
 // Removes the folder tree this selftest run created (its own fixtures, hard rule 1 doesn't cover them).
@@ -2633,7 +2671,7 @@ bool RemoveSelftestTree(const std::wstring& dir, std::wstring* err, int depth = 
 }
 
 // docs/design/bios-write.md "Selftests": everything through MockBackend, backups under root (a fresh
-// folder in %TEMP% that RunCli removes afterwards), never %LOCALAPPDATA%, never real firmware.
+// folder in %TEMP% that RunCli removes afterwards), never %ProgramData%, never real firmware.
 void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstring&)>& check, const std::wstring& root) {
     std::wstring err;
     // A small map: Setup (8 bytes) with a oneof, a 2-byte numeric (step 5), a checkbox, a 1-byte numeric that
@@ -2673,12 +2711,6 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
     std::wstring why;
     // Every Execute here takes this run's own lock, never the real Global\Hadron.bios.fwwrite.
     const std::wstring lockName = L"Local\\Hadron.bios.fwwrite.selftest-" + std::to_wstring(GetCurrentProcessId());
-    auto XO = [&](const std::wstring& stamp) {
-        ExecOptions o;
-        o.stamp = stamp;
-        o.lockName = lockName;
-        return o;
-    };
     check(std::wstring(kWriteMutexName) == L"Global\\Hadron.bios.fwwrite" && lockName != kWriteMutexName,
           L"lock: the write lock is Global\\Hadron.bios.fwwrite (firmware is machine-wide); this selftest uses its own");
 
@@ -2722,35 +2754,54 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
     // paths a test marks, so the rest of the restore logic still runs.
     std::set<std::wstring> distrusted;
     bool realAcl = false;
+    const bool wine = IsWine();
     {
-        std::wstring pd, w, e;
+        // The real path: PrepareBackupRoot creates <run>\Hadron and \bios-backups admin-only (O:BA), then
+        // checks both by handle; a file written with that descriptor passes, and fails once opened up.
+        std::wstring w, e;
         TestSd t;
-        realAcl = PrepareBackupRoot(root, &e) && PathTrusted(root, &w);
+        realAcl = PrepareBackupRoot(root, &e);
         if (realAcl) {
             std::wstring f = root + L"\\acl-probe.txt";
-            realAcl = WriteNewFile(f, "x", &e, &t.sa) && PathTrusted(f, &w) && SetFixtureSd(f, L"D:P(A;;FA;;;WD)") == ERROR_SUCCESS &&
-                      !PathTrusted(f, &w);
+            realAcl = WriteNewFile(f, "x", &e, &t.sa) && FixtureTrusted(f, &w) && SetFixtureDacl(f, L"D:P(A;;FA;;;WD)") == ERROR_SUCCESS &&
+                      !FixtureTrusted(f, &w);
+            if (realAcl) w.clear();
             DeleteFileW(sys::ToExtended(f).c_str());
         }
-        check(true, std::wstring(L"trust: this OS ") + (realAcl ? L"keeps file ACLs; the restore tests use the real check"
-                                                                : L"doesn't keep file ACLs (Wine); the restore tests inject the check (" + w + e + L")"));
+        // On Windows this must hold (elevated, as every Hadron exe is): a runner that can't create an
+        // O:BA folder fails here, visibly. Only Wine, which doesn't keep file ACLs, may skip it.
+        check(realAcl || wine, std::wstring(L"trust: file ACLs work here (admin-only root created and checked by handle)") +
+              (realAcl ? L"" : (wine ? L" [Wine: not kept; the restore tests inject the check]" : L"") + std::wstring(L" (") + e +
+                                    (w.empty() ? L"" : L"; " + w) + L")"));
     }
-    TrustFn trust;   // empty = the real PathTrusted
+    TrustFn trust;   // empty = the real HandleTrusted
     if (!realAcl)
-        trust = [&distrusted](const std::wstring& p, std::wstring* w) {
-            std::wstring s = sys::ToShell(sys::ToExtended(p));
+        trust = [&distrusted](HANDLE, const std::wstring& finalPath, std::wstring* w) {
+            std::wstring s = sys::ToShell(finalPath);
             for (auto& d : distrusted)   // the marked path itself, or anything inside it
                 if (s.size() >= d.size() && CompareStringOrdinal(s.c_str(), (int)d.size(), d.c_str(), (int)d.size(), TRUE) == CSTR_EQUAL &&
                     (s.size() == d.size() || s[d.size()] == L'\\')) {
-                    *w = s + L": marked writable by the selftest";
+                    *w = L"marked writable by the selftest";
                     return false;
                 }
             return true;
         };
-    // Makes path writable by Everyone (really, or by marking it for the injected check).
+    auto XO = [&](const std::wstring& stamp) {
+        ExecOptions o;
+        o.stamp = stamp;
+        o.lockName = lockName;
+        o.trust = trust;
+        return o;
+    };
+    // Makes path writable by Everyone (really, by handle, or by marking it for the injected check).
     auto makeWritable = [&](const std::wstring& path) {
         if (!realAcl) { distrusted.insert(sys::ToShell(sys::ToExtended(path))); return true; }
-        return SetFixtureSd(path, L"D:P(A;OICI;FA;;;WD)") == ERROR_SUCCESS;
+        return SetFixtureDacl(path, L"D:P(A;OICI;FA;;;WD)") == ERROR_SUCCESS;
+    };
+    // Undoes makeWritable: the backup DACL again (the owner was never changed).
+    auto makeAdminOnly = [&](const std::wstring& path) {
+        if (!realAcl) { distrusted.erase(sys::ToShell(sys::ToExtended(path))); return true; }
+        return SetFixtureDacl(path, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)") == ERROR_SUCCESS;
     };
 
     // --- ValidateValue ---
@@ -3097,8 +3148,8 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
             bool made = BuildPlan(d, {{0, 1}}, liveOf(*m7), open, &p7, &why) &&
                         Execute(*m7, p7, root, {}, {}, &r7, XO(L"20260101-000013"));
             std::wstring w7;
-            bool selfTrusted = made && (!realAcl || (PathTrusted(r7.backupDir, &w7) && PathTrusted(r7.backupDir + L"\\manifest.txt", &w7) &&
-                                                     PathTrusted(r7.backupDir + L"\\journal.txt", &w7)));
+            bool selfTrusted = made && (!realAcl || (FixtureTrusted(r7.backupDir, &w7) && FixtureTrusted(r7.backupDir + L"\\manifest.txt", &w7) &&
+                                                     FixtureTrusted(r7.backupDir + L"\\journal.txt", &w7)));
             check(selfTrusted, std::wstring(L"trust: a session Execute writes is admin-only (owner Administrators, protected DACL)") +
                   (realAcl ? L"" : L" [not checkable here: the OS doesn't keep ACLs]") + (selfTrusted ? L"" : L" (" + w7 + L")"));
             SnapLoad s8;
@@ -3121,15 +3172,17 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         auto m = freshMock();
         Plan pl;
         bool planned = BuildPlan(d, {{0, 1}}, liveOf(*m), open, &pl, &why);
-        HANDLE mx = CreateMutexW(nullptr, FALSE, lockName.c_str());
+        TestSd lsd(kLockSddl);   // the test's holder creates the lock the way Hadron does (owner Administrators)
+        HANDLE mx = CreateMutexW(lsd.sd ? &lsd.sa : nullptr, FALSE, lockName.c_str());
         bool held = mx && WaitForSingleObject(mx, 0) == WAIT_OBJECT_0;
-        Run busy{m.get(), &pl, root, L"20260101-000008", lockName, ExecResult{}, false};
+        Run busy{m.get(), &pl, root, XO(L"20260101-000008"), ExecResult{}, false};
         bool ran = planned && held && onThread(&busy);
         if (held) ReleaseMutex(mx);
         check(ran && !busy.ok && m->writes == 0 && !busy.r.started &&
-              busy.r.error == L"Another Hadron window is writing BIOS settings. Nothing was written.",
-              L"lock: Execute refuses while another thread holds the lock (" + busy.r.error + L")");
-        Run good{m.get(), &pl, root, L"20260101-000009", lockName, ExecResult{}, false};
+              busy.r.error == L"The BIOS write lock is held by another process (another Hadron window may be writing BIOS "
+                              L"settings). Nothing was written.",
+              L"lock: Execute refuses while another holder has the lock (" + busy.r.error + L")");
+        Run good{m.get(), &pl, root, XO(L"20260101-000009"), ExecResult{}, false};
         bool ran2 = planned && onThread(&good);
         // Released by RAII when Execute returned: the thread has exited, so a mutex it still held would
         // come back WAIT_ABANDONED here.
@@ -3143,16 +3196,31 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         HANDLE at = CreateThread(nullptr, 0, AbandonLockThread, (LPVOID)lockName.c_str(), 0, nullptr);
         DWORD took = 0;
         if (at) { WaitForSingleObject(at, INFINITE); GetExitCodeThread(at, &took); CloseHandle(at); }
-        Run after{m2.get(), &p2, root, L"20260101-000010", lockName, ExecResult{}, false};
+        Run after{m2.get(), &p2, root, XO(L"20260101-000010"), ExecResult{}, false};
         bool ran3 = planned2 && took == 1 && onThread(&after);
         check(ran3 && !after.ok && m2->writes == 0 && !after.r.started &&
-              after.r.error == L"Another Hadron window stopped in the middle of a BIOS write. Nothing was written. Check its backup.",
+              after.r.error.find(L"The BIOS write lock was left by a process that ended while holding it") == 0 &&
+              after.r.error.find(L"Nothing was written.") != std::wstring::npos,
               L"lock: an abandoned lock (holder ended mid-write) refuses the write (" + after.r.error + L")");
-        Run next{m2.get(), &p2, root, L"20260101-000011", lockName, ExecResult{}, false};
+        Run next{m2.get(), &p2, root, XO(L"20260101-000011"), ExecResult{}, false};
         bool ran4 = planned2 && onThread(&next);
         check(ran4 && next.ok && m2->writes == 1, L"lock: the refusing run released it; the next write goes ahead" +
               (next.ok ? L"" : L" (" + next.r.error + L")"));
         if (mx) CloseHandle(mx);
+        // A lock that already exists with a non-admin owner (pre-created to decide who writes): refused.
+        const std::wstring userLock = lockName + L".user";
+        std::wstring us = UserOwnerSddl();
+        TestSd usd((us + L"D:P(A;;GA;;;WD)").c_str());
+        HANDLE ux = usd.sd ? CreateMutexW(&usd.sa, FALSE, userLock.c_str()) : nullptr;
+        ExecOptions uo = XO(L"20260101-000015");
+        uo.lockName = userLock;
+        Run squat{m2.get(), &p2, root, uo, ExecResult{}, false};
+        bool ran5 = ux && onThread(&squat);
+        check(ran5 && !squat.ok && m2->writes == 1 && !squat.r.started &&
+              squat.r.error.find(L"The BIOS write lock was created by a non-admin process") == 0 &&
+              squat.r.error.find(L"Nothing was written.") != std::wstring::npos,
+              L"lock: a lock that exists with a non-admin owner is refused (" + squat.r.error + L")");
+        if (ux) CloseHandle(ux);
     }
     // --- Incomplete sessions ---
     {
@@ -3167,7 +3235,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         TestSd psd;   // planted by hand with the same admin-only descriptor Execute uses
         bool none = !FindIncompleteSession(root, &is, 8, trust);   // the newest session so far completed
         std::wstring dir;
-        bool made = CreateBackupSession(root, L"29991231-235959", &dir, &err) &&
+        bool made = CreateBackupSession(root, L"29991231-235959", &dir, &err, trust) &&
                     WriteNewFile(dir + L"\\journal.txt", "BEGIN Setup g1\r\n", &err, &psd.sa);
         bool found = made && FindIncompleteSession(root, &is, 8, trust) && is.stamp == L"29991231-235959" && is.vars.size() == 1;
         check(none && found, L"journal: the newest session's unfinished journal is found on start; a completed one isn't");
@@ -3175,7 +3243,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         // sorts first (the clock went back) and completed hides the older unfinished one.
         Sleep(50);
         std::wstring dir2;
-        bool made2 = CreateBackupSession(root, L"00000101-000000", &dir2, &err) &&
+        bool made2 = CreateBackupSession(root, L"00000101-000000", &dir2, &err, trust) &&
                      WriteNewFile(dir2 + L"\\journal.txt", "BEGIN Setup g1\r\nOK Setup\r\nEND\r\n", &err, &psd.sa);
         WIN32_FILE_ATTRIBUTE_DATA a1{}, a2{};
         bool times = GetFileAttributesExW(sys::ToExtended(dir).c_str(), GetFileExInfoStandard, &a1) &&
@@ -3186,19 +3254,34 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         // An unfinished journal a standard user could have written never raises the banner.
         Sleep(50);
         std::wstring dir3;
-        bool made3 = CreateBackupSession(root, L"29991231-235960", &dir3, &err) &&
+        bool made3 = CreateBackupSession(root, L"29991231-235960", &dir3, &err, trust) &&
                      WriteNewFile(dir3 + L"\\journal.txt", "BEGIN Setup g1\r\n", &err, &psd.sa);
         bool shown = made3 && FindIncompleteSession(root, &is, 8, trust) && is.stamp == L"29991231-235960";
         bool open3 = made3 && makeWritable(dir3 + L"\\journal.txt");
         bool hidden = open3 && !(FindIncompleteSession(root, &is, 8, trust) && is.stamp == L"29991231-235960");
         check(shown && hidden, L"journal: an unfinished session whose journal a non-admin can change is ignored (no banner)");
-        bool rootOpen = makeWritable(root);
-        bool noneAtAll = rootOpen && !FindIncompleteSession(root, &is, 8, trust);
-        std::wstring pe;
-        distrusted.erase(sys::ToShell(sys::ToExtended(root)));
-        bool fixed = PrepareBackupRoot(root, &pe) && (!realAcl || PathTrusted(root, &pe));
-        check(noneAtAll && fixed, L"journal: nothing is reported when the backup root itself isn't admin-only; preparing it again "
-                                  L"makes it admin-only" + (fixed ? L"" : L" (" + pe + L")"));
+        // A root (or its Hadron parent) that isn't admin-only: no banner, and preparing it refuses without
+        // touching its security (nothing re-secures an existing folder). A write is refused before writing.
+        const std::wstring parent = root.substr(0, root.find_last_of(L'\\'));
+        for (const std::wstring& target : {root, parent}) {
+            const wchar_t* which = target == root ? L"bios-backups" : L"its Hadron parent";
+            bool opened = makeWritable(target);
+            bool noneAtAll = opened && !FindIncompleteSession(root, &is, 8, trust);
+            std::wstring pe, tw;
+            bool refused = opened && !PrepareBackupRoot(root, &pe, trust) && pe.find(L"isn't trusted") != std::wstring::npos;
+            bool untouched = !realAcl || !FixtureTrusted(target, &tw);   // still open: nothing re-applied the DACL
+            auto mw = freshMock();
+            Plan pw;
+            ExecResult rw;
+            bool noWrite = BuildPlan(d, {{0, 1}}, liveOf(*mw), open, &pw, &why) &&
+                           !Execute(*mw, pw, root, {}, {}, &rw, XO(L"20260101-000014")) && mw->writes == 0;
+            bool back = makeAdminOnly(target);
+            std::wstring pe2;
+            bool okAgain = back && PrepareBackupRoot(root, &pe2, trust);
+            check(noneAtAll && refused && untouched && noWrite && okAgain,
+                  std::wstring(L"trust: when ") + which + L" isn't admin-only: no banner, the root is refused and left as it is, "
+                  L"nothing is written (" + pe + L")" + (okAgain ? L"" : L" [after fixing it: " + pe2 + L"]"));
+        }
     }
     // --- latch ---
     {
@@ -3714,8 +3797,9 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
     std::wstring fx = cl.fixture;
     for (size_t i = 0; i + 1 < cl.rest.size(); i++) if (cl.rest[i] == L"--snapshot") fx = sys::ToExtended(cl.rest[i + 1]);
     // --- guarded writes (docs/design/bios-write.md), all through MockBackend ---
-    // Backups always go to a new folder under %TEMP% (never next to the fixture, never %LOCALAPPDATA%),
-    // which is removed at the end; only the folder this run created.
+    // Backups always go to a new folder under %TEMP% (never next to the fixture, never %ProgramData%),
+    // laid out like the real root (<run>\Hadron\bios-backups), which is removed at the end; only the
+    // folder this run created.
     {
         wchar_t t[MAX_PATH + 1] = {};
         DWORD n = GetTempPathW(MAX_PATH + 1, t);
@@ -3732,7 +3816,7 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
             DWORD ce = fresh ? 0 : GetLastError();
             check(fresh, L"write selftest: new folder " + Shell(root) + (fresh ? L"" : L": " + sys::ErrorText(ce)));
             if (fresh) {
-                SelftestWrites(check, root);
+                SelftestWrites(check, root + L"\\Hadron\\bios-backups");
                 std::wstring re;
                 bool removed = RemoveSelftestTree(root, &re);
                 check(removed, L"write selftest: removed its own folder " + Shell(root) + (removed ? L"" : L": " + re));
