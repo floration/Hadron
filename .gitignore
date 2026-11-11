@@ -1,0 +1,16 @@
+build/
+out/
+*.o
+*.obj
+*.res
+*.exe
+*.pdb
+*.zip
+__pycache__/
+*.pkl
+# never commit vendor firmware images or personal NVRAM dumps
+*.AF?
+*.ROM
+*.CAP
+**/uefidump/
+**/UEFI_Dump_*/
