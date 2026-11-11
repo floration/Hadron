@@ -129,6 +129,18 @@ RECT ToRect(double x, double y, double w, double h) {
 // ---- small data types --------------------------------------------------------------------------
 struct Drive { wchar_t letter; std::wstring label; u64 total, freeb; UINT type; };
 struct Target { wchar_t letter = 0; std::wstring root, display; u64 used = 0, total = 0; bool fixture = false; };
+
+// total is lpTotalNumberOfBytes (quota-limited) and freeb lpTotalNumberOfFreeBytes (volume-wide), so
+// with disk quotas total < free is possible: clamp instead of wrapping a u64.
+u64 UsedOf(const Drive& d) { return d.total > d.freeb ? d.total - d.freeb : 0; }
+u64 FreeOf(const Target& t) { return t.total > t.used ? t.total - t.used : 0; }
+
+// What "Not mapped" contains (deviation 6). Dehydrated cloud placeholders use almost no clusters, so
+// they are not part of it; compressed/sparse/WOF files counted at logical size push it the other way.
+const wchar_t* const kNotMappedWhy =
+    L"Not mapped = used space minus mapped bytes: NTFS metadata, unreadable folders, and the gap between "
+    L"file sizes and allocated clusters. Compressed, sparse and WOF files are counted at full logical size, "
+    L"so this can read low or 0 B even though NTFS metadata exists. Hard links count once; links aren't followed.";
 struct Click { RECT rc; int id; u32 data; };
 struct Hit { RECT r; u32 id; u32 top; u8 kind; u8 topKind; };
 struct Lump { u64 size = 0, count = 0; u64 cat[NCAT] = {}; u64 safeR[NSAFE] = {}; u8 dom = C_OTHER; };
@@ -235,6 +247,8 @@ private:
     void SectionLabel(HDC dc, const wchar_t* s, int& y);
     void DrawSidebar(HDC dc);
     void DrawNotice(HDC dc, int& y, int L, int R);
+    void DrawWrapped(HDC dc, const std::wstring& s, int L, int R, int& y, COLORREF c);
+    std::wstring SkippedText() const;
     void DrawCrumb(HDC dc, const RECT& strip, int x);
     void DrawProgress(HDC dc, const RECT& area);
     void DrawEmpty(HDC dc, const RECT& area);
@@ -274,8 +288,7 @@ private:
     IHost* host_ = nullptr;
     HWND hwnd_ = nullptr;
     ExtraFonts extra_;
-    bool elevated_ = true, backupOk_ = false;
-    DWORD backupErr_ = 0;
+    bool elevated_ = true;
 
     St st_ = St::Idle;
     sys::Worker worker_;
@@ -335,11 +348,17 @@ LRESULT DiskMapModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
         RECT rc; GetClientRect(h, &rc);
         if (rc.right > 0 && rc.bottom > 0) {
             HDC mem = CreateCompatibleDC(dc);
-            HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
-            HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
-            Paint(mem, rc);
-            BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-            SelectObject(mem, old); DeleteObject(bmp); DeleteDC(mem);
+            HBITMAP bmp = mem ? CreateCompatibleBitmap(dc, rc.right, rc.bottom) : nullptr;
+            if (mem && bmp) {
+                HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
+                Paint(mem, rc);
+                BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+                SelectObject(mem, old);
+            } else {
+                Paint(dc, rc);   // GDI exhausted: paint unbuffered rather than blit an empty 1x1 bitmap
+            }
+            if (bmp) DeleteObject(bmp);
+            if (mem) DeleteDC(mem);
         }
         EndPaint(h, &ps);
         return 0;
@@ -368,8 +387,8 @@ LRESULT DiskMapModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_GETDLGCODE:
         return DLGC_WANTALLKEYS | DLGC_WANTARROWS | DLGC_WANTCHARS;
-    case WM_SYSKEYDOWN:
-        if (w == VK_HOME || w == VK_UP || w == VK_LEFT) { if (OnKey(w, true)) Invalidate(); return 0; }
+    case WM_SYSKEYDOWN:   // Alt+Home / Alt+Up / Alt+Left; anything else (Alt+F4...) goes to DefWindowProc
+        if (OnInput(m, w, l)) { Invalidate(); return 0; }
         break;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
@@ -391,13 +410,8 @@ HWND DiskMapModule::Create(IHost& host, HWND parent, const RECT& rc) {
     host_ = &host;
     elevated_ = host.IsElevated();
     extra_.Build(host.Dpi(), host.Layout());
-    // Deviation 5: SeBackupPrivilege lets FILE_FLAG_BACKUP_SEMANTICS list admin-only folders.
-    // Process-wide, so the worker thread's opens get it too.
-    backupOk_ = sys::EnablePrivilege(L"SeBackupPrivilege", &backupErr_);
-    if (!backupOk_) {
-        std::wstring m = L"diskmap: SeBackupPrivilege not enabled: " + sys::ErrorText(backupErr_);
-        host.Log(LogLevel::Warn, m.c_str());
-    }
+    // SeBackupPrivilege (deviation 5) is enabled per scan, on the scan thread only (Scan::Run), so it
+    // never reaches the process token, other modules or child processes.
     RefreshDrives();
 
     list_.onSortChanged = [this](int, bool) { SortConsoleRows(); SyncDetail(); };
@@ -450,7 +464,7 @@ HWND DiskMapModule::Create(IHost& host, HWND parent, const RECT& rc) {
                 Target t; t.letter = d.letter;
                 t.display = std::wstring(1, d.letter) + L":\\";
                 t.root = L"\\\\?\\" + t.display;
-                t.used = d.total - d.freeb; t.total = d.total;
+                t.used = UsedOf(d); t.total = d.total;
                 StartScan(t);
             }
             if (st_ == St::Idle) lastError_ = L"No fixed or removable drive " + std::wstring(1, want) + L": to scan.";
@@ -463,9 +477,11 @@ bool DiskMapModule::PreTranslateMessage(MSG& m) {
     // Keys typed while the host frame has focus (standalone start-up) still reach DiskMap. Ctrl
     // combinations are left alone: the host owns Ctrl+Tab and Ctrl+1..9.
     if (!hwnd_ || !host_ || m.hwnd != host_->Frame()) return false;
-    if (m.message == WM_KEYDOWN && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+    // Only keys DiskMap actually handles are consumed; anything else still reaches the host.
+    if ((m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN) && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (!OnInput(m.message, m.wParam, m.lParam)) return false;
         SetFocus(hwnd_);
-        if (OnInput(m.message, m.wParam, m.lParam)) Invalidate();
+        Invalidate();
         return true;
     }
     return false;
@@ -759,6 +775,11 @@ void DiskMapModule::SyncDetail() {
         rows.push_back({L"Files", U64Str(v.nFiles)});
         rows.push_back({L"Folders", U64Str(v.nDirs)});
         safeRows(v.safe, v.safeR);
+        if (view_ == 0) {
+            std::wstring sk = SkippedText();
+            if (!sk.empty()) rows.push_back({L"Skipped", sk});
+            if (target_.total) rows.push_back({L"Not mapped", kNotMappedWhy});
+        }
         detail_.SetRows(std::move(rows));
         return;
     }
@@ -800,9 +821,19 @@ void DiskMapModule::ShowInExplorer(const std::wstring& path, bool select) {
     // Legacy: explorer.exe /select,"path" (file) or explorer.exe "path" (folder). Plain paths, no \\?\.
     std::wstring p = sys::ToShell(path);
     std::wstring args = select ? L"/select,\"" + p + L"\"" : L"\"" + p + L"\"";
-    HINSTANCE r = ShellExecuteW(host_ ? host_->Frame() : nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
-    if ((INT_PTR)r <= 32) {
-        std::wstring m = L"Could not open Explorer: " + sys::ErrorText(GetLastError());
+    // ShellExecuteExW sets the thread's last error on failure (plain ShellExecuteW does not reliably).
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.hwnd = host_ ? host_->Frame() : nullptr;
+    sei.lpVerb = L"open";
+    sei.lpFile = L"explorer.exe";
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei)) {
+        DWORD e = GetLastError();
+        std::wstring m = L"Could not open Explorer: " +
+                         (e ? sys::ErrorText(e) : std::wstring(L"unknown error (code ") + std::to_wstring((INT_PTR)sei.hInstApp) + L")");
         status_ = m;
         if (host_) host_->SetStatus(m.c_str());
     }
@@ -939,7 +970,7 @@ void DiskMapModule::DrawToolbar(HDC dc) {
             bool hv = IsHover(ID_DRIVE, (u32)i);
             RoundFill(dc, r, Sc(8), active ? Mix(t.panel2, t.accent, 0.18) : (hv ? t.panel3 : t.panel2));
             RoundOutline(dc, r, Sc(8), active ? t.accent : (hv ? Mix(t.border, t.text3, 0.5) : t.border));
-            double used = d.total ? (double)(d.total - d.freeb) / (double)d.total : 0;
+            double used = d.total ? (double)UsedOf(d) / (double)d.total : 0;
             if (con) {
                 RECT tr = {r.left + Sc(8), r.top, r.right - Sc(8), r.bottom};
                 Text(dc, std::wstring(1, d.letter) + L":  " + FmtSize(d.freeb) + L" free", tr, f.caption, t.text1, TL);
@@ -974,11 +1005,38 @@ void DiskMapModule::SectionLabel(HDC dc, const wchar_t* s, int& y) {
     y += Sc(24);
 }
 
+void DiskMapModule::DrawWrapped(HDC dc, const std::wstring& s, int L, int R, int& y, COLORREF c) {
+    HFONT f = host_->Fonts().caption;
+    RECT wr = {L, y + Sc(4), R, y + Sc(4)};
+    HGDIOBJ of = SelectObject(dc, f);
+    DrawTextW(dc, s.c_str(), -1, &wr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, of);
+    wr.right = R;
+    Text(dc, s, wr, f, c, DT_WORDBREAK);
+    y = wr.bottom + Sc(12);
+}
+
+// Deviation 4: report what the scan left out or counted once. Empty when there is nothing to say.
+std::wstring DiskMapModule::SkippedText() const {
+    if (!data_) return L"";
+    const ScanStats& st = data_->stats;
+    std::wstring s;
+    auto add = [&](const std::wstring& part) { if (!s.empty()) s += L"  \x00B7  "; s += part; };
+    if (st.cloudFiles) add(U64Str(st.cloudFiles) + L" cloud-only files (" + FmtSize(st.cloudBytes) + L", not on disk) skipped");
+    if (st.cloudDirs) add(U64Str(st.cloudDirs) + L" cloud-only folders skipped");
+    if (st.hardlinkDupFiles) add(U64Str(st.hardlinkDupFiles) + L" hard links counted once (" + FmtSize(st.hardlinkDupBytes) + L")");
+    if (st.reparseDirs + st.linkFiles) add(U64Str(st.reparseDirs + st.linkFiles) + L" links not followed");
+    if (st.noIdDirs) add(U64Str(st.noIdDirs) + L" folders listed without file IDs (hard links there counted per link)");
+    return s;
+}
+
 // The one degraded-mode notice (deviation 1/5): unelevated, or SeBackupPrivilege refused.
 void DiskMapModule::DrawNotice(HDC dc, int& y, int L, int R) {
     std::wstring msg;
     if (!elevated_) msg = L"Not running elevated, so protected folders can't be read and totals will be lower. Hadron asks for admin at start; it does not relaunch.";
-    else if (!backupOk_) msg = L"SeBackupPrivilege could not be enabled (" + sys::ErrorText(backupErr_) + L"), so some admin-only folders may be unreadable.";
+    else if (data_ && !data_->stats.backupOk)   // known after a scan: the privilege is enabled per scan thread
+        msg = L"SeBackupPrivilege could not be enabled for the scan (" + sys::ErrorText(data_->stats.backupErr) +
+              L"), so some admin-only folders may be unreadable.";
     if (msg.empty()) return;
     const Theme& t = host_->Theme();
     RECT box = {L + Sc(12), y + Sc(8), R - Sc(10), y + Sc(8)};
@@ -1045,26 +1103,23 @@ void DiskMapModule::DrawSidebar(HDC dc) {
         struct { COLORREF c; const wchar_t* n; std::wstring v; } rows[] = {
             {t.accent, L"Mapped", FmtSize(mapped)},
             {t.text3, L"Not mapped", FmtSize(hidden)},
-            {t.panel3, L"Free", FmtSize(target_.total - used)}};
+            {t.panel3, L"Free", FmtSize(FreeOf(target_))}};
         for (auto& rw : rows) {
             RECT sw = {L, y + Sc(5), L + Sc(8), y + Sc(13)}; FillC(dc, sw, rw.c);
             RECT t1 = {L + Sc(14), y, R - Sc(70), y + Sc(18)}; Text(dc, rw.n, t1, f.caption, t.text2, TL);
             RECT t2 = {R - Sc(70), y, R, y + Sc(18)}; Text(dc, rw.v, t2, f.caption, t.text2, TR);
             y += Sc(18);
         }
-        std::wstring why = L"Not mapped = used space the scan didn't attribute to a file: NTFS metadata, unreadable folders, skipped cloud placeholders, and the gap between file sizes and allocated clusters. Hard links count once; links aren't followed.";
-        RECT wr = {L, y + Sc(4), R, y + Sc(4)};
-        HGDIOBJ of = SelectObject(dc, f.caption);
-        DrawTextW(dc, why.c_str(), -1, &wr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
-        SelectObject(dc, of);
-        wr.right = R;
-        Text(dc, why, wr, f.caption, t.text3, DT_WORDBREAK);
-        y = wr.bottom + Sc(12);
+        DrawWrapped(dc, kNotMappedWhy, L, R, y, t.text3);
     }
     if (view_ == 0 && s.stats.deniedDirs) {
         RECT dr = {L, y, R, y + Sc(18)};
         Text(dc, U64Str(s.stats.deniedDirs) + L" folders couldn't be read", dr, f.caption, t.warn, TL);
         y += Sc(24);
+    }
+    if (view_ == 0) {   // deviation 4: say what the scan skipped or counted once
+        std::wstring sk = SkippedText();
+        if (!sk.empty()) DrawWrapped(dc, sk, L, R, y, t.text2);
     }
 
     // Tabs.
@@ -1120,7 +1175,7 @@ void DiskMapModule::DrawSidebar(HDC dc) {
     } else {
         u64 tot = SafeSum(v.safeR);
         RECT hr = {L, y, R, y + Sc(18)};
-        Text(dc, L"YOU COULD FREE UP", hr, extra_.smallSemi, t.text3, TL);
+        Text(dc, L"MATCHED BY THE RULES", hr, extra_.smallSemi, t.text3, TL);   // rule 7 over the legacy header
         if (filter_ > FILTER_SAFE) {
             RECT cr = {R - Sc(60), y - Sc(2), R, y + Sc(18)};
             Text(dc, L"Show all", cr, extra_.smallSemi, IsHover(ID_CLEARFILTER) ? t.text1 : t.accent, TR);
@@ -1129,7 +1184,9 @@ void DiskMapModule::DrawSidebar(HDC dc) {
         y += Sc(20);
         RECT nr2 = {L, y, R, y + Sc(34)};
         Text(dc, tot ? FmtSize(tot) : L"0 B", nr2, extra_.bigNum, tot ? SAFE_COL : t.text2, TL);
-        y += Sc(42);
+        y += Sc(34);
+        DrawWrapped(dc, L"Scanned size of the matched files. Space actually freed can be less (files in use, compressed or hard-linked files).",
+                    L, R, y, t.text3);
         int order[NSAFE]; int no = 0;
         for (int r = 1; r < NSAFE; r++) if (v.safeR[r]) order[no++] = r;
         for (int i = 1; i < no; i++) for (int j = i; j > 0 && v.safeR[order[j]] > v.safeR[order[j - 1]]; j--) std::swap(order[j], order[j - 1]);
@@ -1161,7 +1218,7 @@ void DiskMapModule::DrawSidebar(HDC dc) {
         int dr = hoverReason > 0 ? hoverReason : (filter_ > FILTER_SAFE ? filter_ - FILTER_SAFE : 0);
         std::wstring desc;
         if (dr > 0) desc = std::wstring(SafeReason(dr).desc) + L"\n\nBasis: " + SafeReason(dr).basis + L" \x2014 " + SafeReason(dr).basisNote;
-        else if (tot) desc = L"Green = things Windows or apps rebuild on their own, or only keep for troubleshooting. Hover a group for details. DiskMap never deletes anything itself.";
+        else if (tot) desc = L"Green = things Windows or apps rebuild, keep only for troubleshooting or rollback, or that were already deleted. Rules match by folder and file name, so check before deleting. Hover a group for details. DiskMap never deletes anything itself.";
         else desc = L"Nothing in this folder matched the safe-to-delete rules.";
         RECT box = {L + Sc(12), y + Sc(8), R - Sc(10), y + Sc(8)};
         HGDIOBJ of = SelectObject(dc, f.caption);
@@ -1492,10 +1549,11 @@ void DiskMapModule::DrawConsole(HDC dc, const RECT& rc) {
     std::wstring sum = FmtSize(v.total) + L"  \x00B7  " + U64Str(v.nFiles) + L" files  \x00B7  " + U64Str(v.nDirs) +
                        L" folders  \x00B7  " + FmtSize(SafeSum(v.safeR)) + L" safe to delete";
     if (view_ == 0 && target_.total) {
-        u64 mapped = std::min<u64>(v.total, target_.used), hidden = target_.used - mapped;
-        sum += L"  \x00B7  not mapped " + FmtSize(hidden) + L" (metadata, unreadable, skipped)  \x00B7  free " + FmtSize(target_.total - target_.used);
+        u64 mapped = std::min<u64>(v.total, target_.used), hidden = target_.used > mapped ? target_.used - mapped : 0;
+        sum += L"  \x00B7  not mapped " + FmtSize(hidden) + L" (metadata, unreadable, cluster slack)  \x00B7  free " + FmtSize(FreeOf(target_));
     }
     if (view_ == 0 && s.stats.deniedDirs) sum += L"  \x00B7  " + U64Str(s.stats.deniedDirs) + L" unreadable";
+    if (view_ == 0) { std::wstring sk = SkippedText(); if (!sk.empty()) sum += L"  \x00B7  " + sk; }
     RECT sr = {rcBody_.left, rcCrumb_.bottom, rcBody_.right, rcBody_.top};
     Text(dc, sum, sr, f.caption, t.text2, TL);
     int ny = rcBody_.top;   // degraded notice, if any, sits at the top of the detail column
@@ -1584,7 +1642,7 @@ void DiskMapModule::ActivateClick(const Click& c, bool ctrl) {
             Target t; t.letter = d.letter;
             t.display = std::wstring(1, d.letter) + L":\\";
             t.root = L"\\\\?\\" + t.display;
-            t.used = d.total - d.freeb; t.total = d.total;
+            t.used = UsedOf(d); t.total = d.total;
             StartScan(t);   // during a scan: cancels and restarts on that drive, even the same one
         }
         break;
@@ -1744,6 +1802,9 @@ bool DiskMapModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     case WM_RBUTTONDOWN: GoUp(); return true;                      // right-click anywhere: Up
     case WM_XBUTTONDOWN: if (GET_XBUTTON_WPARAM(w) == XBUTTON1) GoUp(); return true;
     case WM_KEYDOWN: return OnKey(w, false);
+    case WM_SYSKEYDOWN:   // Alt+Home = root, Alt+Up / Alt+Left = up; other Alt keys are not ours
+        if (w == VK_HOME || w == VK_UP || w == VK_LEFT) return OnKey(w, true);
+        return false;
     case WM_CHAR: return false;
     }
     return false;
@@ -1759,7 +1820,7 @@ void DiskMapModule::LoadFixture(const wchar_t* dir) {
     worker_.Cancel(); worker_.Join();
     Target t;
     t.fixture = true;
-    t.root = dir;
+    t.root = sys::ToExtended(dir);   // Scan::Run wants \\?\ form (long paths; relative paths made absolute)
     t.display = sys::ToShell(dir);
     target_ = t;
     auto s = std::make_unique<Scan>();
@@ -1838,6 +1899,31 @@ std::wstring BuildSelftestFixture(std::wstring* note) {
     return L"";
 }
 
+bool ProcessHasPrivilegeEnabled(const wchar_t* name) {
+    HANDLE tok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+    LUID want{};
+    bool on = false;
+    DWORD need = 0;
+    GetTokenInformation(tok, TokenPrivileges, nullptr, 0, &need);
+    std::vector<BYTE> buf(need ? need : 1);
+    if (LookupPrivilegeValueW(nullptr, name, &want) && GetTokenInformation(tok, TokenPrivileges, buf.data(), need, &need)) {
+        auto* tp = reinterpret_cast<TOKEN_PRIVILEGES*>(buf.data());
+        for (DWORD i = 0; i < tp->PrivilegeCount; i++)
+            if (tp->Privileges[i].Luid.LowPart == want.LowPart && tp->Privileges[i].Luid.HighPart == want.HighPart)
+                on = (tp->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) != 0;
+    }
+    CloseHandle(tok);
+    return on;
+}
+
+// The outside symlink is one link; the self-built fixture may have none (Wine creates no symlink).
+u64 linkExpectedCount(bool own, const std::wstring& root) {
+    if (!own) return 1;
+    DWORD a = GetFileAttributesW((root + L"\\Links\\outside-symlink").c_str());
+    return (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT)) ? 1 : 0;
+}
+
 int DiskMapModule::RunCli(int argc, wchar_t** argv) {
     bool selftest = false;
     for (int i = 0; i < argc; i++) if (std::wstring(argv[i]) == L"--selftest") selftest = true;
@@ -1884,13 +1970,16 @@ int DiskMapModule::RunCli(int argc, wchar_t** argv) {
 
     // --- fixture scan ---
     CommandLine cl = CommandLine::Parse(GetCommandLineW());
-    std::wstring note, root = cl.fixture;
+    std::wstring note, root = cl.fixture.empty() ? std::wstring() : sys::ToExtended(cl.fixture);
     bool own = root.empty();
     if (own) root = BuildSelftestFixture(&note);
     if (root.empty()) {
         check(false, L"fixture available: " + note);
     } else {
         wprintf(L"  fixture: %ls%ls\n", sys::ToShell(root).c_str(), own ? L" (built by selftest)" : L"");
+        if (own)   // honest about the ~38 MB it leaves behind (never deleted; reused next run)
+            wprintf(L"  fixture left at %ls (about 38 MB; reused by the next --selftest, never deleted)\n",
+                    sys::ToShell(root.substr(0, root.rfind(L'\\'))).c_str());
         if (!note.empty()) wprintf(L"  note: %ls\n", note.c_str());
         Scan s;
         bool ran = s.Run(root, sys::ToShell(root), [] { return false; }, nullptr);
@@ -1930,6 +2019,16 @@ int DiskMapModule::RunCli(int argc, wchar_t** argv) {
             eq(r0.safeR[SF_TEMP], 60000, L"safe: Temporary files (windows\\temp at the fixture root)");
             eq(SafeSum(r0.safeR), 60000, L"safe: total");
             eq(s.stats.deniedDirs, 0, L"unreadable folders");
+            eq(s.stats.reparseDirs + s.stats.linkFiles, linkExpectedCount(own, root), L"links not followed (reported in the UI)");
+            // Finding 1: the privilege lives on the scan thread only. After Run the thread is not
+            // impersonating and the process token does not have SeBackupPrivilege enabled.
+            HANDLE tt = nullptr;
+            bool noThreadToken = !OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &tt) && GetLastError() == ERROR_NO_TOKEN;
+            if (tt) CloseHandle(tt);
+            check(noThreadToken, L"scan reverted its impersonation (no thread token after Run)");
+            check(!ProcessHasPrivilegeEnabled(L"SeBackupPrivilege"), L"SeBackupPrivilege not enabled on the process token");
+            wprintf(L"  info: SeBackupPrivilege on the scan thread: %ls\n",
+                    s.stats.backupOk ? L"enabled" : (L"not enabled (" + sys::ErrorText(s.stats.backupErr) + L")").c_str());
         }
     }
     wprintf(L"diskmap selftest: %ls (%d checks, %d failed)\n", fails ? L"FAIL" : L"PASS", checks, fails);

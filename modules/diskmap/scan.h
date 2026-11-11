@@ -60,12 +60,15 @@ struct DirE {
 // What the scan left out or could not see, so the UI can say so instead of hiding it (rule 7).
 struct ScanStats {
     u64 hardlinkDupFiles = 0, hardlinkDupBytes = 0;   // extra links not counted again
-    u64 reparseFiles = 0, reparseDirs = 0;            // links shown as leaves, never followed
+    u64 reparseFiles = 0, reparseDirs = 0;            // reparse points shown as leaves, never followed
+    u64 linkFiles = 0;                                 // reparse files that are links (not WOF/dedup)
     u64 cloudFiles = 0, cloudBytes = 0, cloudDirs = 0; // placeholders skipped (bytes = logical size)
     u64 deniedDirs = 0;                                // folders that could not be listed
     u64 noIdDirs = 0;                                  // folders listed without FileIds (fallback)
     std::vector<std::pair<std::wstring, DWORD>> deniedSample;   // first few, display paths
     double seconds = 0;
+    bool backupOk = false;          // SeBackupPrivilege was enabled on the scan thread
+    DWORD backupErr = 0;            // why not, when !backupOk
 };
 
 // Live counters for the progress card. Written by the scan thread, read by the UI on a timer.
@@ -92,6 +95,7 @@ public:
     // root: the folder to scan in \\?\ form (a drive root like \\?\C:\ or any folder). display: the
     // root's name as shown ("C:\"). The root is treated as a drive root for the safe-to-delete rules,
     // which are drive-root relative. Returns false if cancelled or the root can't be listed.
+    // SeBackupPrivilege is enabled on the calling thread only (ImpersonateSelf), and reverted on return.
     bool Run(const std::wstring& root, const std::wstring& display,
              const std::function<bool()>& cancelled, ScanProgress* progress);
 
@@ -106,6 +110,8 @@ public:
     u64 SafeBytes(u32 d = 0) const;
 
 private:
+    bool RunImpl(const std::wstring& root, const std::wstring& display,
+                 const std::function<bool()>& cancelled, ScanProgress* progress);
     u32 AddName(const wchar_t* s, size_t n);
     void Finalize();
     std::wstring rootExt_;

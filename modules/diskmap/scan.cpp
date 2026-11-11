@@ -102,8 +102,47 @@ std::wstring Scan::FilePath(u32 f) const {
     return Join(DirPath(files[f].dir), n, wcslen(n));
 }
 
+namespace {
+// Enables SeBackupPrivilege on this thread only (deviation 5): ImpersonateSelf gives the thread its
+// own copy of the process token, so the privilege never leaks to the process, other modules in the
+// suite, or child processes. The destructor reverts, so every exit path of Run is covered.
+class ThreadBackupPrivilege {
+public:
+    ThreadBackupPrivilege() {
+        if (!ImpersonateSelf(SecurityImpersonation)) { err_ = GetLastError(); return; }
+        impersonating_ = true;
+        HANDLE tok = nullptr;
+        if (!OpenThreadToken(GetCurrentThread(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, TRUE, &tok)) { err_ = GetLastError(); return; }
+        TOKEN_PRIVILEGES tp{};
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (!LookupPrivilegeValueW(nullptr, L"SeBackupPrivilege", &tp.Privileges[0].Luid)) err_ = GetLastError();
+        else if (!AdjustTokenPrivileges(tok, FALSE, &tp, sizeof(tp), nullptr, nullptr)) err_ = GetLastError();
+        else { DWORD e = GetLastError(); if (e == ERROR_NOT_ALL_ASSIGNED) err_ = e; else ok_ = true; }   // rule 4
+        CloseHandle(tok);
+    }
+    ~ThreadBackupPrivilege() { if (impersonating_) RevertToSelf(); }
+    ThreadBackupPrivilege(const ThreadBackupPrivilege&) = delete;
+    ThreadBackupPrivilege& operator=(const ThreadBackupPrivilege&) = delete;
+    bool ok() const { return ok_; }
+    DWORD err() const { return err_; }
+private:
+    bool impersonating_ = false, ok_ = false;
+    DWORD err_ = 0;
+};
+}  // namespace
+
 bool Scan::Run(const std::wstring& root, const std::wstring& display,
                const std::function<bool()>& cancelled, ScanProgress* prog) {
+    ThreadBackupPrivilege priv;   // reverted when Run returns, on every path
+    bool r = RunImpl(root, display, cancelled, prog);
+    stats.backupOk = priv.ok();
+    stats.backupErr = priv.err();
+    return r;
+}
+
+bool Scan::RunImpl(const std::wstring& root, const std::wstring& display,
+                   const std::function<bool()>& cancelled, ScanProgress* prog) {
     files.clear(); dirs.clear(); kids.clear(); names.clear();
     stats = ScanStats{};
     ok = false; rootErr = 0;
@@ -122,8 +161,7 @@ bool Scan::Run(const std::wstring& root, const std::wstring& display,
     stack.push_back({0, rootExt_});
     std::vector<std::wstring> segs;
     std::vector<std::wstring> subNames;
-    static thread_local std::vector<BYTE> buf;   // FILE_ID_BOTH_DIR_INFO batches
-    buf.resize(64 * 1024);
+    std::vector<BYTE> buf(64 * 1024);   // FILE_ID_BOTH_DIR_INFO batches
 
     while (!stack.empty()) {
         if (cancelled()) return false;
@@ -166,7 +204,12 @@ bool Scan::Run(const std::wstring& root, const std::wstring& display,
             if (isDir) { f.cat = ctx != NOCTX ? ctx : (u8)C_OTHER; stats.reparseDirs++; }
             else {
                 f.cat = FileCat(ctx, ln, depth);
-                if (reparse) stats.reparseFiles++;
+                if (reparse) {
+                    stats.reparseFiles++;
+                    // WOF-compressed and dedup files are data, counted at logical size; anything else
+                    // (symlink, AppExecLink, WSL link, unknown tag) is a link we don't follow.
+                    if (e.tag != 0x80000017u /*IO_REPARSE_TAG_WOF*/ && e.tag != 0x80000013u /*DEDUP*/) stats.linkFiles++;
+                }
                 // Hard links: count each (volume serial, FileId) once (deviation 2).
                 if (haveIds && e.fileId != 0 && e.fileId != ~0ULL && !seen[serial].Insert(e.fileId)) {
                     stats.hardlinkDupFiles++;
@@ -182,11 +225,26 @@ bool Scan::Run(const std::wstring& root, const std::wstring& display,
         };
 
         DWORD err = 0;
-        bool listed = false;
+        bool listed = false, infoClassErr = false, becameLink = false;
         HANDLE h = CreateFileW(cur.path.c_str(), FILE_LIST_DIRECTORY | SYNCHRONIZE,
                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
+            // Re-check at open time (CLAUDE.md rule 1): the folder may have become a link or a cloud
+            // placeholder since its parent was listed. Then it is a leaf and is never enumerated.
+            FILE_ATTRIBUTE_TAG_INFO ti{};
+            if (GetFileInformationByHandleEx(h, FileAttributeTagInfo, &ti, sizeof(ti)) &&
+                (ti.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | kCloudMask))) {
+                CloseHandle(h);
+                h = INVALID_HANDLE_VALUE;
+                becameLink = true;
+            }
+        }
+        if (becameLink) {
+            if (di == 0) { rootErr = ERROR_CANT_ACCESS_FILE; return false; }   // the root itself is a link
+            stats.reparseDirs++;
+            listed = true;   // shown as an empty folder; nothing behind it was read
+        } else if (h != INVALID_HANDLE_VALUE) {
             BY_HANDLE_FILE_INFORMATION bi{};
             if (GetFileInformationByHandle(h, &bi)) serial = bi.dwVolumeSerialNumber;
             haveIds = true;
@@ -195,8 +253,11 @@ bool Scan::Run(const std::wstring& root, const std::wstring& display,
                 if (!GetFileInformationByHandleEx(h, FileIdBothDirectoryInfo, buf.data(), (DWORD)buf.size())) {
                     DWORD e = GetLastError();
                     if (e == ERROR_NO_MORE_FILES) { listed = true; break; }
+                    // An empty folder with no "." / ".." entries (FAT/exFAT roots) answers the first
+                    // query with ERROR_FILE_NOT_FOUND: listed, empty, not an error.
+                    if (first && e == ERROR_FILE_NOT_FOUND) { listed = true; break; }
                     if (first && (e == ERROR_INVALID_PARAMETER || e == ERROR_INVALID_LEVEL ||
-                                  e == ERROR_NOT_SUPPORTED || e == ERROR_INVALID_FUNCTION)) { err = e; break; }
+                                  e == ERROR_NOT_SUPPORTED || e == ERROR_INVALID_FUNCTION)) { err = e; infoClassErr = true; break; }
                     err = e; listed = !first; break;   // mid-listing failure: keep what we got, tally it
                 }
                 first = false;
@@ -217,8 +278,16 @@ bool Scan::Run(const std::wstring& root, const std::wstring& display,
             err = GetLastError();
         }
 
-        // Fallback: FindFirstFileExW, no FileIds (per-link counting) — only if nothing was listed yet.
-        if (!listed && files.size() == fileFirst && subNames.empty() && err != ERROR_ACCESS_DENIED) {
+        // Fallback: FindFirstFileExW, no FileIds (per-link counting). Only when the folder opened but
+        // the FS rejected the info class, and only if its attributes (metadata only, no recall) still
+        // say plain folder: FindFirstFileExW would follow a final-component junction or symlink.
+        bool fallbackOk = false;
+        if (infoClassErr && !listed && files.size() == fileFirst && subNames.empty()) {
+            DWORD a = GetFileAttributesW(cur.path.c_str());
+            fallbackOk = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) &&
+                         !(a & (FILE_ATTRIBUTE_REPARSE_POINT | kCloudMask));
+        }
+        if (fallbackOk) {
             std::wstring pat = Join(cur.path, L"*", 1);
             WIN32_FIND_DATAW fd;
             HANDLE fh = FindFirstFileExW(pat.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr,
