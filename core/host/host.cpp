@@ -140,6 +140,12 @@ private:
         }
     }
     void InvalidateChrome() { if (frame_) InvalidateRect(frame_, nullptr, FALSE); }
+    // Layout and theme switch (status bar chips, Ctrl+Shift+L / Ctrl+Shift+T). Saved in [host] of
+    // settings.ini; a --layout/--theme flag overrides the saved value for that run.
+    void SetLook(ui::Layout l, ui::ThemeId t);
+    void ToggleLayout() { SetLook(layout_ == ui::Layout::Console ? ui::Layout::Baseline : ui::Layout::Console, themeId_); }
+    void NextTheme(int dir) { SetLook(layout_, (ui::ThemeId)((((int)themeId_ + dir) % 4 + 4) % 4)); }
+    void ApplyCaptionColour();
     void PaintChrome(HDC dc, const RECT& cl);
     int Screenshot(const CommandLine& cl);
     int PickInitial(const CommandLine& cl) const;
@@ -161,6 +167,8 @@ private:
     ui::ThemeId themeId_ = ui::ThemeId::Dark;
     ui::Layout  layout_  = ui::Layout::Baseline;
     ui::Theme   theme_   = Resolve(ui::ThemeId::Dark, FallbackAccent(ui::ThemeId::Dark));
+    RECT chipLayout_{}, chipTheme_{};   // status-bar switch hit areas (interactive runs only)
+    bool interactive_ = false;
 
     // Build fonts for the active layout and resolve the palette. deterministic => use the theme's own
     // accent (stable goldens for --screenshot/--selftest); otherwise follow the live Windows accent.
@@ -234,12 +242,76 @@ void Host::PaintChrome(HDC dc, const RECT& cl) {
     std::wstring s = status_.empty()
         ? (elevated_ ? L"Running as administrator" : L"Not elevated — some features are limited")
         : status_;
+    int chipsLeft = st.right;
+    if (interactive_) {
+        // Two chips at the right of the status bar: click to switch. Right-click the theme to go back.
+        auto chip = [&](const std::wstring& label, int right, RECT* out) {
+            SIZE sz{}; HGDIOBJ o = SelectObject(dc, fonts_.caption);
+            GetTextExtentPoint32W(dc, label.c_str(), (int)label.size(), &sz);
+            SelectObject(dc, o);
+            int w = sz.cx + S(20, dpi_);
+            RECT r{right - w, st.top + S(4, dpi_), right, st.bottom - S(4, dpi_)};
+            { HBRUSH b = CreateSolidBrush(t.panel2); HPEN pn = CreatePen(PS_SOLID, 1, t.border);
+              HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pn);
+              RoundRect(dc, r.left, r.top, r.right, r.bottom, S(8, dpi_), S(8, dpi_));
+              SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b); DeleteObject(pn); }
+            RECT tr = r;
+            SelectObject(dc, fonts_.caption); SetTextColor(dc, t.text1); SetBkMode(dc, TRANSPARENT);
+            DrawTextW(dc, label.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+            *out = r;
+            return r.left;
+        };
+        int right = st.right - S(10, dpi_);
+        right = chip(std::wstring(L"Theme: ") + ui::ThemeName(themeId_), right, &chipTheme_) - S(6, dpi_);
+        right = chip(std::wstring(L"Layout: ") + ui::LayoutName(layout_), right, &chipLayout_);
+        chipsLeft = right - S(10, dpi_);
+    }
+    sr.right = chipsLeft;
     TextLeft(dc, s, sr, fonts_.caption, t.text2);
     if (busy_) {
-        RECT br = st; br.right -= S(12, dpi_);
+        RECT br = st; br.right = chipsLeft;
         SelectObject(dc, fonts_.caption); SetTextColor(dc, t.accent); SetBkMode(dc, TRANSPARENT);
         DrawTextW(dc, L"Working…", -1, &br, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
     }
+}
+
+void Host::ApplyCaptionColour() {
+    if (!frame_) return;
+    COLORREF bg = theme_.bg;
+    BOOL dark = (GetRValue(bg) * 299 + GetGValue(bg) * 587 + GetBValue(bg) * 114) / 1000 < 128;
+    DwmSetWindowAttribute(frame_, HX_DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    // Windows 10 doesn't repaint a visible caption after the attribute changes until the frame is recalculated.
+    SetWindowPos(frame_, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+void Host::SetLook(ui::Layout l, ui::ThemeId t) {
+    if (l == layout_ && t == themeId_) return;
+    bool layoutChanged = l != layout_, themeChanged = t != themeId_;
+    layout_ = l;
+    themeId_ = t;
+    BuildTheme(/*deterministic=*/false);
+    // Save only the key that changed, so a --theme/--layout flag for this run isn't made permanent by
+    // switching the other one.
+    sys::Settings look = store_.Section(L"host");
+    if (layoutChanged) look.SetStr(L"layout", l == ui::Layout::Console ? L"console" : L"baseline");
+    if (themeChanged) {
+        std::wstring tn = ui::ThemeName(t);
+        for (auto& c : tn) c = (wchar_t)towlower(c);
+        look.SetStr(L"theme", tn);
+    }
+    DWORD serr = 0;
+    if (!store_.Save(&serr)) {   // save now, so the choice survives a crash or a killed process
+        sys::Write(LogLevel::Warn, L"look: settings.ini not saved: " + sys::ErrorText(serr));
+        SetStatus((L"Look not saved: " + sys::ErrorText(serr)).c_str());
+    }
+    // Modules rebuild layout-dependent fonts and metrics the same way they do on a DPI change.
+    for (size_t i = 0; i < modules_.size(); i++)
+        if (content_[i]) modules_[i]->OnDpiChanged(dpi_);
+    ApplyCaptionColour();
+    LayoutContent();
+    if (frame_) RedrawWindow(frame_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
+    sys::Write(LogLevel::Info, std::wstring(L"look: ") + ui::LayoutName(l) + L" / " + ui::ThemeName(t));
 }
 
 LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -272,7 +344,17 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_RBUTTONDOWN: {
+        POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+        if (interactive_ && PtInRect(&chipTheme_, p)) NextTheme(-1);
+        return 0;
+    }
     case WM_LBUTTONDOWN:
+        if (interactive_) {
+            POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            if (PtInRect(&chipLayout_, p)) { ToggleLayout(); return 0; }
+            if (PtInRect(&chipTheme_, p))  { NextTheme(+1); return 0; }
+        }
         if (suite_) {
             POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
             RECT cl; GetClientRect(h, &cl);
@@ -432,6 +514,17 @@ int Host::Run(const CommandLine& cl) {
     dpi_ = DpiOf(nullptr);
     themeId_ = cl.theme;
     layout_  = cl.layout;
+    {
+        sys::Settings look = store_.Section(L"host");
+        if (!cl.layoutGiven && look.GetStr(L"layout") == L"console") layout_ = ui::Layout::Console;
+        if (!cl.themeGiven) {
+            std::wstring v = look.GetStr(L"theme");
+            if (v == L"light") themeId_ = ui::ThemeId::Light;
+            else if (v == L"fun") themeId_ = ui::ThemeId::Fun;
+            else if (v == L"boring") themeId_ = ui::ThemeId::Boring;
+        }
+    }
+    interactive_ = true;
     BuildTheme(/*deterministic=*/false);
     int cw = S(1200, dpi_), ch = S(800, dpi_);
     RECT wa{0, 0, 0, 0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
@@ -440,19 +533,25 @@ int Host::Run(const CommandLine& cl) {
     frame_ = CreateWindowExW(0, kFrameClass, caption_.c_str(), WS_OVERLAPPEDWINDOW,
                              x, y, cw, ch, nullptr, nullptr, wc.hInstance, this);
     if (!frame_) return 2;
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(frame_, HX_DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    ApplyCaptionColour();
     Activate(PickInitial(cl));
     ShowWindow(frame_, SW_SHOW);
     UpdateWindow(frame_);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (msg.message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
+            !(GetKeyState(VK_MENU) & 0x8000) && (msg.wParam == 'L' || msg.wParam == 'T')) {
+            if (!(msg.lParam & (1 << 30)))   // ignore autorepeat: one switch per press
+                msg.wParam == 'L' ? ToggleLayout() : NextTheme(+1);
+            continue;
+        }
         if (active_ >= 0 && modules_[active_]->PreTranslateMessage(msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    store_.Save();
+    DWORD serr = 0;
+    if (!store_.Save(&serr)) sys::Write(LogLevel::Warn, L"settings.ini not saved at exit: " + sys::ErrorText(serr));
     sys::CloseLog();
     CoUninitialize();
     return (int)msg.wParam;

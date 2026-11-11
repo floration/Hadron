@@ -1567,6 +1567,9 @@ void DiskMapModule::RenderMap(HDC ref) {
     hoverHit_ = -1; hoverTopValid_ = false;
     if (st_ == St::Done && data_ && !data_->dirs.empty())
         DrawDir(mapDC_, view_, 0, 0, w, h, 0, 0, 0);
+    // mapDC_ outlives the fonts LeafLabel selected into it (the host rebuilds them on a DPI, layout or
+    // theme change, and DeleteObject fails on a font still selected into a DC), so hand back a stock font.
+    SelectObject(mapDC_, GetStockObject(DEFAULT_GUI_FONT));
     mapDirty_ = false;
 }
 

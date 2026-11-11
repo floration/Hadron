@@ -74,7 +74,8 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
   to the module HWND, and the host keeps that HWND alive until `Shutdown()` returns.
 - **COM.** The host initialises COM (STA, `COINIT_DISABLE_OLE1DDE`). Modules never call `CoInitialize*` on the UI thread.
 - **Focus and input.** The host saves `GetFocus()` on deactivate and restores it on activate, and forwards
-  `WM_MOUSEWHEEL` to the active module. It owns Ctrl+Tab and Ctrl+1..9.
+  `WM_MOUSEWHEEL` to the active module. It owns Ctrl+Tab, Ctrl+1..9, and Ctrl+Shift+L / Ctrl+Shift+T
+  (layout and theme switch), which it takes before `PreTranslateMessage`.
 - **Dialogs.** Every dialog is owned by `IHost::Frame()` and disables the whole suite. Use `hx::ui::Confirm()`.
 - **DPI.** The host handles `WM_DPICHANGED` using the suggested rect, then calls `OnDpiChanged`. Every metric
   goes through `S(px)` with the current DPI. All legacy tools are system-DPI only, so this is real port work.
@@ -153,7 +154,11 @@ and their output is committed so a C++-only build works. Copyrighted inputs (ven
   this; `Resolve(id, accent)` is the deterministic form used by `--screenshot`/`--selftest` so goldens are stable.
 - **Host owns theme + layout**, chosen by `--theme light|dark|fun|boring` and `--layout baseline|console`. Modules
   read them through `IHost::Theme()`, `IHost::Fonts()`, `IHost::Layout()`; the suite chrome themes too. High contrast
-  (`Theme::highContrast`) makes widgets fall back to the system colours.
+  (`Theme::highContrast`) makes widgets fall back to the system colours. In an interactive run the status bar has
+  two chips, "Layout" (toggle) and "Theme" (click: next, right-click: previous), also on Ctrl+Shift+L / Ctrl+Shift+T.
+  The choice is saved in `[host]` of settings.ini and shared by every exe; a `--layout`/`--theme` flag overrides it for
+  that run. `--screenshot`/`--selftest` ignore the saved choice. On a change the host calls `OnDpiChanged` on every
+  created module so layout-dependent fonts are rebuilt.
 - **Widgets** (`core/ui/widgets.h`) are plain objects, not HWNDs: the module owns them, paints them from
   `Module::Paint` (so WM_PAINT and `--screenshot` match), and forwards input via `Module::OnInput`. `ScrollBar`
   (draggable), `ListView` (sortable headers, wheel + scrollbar, keyboard nav, focus rect), `SearchBox`, `DetailPane`.
