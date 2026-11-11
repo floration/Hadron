@@ -1,4 +1,8 @@
 Plan: Default: Windows stock (Services)
 Source: default-stock:services
-Rows: 0 ticked, 0 unticked, 0 kept or protected; already set: 0
-Note: Hadron has no Windows-stock data for build 19045 yet: nothing will be changed.
+Rows: 1 ticked, 0 unticked, 0 kept or protected; already set: 1
+Note: 2 of 109 items have a Windows stock value with a measured or published basis in Hadron's KB; the rest are left alone. Storage drivers never get a stock value: Windows sets those per PC.
+Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
+[x] WSearch  Manual -> Auto (delayed)  (3/- -> 2/1)
+    why: Windows stock start type for build 19045
+    basis: published -- Microsoft's Windows Search performance page (https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/windows-search-performance-issues) (supported Windows client versions): "The service should have the following configuration", Status Running and "Startup Type: Automatic (Delayed Start)". That is the setting the page expects, not a statement about a build; Hadron uses it as the Windows 10 stock value.

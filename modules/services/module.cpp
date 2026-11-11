@@ -3998,16 +3998,23 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
     {   // Labels (Finalize Q2, Q3) and the Preset column's words (Review cat 5/6)
         auto m = fresh(h, fixture);
         check(m->FirstChipLabel() == L"Default: as first seen (2026-11-01)", L"ui: first-snapshot chip reads \"" + m->FirstChipLabel() + L"\"");
-        check(m->StockKnown() == 0 && m->StockChipLabel() == L"Default: Windows stock (no data for this build yet)",
-              L"ui: Windows-stock chip says it has no data for this build (0 KB entries with a stock value)");
-        bool f7 = false, f8 = false;
+        // Services: the KB has published stock values (WSearch and others on the fixture); Drivers: none.
+        const bool svcStock = m->StockKnown() > 0 && m->StockChipLabel() == L"Default: Windows stock";
+        bool f7 = false, f8 = false, f8d = false;
         h.Use(ui::Layout::Console, 96);
         for (auto& k : m->ConsoleKeys()) {
             if (k.cap == L"F7") f7 = k.label == L"1st seen";
-            if (k.cap == L"F8") f8 = k.label == L"Stock (no data)";
+            if (k.cap == L"F8") f8 = k.label == L"Stock";
         }
+        m->OnClickId(ID_TAB_DRV);
+        const bool drvNone = m->StockKnown() == 0 && m->StockChipLabel() == L"Default: Windows stock (no data for this build yet)";
+        for (auto& k : m->ConsoleKeys())
+            if (k.cap == L"F8") f8d = k.label == L"Stock (no data)";
+        m->OnClickId(ID_TAB_SVC);
         h.Use(ui::Layout::Baseline, 96);
-        check(f7 && f8, L"ui: Console F7 reads \"1st seen\" and F8 \"Stock (no data)\"");
+        check(svcStock && drvNone, L"ui: Windows-stock chip: plain on Services (KB stock values), \"(no data for this build yet)\" "
+                                   L"on Drivers (none)");
+        check(f7 && f8 && f8d, L"ui: Console F7 reads \"1st seen\"; F8 \"Stock\" on Services and \"Stock (no data)\" on Drivers");
         const SvcItem* ex = nullptr;
         for (auto& s : m->items_) if (IEq(s.name, L"ExampleUpdater")) ex = &s;
         check(ex && m->KbVerdict(*ex).label == L"not in KB", L"ui: an item Hadron's KB doesn't know shows \"not in KB\" (was an em dash)");
@@ -4211,7 +4218,8 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
     for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::Console}) {   // 9: an empty stock plan offers no Apply
         h.Use(ly, 96);
         auto m = fresh(h, fixture);
-        m->OnClickId(ID_PRESET + 1);   // Windows stock: no data for build 19045
+        m->OnClickId(ID_TAB_DRV);
+        m->OnClickId(ID_PRESET + 1);   // Windows stock on Drivers: no data for build 19045
         Canvas cs(1280, 800);
         if (!cs.ok()) continue;
         m->Paint(cs.dc, full);
@@ -4240,14 +4248,26 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         const SvcItem* nv = nullptr;
         for (auto& s : m->items_) if (IEq(s.name, L"nvlddmkm")) nv = &s;
         int nev = 0;
-        bool stockWords = false;
+        bool stockWords = false, itemWords = false, wsWords = false;
+        m->OnClickId(ID_TAB_DRV);   // the Drivers tab has no stock values: the chip's words
         if (nv)
             for (auto& para : m->ItemDoc(*nv)) {
                 if (para.text.find(L"preset") != std::wstring::npos) nev++;
                 if (para.label == L"Windows stock" && para.text == L"no data for this build yet") stockWords = true;
             }
+        m->OnClickId(ID_TAB_SVC);   // Services has some: a row without one says so for the item, WSearch shows its value
+        for (auto& s : m->items_) {
+            if (IEq(s.name, L"DiagTrack"))
+                for (auto& para : m->ItemDoc(s))
+                    if (para.label == L"Windows stock" && para.text == L"no data for this item yet") itemWords = true;
+            if (IEq(s.name, L"WSearch"))
+                for (auto& para : m->ItemDoc(s))
+                    if (para.label == L"Windows stock" && para.text.find(L"(published)") != std::wstring::npos) wsWords = true;
+        }
         check(nv && nev == 1, L"ui mini-design 10: nvlddmkm's detail says it is never in a preset once, not twice");
-        check(stockWords, L"ui mini-design 12: the detail's Windows stock line uses the chip's words (no data for this build yet)");
+        check(stockWords && itemWords && wsWords,
+              L"ui mini-design 12: the detail's Windows stock line uses the chip's words (Drivers: no data for this build "
+              L"yet; Services: no data for this item yet, or the value with its basis)");
         // 14: "+t" when the Start type column can't hold "+trigger".
         SvcItem t;
         t.name = L"HxTrig";

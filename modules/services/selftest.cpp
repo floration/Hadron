@@ -537,9 +537,19 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             if (e.basis == L"published" && e.basisNote.find(L"https://") == std::wstring::npos) urls = false;
         check(urls, L"every published basis note carries its https URL");
         int stock = 0;
-        for (auto& e : kb.entries) if (e.stock >= 0) stock++;
-        info(L"KB: " + std::to_wstring(n) + L" entries, " + std::to_wstring(stock) +
-             L" with a Windows stock value (none has a measured or published stock basis yet)");
+        bool stockSourced = true;
+        for (auto& e : kb.entries)
+            if (e.stock >= 0) {
+                stock++;
+                if ((e.stockBasis != L"published" && e.stockBasis != L"owner-measured") ||
+                    (e.stockBasis == L"published" && e.stockNote.find(L"https://") == std::wstring::npos) || IsStorageDriver(e.name))
+                    stockSourced = false;
+            }
+        const KbEntry* ws = kb.Find(L"WSearch");
+        check(stock > 0 && stockSourced && ws && ws->stock == 2 && ws->stockDelayed == 1,
+              L"KB stock table: every stock value has a published (with URL) or owner-measured basis, none on a storage "
+              L"driver; WSearch is Auto (delayed)");
+        info(L"KB: " + std::to_wstring(n) + L" entries, " + std::to_wstring(stock) + L" with a Windows stock value");
     }
 
     // ---- A5 first: the data folder owner check (before any test makes a data dir) ----------------------------
@@ -935,7 +945,12 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             }
         }
         Plan sk = PlanFor(-2, TAB_SERVICES, w);
-        check(sk.rows.empty() && !sk.notes.empty(), L"Default (Windows stock): no KB stock values yet -> no rows, with a note");
+        Plan skd = PlanFor(-2, TAB_DRIVERS, w);
+        check(RowOf(sk, L"WSearch") && RowOf(sk, L"WSearch")->basis == L"published" &&
+                  RowOf(sk, L"WSearch")->after.start == 2 && RowOf(sk, L"WSearch")->after.delayed == 1 &&
+                  skd.rows.empty() && !skd.notes.empty(),
+              L"Default (Windows stock): the KB's published stock value for WSearch (fixture Manual -> Auto delayed); "
+              L"no driver has one -> no rows, with a note");
         // Stock mechanism with an in-memory KB that has one measured stock value (and one refused storage driver).
         Kb ks;
         ks.Parse("V\t1\tservices\nB\t19045\n"
@@ -2316,7 +2331,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
     {
         World a;
         freshWorld(&a);
-        Plan s0 = PlanFor(-2, TAB_SERVICES, a);
+        Plan s0 = PlanFor(-2, TAB_DRIVERS, a);   // no driver has a stock value in the KB
         Ctx co = a.ctx;
         co.build = L"22631";
         Plan s1 = BuildDefault(true, TAB_DRIVERS, a.items, co);
