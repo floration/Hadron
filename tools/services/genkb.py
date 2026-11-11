@@ -14,10 +14,11 @@ note that does not name sources on both sides; duplicate names; fewer than 60 en
 
 The bios number check only knows units ("2 s", "120 MB"). This module is about counts and sizes, so the services gate
 also fails on (kb-audit F7, kb-audit-2 S12) any digit that is not an identifier on DIGIT_ALLOW (Windows 10/11,
-Server 2016, 20H2, 1607/1703/1903/2004, 0x codes, USB 2/3, PS/2, 32-/64-bit, ...) or inside a word that starts with a
-letter (IPv6, usbaudio2); on counts and units in words ("forty processes", "two seconds", "one second"); on any
-size word ("a gigabyte"); and on fractions ("half", "a third"). A number marked [[shown|published|@KEY]] passes, as
-in the bios KB. The bios soft-quantity check ("twice", "tens of", ...) is reported as warnings, which never fail.
+Server 2016, 20H2, 1607/1703/1903/2004 when no count noun follows, 0x codes, USB 2/3, PS/2, 32-/64-bit, ...) or
+inside a word that starts with a letter (IPv6, usbaudio2; not "x2"); on counts and units in words ("forty processes",
+"dozens of services", "twenty or so services", "two seconds", "one second", "a millisecond"); on any size word ("a
+gigabyte"); and on fractions ("half", "a third", "a fifth", vulgar-fraction signs). A number marked [[shown|published|@KEY]]
+passes, as in the bios KB. The bios soft-quantity check ("twice", "tens of", ...) is reported as warnings, which never fail.
 
 Format (UTF-8, LF, TAB-separated, bios escaping): see tools/services/README.md.
 """
@@ -63,28 +64,35 @@ CFG_RE = re.compile(r'^[0-4]/[-01]$')
 # usbaudio2, Wdf01000, dot1x), or one of the identifiers on DIGIT_ALLOW. Number words can't be listed that way, so
 # they keep their own checks: counts and units in words, any size word, "one second"-style quantities, fractions.
 DIGIT_ALLOW = re.compile(
-    r'\bWindows\s+1[01](?:/1[01])?\b|\bServer\s+2016\b|\b20H2\b|\b(?:1607|1703|1903|2004)\b|\b0x[0-9A-Fa-f]+\b|'
+    r'\bWindows\s+1[01](?:/1[01])?\b|\bServer\s+2016\b|\b20H2\b|'
+    # A release number is a name only when no count noun follows it (kb-audit-3 M1: "1607 fewer processes").
+    r'\b(?:1607|1703|1903|2004)\b(?![\s-]+(?:of\s+(?:the\s+)?)?(?:(?:more|fewer|less|extra|additional|background|'
+    r'running|Windows|Microsoft)[\s-]+)*(?:processe?s?|services?|drivers?|threads?|handles?|instances?|tasks?|'
+    r'svchosts?|apps?|programs?)\b)|\b0x[0-9A-Fa-f]+\b|'
     r'\bUSB(?:\s+Audio)?\s+[123](?:\.0)?\b|\bPS/2\b|\bclass\s+1\b|\bsubclass\s+\d+,\s+protocol\s+\d+\b|'
     r'\b(?:32|64)-bit\b|\b6to4\b|\bStart\s+value\s+must\s+be\s+0\b', re.I)
-IDENT_RE = re.compile(r'\b[A-Za-z][A-Za-z0-9_]*\d[A-Za-z0-9_]*\b')
+# An identifier starts with a letter, but not "x2": that is a multiplier (kb-audit-3 s4).
+IDENT_RE = re.compile(r'\b(?![xX]\d)[A-Za-z][A-Za-z0-9_]*\d[A-Za-z0-9_]*\b')
 WORD_NUM = (r'(?:zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|'
             r'sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|'
             r'thousands?|millions?|dozens?|a\s+dozen)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine|'
             r'hundred|thousand|million))*')
 # "one" alone is left out of WORD_NUM: "one instance per user" is a description, not a quantity.
 COUNT_NOUN = r'(?:processe?s?|services?|drivers?|threads?|handles?|instances?|tasks?|svchosts?|apps?|programs?)'
-WORD_COUNT_RE = re.compile(r'(?<![\w-])' + WORD_NUM + r'(?:\s+of\s+the)?(?:[\s-]+(?:more|fewer|less|extra|additional|'
-                           r'background|running|Windows|Microsoft))*[\s-]+' + COUNT_NOUN + r'(?!\w)', re.I)
+WORD_COUNT_RE = re.compile(r'(?<![\w-])' + WORD_NUM + r'(?:\s+or\s+so)?(?:\s+of(?:\s+the)?)?'
+                           r'(?:[\s-]+(?:more|fewer|less|extra|additional|background|running|Windows|Microsoft))*[\s-]+' + COUNT_NOUN + r'(?!\w)', re.I)
 # Units spelled out after a number word. "three times" is left to the bios soft check (it warns on "N times faster").
 WORD_UNIT = (r'(?:(?:milli|micro|nano)?seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|'
              r'per\s*cent|percent(?:age\s+points?)?|points?|ms|KB|MB|GB|TB|KiB|MiB|GiB|watts?|volts?|degrees?|'
              r'frames?|fps|hertz|[kMG]?Hz)')
-WORD_UNIT_RE = re.compile(r'(?<![\w-])(?:' + WORD_NUM + r'|one)[\s-]+(?:more\s+|fewer\s+|less\s+)?' + WORD_UNIT +
-                          r'(?!\w)', re.I)
+WORD_UNIT_RE = re.compile(r'(?<![\w-])(?:(?:' + WORD_NUM + r'|one)[\s-]+(?:more\s+|fewer\s+|less\s+)?' + WORD_UNIT +
+                          r'|an?\s+(?:milli|micro|nano)second)(?!\w)', re.I)
 # The KB states no sizes at all, so a size word is a quantity wherever it stands ("frees a gigabyte").
 SIZE_WORD_RE = re.compile(r'\b(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)bytes?\b', re.I)
 FRACTION_RE = re.compile(r'\b(?:half|halves|halved|halving|one[\s-]+third|a\s+third|two[\s-]+thirds|'
-                         r'one[\s-]+quarter|a\s+quarter|three[\s-]+quarters|quarter\s+of)\b(?![\s-]*part(?:y|ies))', re.I)
+                         r'one[\s-]+quarter|a\s+quarter|three[\s-]+quarters|quarter\s+of|(?:a|one)[\s-]+(?:fifth|tenth)s?'
+                         r')\b(?![\s-]*part(?:y|ies))'
+                         r'|[\u00bc-\u00be\u2150-\u215e]', re.I)
 
 
 def check_quantities(text, where, errors, warnings):
@@ -372,6 +380,20 @@ def selftest():
         ('a size word', good(expl='Saves a gigabyte.')),
         ('one second', good(expl='One second faster.')),
         ('points', good(expl='Lowers CPU use by 3 points.')),
+        # kb-audit-3 M1: regressions from the S12 rewrite.
+        ('dozens of', good(expl='Removes dozens of processes.')),
+        ('hundreds of', good(expl='Removes hundreds of services.')),
+        ('thousands of', good(expl='Thousands of handles are freed.')),
+        ('or so', good(expl='Twenty or so services stop.')),
+        ('release number as a count', good(expl='Saves 1903 handles.')),
+        ('release number with a modifier', good(expl='1607 fewer processes.')),
+        ('release number as a count beside a name', good(expl='Removes 2004 services on Windows 10.')),
+        # kb-audit-3 s4: residual forms.
+        ('multiplier', good(expl='Boots x2 faster.')),
+        ('vulgar fraction', good(expl='Frees \u00bd of RAM.')),
+        ('a fifth', good(expl='Cuts boot time by a fifth.')),
+        ('one tenth', good(expl='Uses one tenth of the RAM.')),
+        ('a millisecond', good(expl='Saves a millisecond per frame.')),
     ]
     for what, e in bad:
         expect(errors_for(e, base) != [], 'fails: ' + what)
@@ -381,7 +403,8 @@ def selftest():
     ok_texts += ['Windows Server 2016 services and Windows 10 20H2 drivers.', 'One of the Xbox services.', 'Windows 10/11 services.',
                  'The USB Audio 2.0 driver.',
                  'Restart three times each way.', 'Behalf of the user.', 'Detects a third-party antivirus.', 'A per-user service: one instance per user.',
-                 'Frees [[200 MB|published|@IOT]] of RAM.']
+                 'Frees [[200 MB|published|@IOT]] of RAM.',
+                 'Present on Server 2016 (the 1607 release).', 'Windows 10 (1903 and up)']
     for t in ok_texts:
         expect(errors_for(good(expl=t), base) == [], 'passes: ' + t)
     w = []
