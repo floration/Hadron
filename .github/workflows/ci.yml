@@ -15,7 +15,7 @@ jobs:
       - name: No firmware-write APIs in the source
         run: |
           # Rule 2 (2026-11-11): the one guarded write path is modules/bios/fwwrite.cpp; nowhere else.
-          if grep -rnE 'NtSetSystemEnvironmentValue' core modules app; then
+          if grep -rnE 'NtSetSystemEnvironmentValue|ZwSetSystemEnvironmentValue' core modules app; then
             echo "::error::NtSetSystemEnvironmentValue found (hard rule 2)"; exit 1
           fi
           if grep -rnE 'SetFirmwareEnvironmentVariable' core modules app | grep -v '^modules/bios/fwwrite\.cpp:'; then

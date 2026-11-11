@@ -1067,7 +1067,9 @@ bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, 
     if (!OpenChecked(dir, true, L"", rootFinal, check, &dirH, &dirFinal, &e, &fail)) {
         if (fail == OpenFail::Place || (fail == OpenFail::Kind && SamePath(ParentOf(sys::ToExtended(dir)), rootFinal)))
             return refuse(L"Only Hadron's own backup sessions can be restored: choose a folder directly inside " +
-                          sys::ToShell(rootFinal) + L".");
+                          sys::ToShell(rootFinal) + L". Builds from before the "
+                          L"ProgramData move kept backups in %LOCALAPPDATA%\\Hadron\\bios-backups; those aren't trusted, "
+                          L"because any program running as you could have changed them.");
         return refuse(e);
     }
     MemSource mem;
@@ -1422,6 +1424,9 @@ bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int
         DWORD je = 0;
         if (!OpenChecked(dir + L"\\journal.txt", false, dirFinal + L"\\journal.txt", L"", check, &jh, nullptr, &why, &fail, &je)) {
             if (fail == OpenFail::Open && je == ERROR_FILE_NOT_FOUND) continue;   // stopped before writing: no journal
+            // Another Hadron window holds this journal open: a write is running now. Offering an older
+            // session would undo it, so no banner this time.
+            if (fail == OpenFail::Open && je == ERROR_SHARING_VIOLATION) return false;
             LogLine(LogLevel::Warn, L"ignored " + sys::ToShell(dir) + L": " + why);
             continue;
         }
