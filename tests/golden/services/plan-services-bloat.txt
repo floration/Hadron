@@ -1,0 +1,56 @@
+Plan: Pure bloat removal (Services)
+Source: preset:bloat:services
+Rows: 15 ticked, 1 unticked, 0 kept or protected; already set: 2
+Note: 1 row(s) need TrustedInstaller (Windows refuses the write to administrators): left out while the TrustedInstaller toggle is off.
+Note: 21 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
+Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
+[x] autotimesvc  Manual -> Disabled  (3/- -> 4/-)
+    why: clock from a cellular network
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
+[x] BcastDVRUserService  Manual -> Disabled  (3/- -> 4/-)
+    why: Game Bar recording and broadcasting
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
+[x] icssvc  Manual -> Disabled  (3/- -> 4/-)
+    why: mobile hotspot
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
+[x] lfsvc  Manual -> Disabled  (3/- -> 4/-)
+    why: location for apps; a desktop rarely needs it
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
+[x] MapsBroker  Auto (delayed) -> Disabled  (2/1 -> 4/1)
+    why: offline maps for the Maps app
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
+[x] MessagingService  Manual -> Disabled  (3/- -> 4/-)
+    why: text messaging over a cellular modem
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
+[x] PhoneSvc  Manual -> Disabled  (3/- -> 4/-)
+    why: Windows telephony state for cellular or VoIP apps
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise (a device-maker page, not a desktop page); no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
+[x] RetailDemo  Manual -> Disabled  (3/- -> 4/-)
+    why: shop-display demo mode only
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise (a device-maker page, not a desktop page); no Microsoft source Hadron checked says to keep it.
+[x] SEMgrSvc  Manual -> Disabled  (3/- -> 4/-)
+    why: NFC payments
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
+[x] SmsRouter  Manual -> Disabled  (3/- -> 4/-)
+    why: text messaging over a cellular modem
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
+[x] WalletService  Manual -> Disabled  (3/- -> 4/-)
+    why: Wallet clients
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise (a device-maker page, not a desktop page); no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
+[x] wisvc  Manual -> Disabled  (3/- -> 4/-)
+    why: Windows Insider Program only
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise (a device-maker page, not a desktop page); no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
+[x] WMPNetworkSvc  Manual -> Disabled  (3/- -> 4/-)
+    why: media library sharing from the legacy Windows Media Player
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise (a device-maker page, not a desktop page); no Microsoft source Hadron checked says to keep it.
+[x] XblAuthManager  Manual -> Disabled  (3/- -> 4/-)
+    why: Xbox sign-in; untick if you use the Xbox app or Game Pass
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it Should be disabled (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; both assume nobody games on the device.
+[x] XboxNetApiSvc  Manual -> Disabled  (3/- -> 4/-)
+    why: Xbox Live networking; untick if you play Xbox-enabled online games
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it Should be disabled (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; both assume nobody games on the device.
+[ ] dmwappushservice  Manual -> Disabled  (3/- -> 4/-)
+    why: only used by work or school device management
+    basis: published -- Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) rates it OK to disable (Windows Server 2016) and names MDM as its only use; no Microsoft source Hadron checked says to keep it on an unmanaged PC.
+    warning: needs TrustedInstaller: Windows refuses this write to administrators, and the toggle is off
+    needs TrustedInstaller

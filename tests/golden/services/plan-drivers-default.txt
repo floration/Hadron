@@ -1,0 +1,4 @@
+Plan: Default: restore first snapshot (Drivers)
+Source: default-first:drivers
+Rows: 0 ticked, 0 unticked, 0 kept or protected; already set: 42
+Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
