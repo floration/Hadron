@@ -353,7 +353,9 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             auto cr = c.first->meta.find(L"created");
             r.reason = L"as recorded by the first-run snapshot" + (cr != c.first->meta.end() ? L" (" + cr->second + L")" : L"");
             r.basis = L"recorded";
-            r.basisNote = L"first.txt, read from this PC's service manager when Hadron first ran";
+            // mini-design 11: no internal file name in the plan's text.
+            r.basisNote = L"Hadron's first-run snapshot of this PC" + (cr != c.first->meta.end() ? L" (" + cr->second + L")" : std::wstring()) +
+                          L", read from its service manager";
             Guard g = CheckGuard(s, c);
             const wchar_t* named = Lookup(NeverPreset(), Lower(s.name));
             if (g.neverTouch) r.blocked = L"Protected: never touched by Hadron. " + g.reason;
@@ -638,12 +640,12 @@ void MarkTi(Plan* p, Backend& b, bool tiOn, const std::vector<SvcItem>& items) {
             r.canToggle = false;
             r.warning = L"needs TrustedInstaller: Windows refuses this write to administrators, and the toggle is off";
         } else {
-            r.warning = L"needs TrustedInstaller: written while impersonating it (toggle on)";
+            r.warning = L"needs TrustedInstaller: Hadron writes it as TrustedInstaller (toggle on)";
         }
     }
     if (needTi) {
         std::wstring c = std::to_wstring(needTi) + L" row(s) need TrustedInstaller (Windows refuses the write to administrators): ";
-        p->notes.insert(p->notes.begin(), c + (tiOn ? L"written while impersonating it; Hadron starts it if needed and stops it after."
+        p->notes.insert(p->notes.begin(), c + (tiOn ? L"Hadron writes them as TrustedInstaller, starting it if needed and stopping it after."
                                                     : L"left out while the TrustedInstaller toggle is off."));
     }
     // A row left out here (or the TrustedInstaller row blocked) keeps its item at its current start, which can
