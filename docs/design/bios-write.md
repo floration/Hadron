@@ -56,6 +56,14 @@ Staged change = (setting index, new value). `BuildPlan`:
    no effect"). Assert `newData` differs from `oldData` only inside the planned ranges.
 
 ## Execute (worker), per variable, in plan order, stop at the first failure
+0. **Write lock.** Hold the named mutex `Global\Hadron.bios.fwwrite` for the whole run (RAII). Global, because
+   firmware is machine-wide: two Hadron windows in any session (suite and standalone, two copies, two users)
+   never write at once. Refuse, with nothing written, when the mutex can't be created or opened (the error text,
+   e.g. access denied), when another holder has it ("Another Hadron window is writing BIOS settings. Nothing was
+   written."), or when it comes back `WAIT_ABANDONED` ("Another Hadron window stopped in the middle of a BIOS
+   write. Nothing was written. Check its backup."; the refusing run releases it, and the module re-runs the
+   unfinished-session scan so that session's banner shows). `ExecOptions::lockName` overrides the name; the
+   selftest uses its own, so it never touches the real lock.
 1. Re-check SMBIOS against the map's `B` line (`BoardMatches`/`BiosMatches`); abort all on mismatch or error.
 2. Re-read the variable. Abort if size, attributes or **any byte** differs from `oldData` (drift: "changed since
    it was read; re-read and plan again"). Planned bytes and unplanned bytes both count.
@@ -64,7 +72,25 @@ Staged change = (setting index, new value). `BuildPlan`:
    `CreateDirectoryW`, add `-2`, `-3` on `ERROR_ALREADY_EXISTS`). In it, each file `CREATE_NEW` + `FlushFileBuffers`,
    in the **same layout as Save snapshot** so Load snapshot reads it: `vars\<NNNN>_<name>__<guid>.bin` (the
    re-read bytes), `index.csv`, `system.txt`, plus `plan.txt` (the human plan text). Reuse snapshot.cpp's
-   writers where possible; the selftest proves the loader accepts the folder.
+   writers where possible; the selftest proves the loader accepts the folder. After the backup reads back equal,
+   `manifest.txt` (`CREATE_NEW` + flushed, before the journal opens), tab-separated, version 2:
+   ```
+   Hadron BIOS backup manifest 2
+   board	<board line from the SMBIOS read at backup time, as system.txt's "Board:">
+   bios	<BIOS line from the same read, as system.txt's "BIOS:">
+   <name>	<guid>	<size>	<attributes, 8 hex digits>	<SHA-256 of the bytes, BCrypt, lowercase hex>
+   ```
+   **Admin-only folders (DACL policy).** The backup root is created with, and when it already exists gets again
+   (`SetNamedSecurityInfoW`, `PROTECTED_DACL_SECURITY_INFORMATION`), owner BUILTIN\Administrators and a protected
+   DACL: SYSTEM and Administrators full control, Authenticated Users read/execute, inherited by children
+   (`O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)`). Every session folder and file is created
+   with that same descriptor. Without this, an unkeyed manifest in a user-writable folder would let a
+   non-elevated process plant a "backup" (with a recomputed hash and a fake unfinished journal) and have the
+   elevated Hadron write its bytes: free hex across the UAC boundary. A path is **trusted** when its owner is
+   Administrators or SYSTEM, it has a DACL that isn't NULL, and no access-allowed ACE (any allowed type,
+   inherit-only included) grants a write, append, EA/attribute write, delete, delete-child, `WRITE_DAC`,
+   `WRITE_OWNER`, `GENERIC_WRITE`, `GENERIC_ALL` or `MAXIMUM_ALLOWED` right to any SID other than SYSTEM and
+   Administrators (`SdTrusted` / `PathTrusted`, read with `GetNamedSecurityInfoW`).
 4. Journal (`journal.txt`, opened once with `CREATE_NEW`, each line flushed): `BEGIN <var> <guid>` before the
    write, `OK <var>` after a verified read-back, `RESTORED <var>` / `FAILED <var> <err>` otherwise, `END` at the end.
 5. `Write(name, guid, newData, attr)` with the attributes exactly as read. Size never 0 (assert).
@@ -75,11 +101,21 @@ Result: per variable (written+verified / restored / failed / not attempted), the
 
 **Incomplete session on start:** on module start (UI thread, cheap) scan the newest backup folders' `journal.txt`
 for a `BEGIN` with no matching `OK`/`RESTORED`; show a banner: "A BIOS write on <stamp> didn't finish. Restore
-that backup?" with a Restore button (goes through the normal restore plan + confirm).
+that backup?" with a Restore button (goes through the normal restore plan + confirm). "Newest" is the session
+folder's creation time (the stamp in the name follows a clock that can jump). No banner at all when the root
+isn't trusted; a session whose folder or journal isn't trusted is skipped (and logged).
 
 ## Restore
 "Restore backup…" button: folder picker (`IFileDialog` `FOS_PICKFOLDERS`, owned by `IHost::Frame()`, default
-folder = the bios-backups root) or the newest session from a small list. Plan: for each backed-up variable that
+folder = the bios-backups root) or the newest session from a small list. **Only Hadron's own sessions under the
+protected root restore** (`LoadBackupSession`, on the worker): the chosen folder must be a real folder (not a
+link) directly inside the backup root (both resolved with `GetFinalPathNameByHandleW`); the root, the session
+folder and every folder and file in it must be trusted (checked before anything is read; refused with "This
+backup folder can be changed without admin rights, so it isn't trusted"); it must have `journal.txt` and a
+version-2 `manifest.txt`; its variables must be exactly the manifest's, each with the manifest's size, NV|BS|RT
+attributes and SHA-256; and `system.txt`'s board/BIOS must equal the manifest's. The board/BIOS guard then reads
+the manifest's lines, never the unhashed `system.txt`. A plain Save snapshot folder or anything else is refused,
+with the reason. Plan: for each backed-up variable that
 the map knows, current size/attr vs backup; refuse a size mismatch; list byte ranges that differ and the
 settings they decode to (old → backup value). Same gate as writes (switch on, live, guard matched), same
 confirm overlay, same execute path (drift check against the *current* bytes read at plan time, own new backup
@@ -125,11 +161,22 @@ This is a `core/` API addition: keep it to those two functions; the lead reviews
   corrupts) → restored to oldData and journal RESTORED; backup folder never reused (two sessions in the same
   second → `-2`); Load snapshot reads the backup folder and decodes the old values.
 - Restore: from a backup, plan lists the differing settings; size mismatch refused; execute restores bytes.
-- Incomplete journal detected; complete one not.
+  Manifest v2 content (board/BIOS lines, SHA-256 per variable); a hand-edited `.bin`, a session outside the root,
+  the root itself, a plain Save snapshot folder, a `system.txt` edited to another BIOS, and a session with a file
+  a non-admin can change are each refused; a genuine session restores.
+- Trust policy on descriptors built in memory: admin-only passes; Users:write, Everyone:full, a NULL DACL, no
+  DACL, a user owner, `GENERIC_ALL` (inherit-only), `DELETE` and `WRITE_DAC` to others are each refused. On disk
+  the selftest probes whether the OS keeps file ACLs (Windows does; Wine reports the Unix user as owner): if it
+  does, the restore and banner tests use the real check; if not, they inject one (`TrustFn`) that refuses only
+  the paths a test marks writable.
+- Write lock: refused while another thread holds it; released on return; an abandoned lock refuses that write
+  and the next one goes ahead.
+- Incomplete journal detected; complete one not; newest by creation time; an untrusted journal or root shows
+  no banner.
 - Latch: with the latch set, `RealBackend::Write` returns ERROR_ACCESS_DENIED without calling the API
   (call it with a bogus variable name to prove the path; the latch is always set in selftest anyway).
 - The switch is off on start and is not in settings.ini after toggling.
-Use a temp folder under the test's fixture dir for backups (selftest must not write to `%LOCALAPPDATA%`:
+Backups go to a new folder under `%TEMP%` that the run removes at the end (never `%LOCALAPPDATA%`:
 `Execute`/`Restore` take the backup root as a parameter; only the module passes the real one).
 
 ## Screenshots
