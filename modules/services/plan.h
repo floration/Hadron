@@ -6,6 +6,7 @@
 #pragma once
 
 #include "modules/services/backend.h"
+#include "modules/services/custom.h"
 #include "modules/services/hw.h"
 #include "modules/services/kb.h"
 #include "modules/services/model.h"
@@ -87,6 +88,16 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
 // stock: Windows stock values from the KB (R20: an empty plan says Hadron has no data for the build). Else "as first
 // seen": first.txt, only when it is from this PC (machine GUID) and this Windows build (R11).
 Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const Ctx& c);
+// A custom preset (custom.h) as a plan on its own tab. It only fills the plan: the rows go through the same plan,
+// confirm, snapshot and undo path as every plan. The guards built-in presets get drop items with a note naming them:
+// never-touch and never-in-a-preset items (CheckGuard), and drivers Hadron's KB does not list as safe to change
+// (sysok). CheckGuard's never-in-a-preset set includes items with no KB entry for this build (third-party or
+// unknown), as for built-in presets. Items not on this PC or on the other tab are named in a note too. Unlike a
+// built-in preset it may raise a start type: the list is the user's own. Source "custom:<tab>:<name>".
+Plan BuildCustom(const CustomPreset& cp, const std::vector<SvcItem>& items, const Ctx& c);
+// The ticked, unblocked rows of a start-type plan as a custom preset's items (each row's planned start type), named
+// `name`, on the plan's tab, stamped with this Hadron's version and the build given.
+CustomPreset PresetFromPlan(const Plan& p, const std::wstring& name, const std::wstring& build);
 // "10.0.19045.5737" and "19045" -> "19045": the build number alone, for comparing builds.
 std::wstring BuildNumber(const std::wstring& build);
 Plan BuildSingle(const SvcItem& item, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c);

@@ -426,6 +426,103 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
     return p;
 }
 
+namespace {
+// "a, b, c and 4 more": a note names what it is about without growing past a few lines.
+std::wstring NameList(const std::vector<std::wstring>& v, size_t shown = 8) {
+    std::vector<std::wstring> h(v.begin(), v.begin() + std::min(shown, v.size()));
+    std::wstring s = Join(h, L", ");
+    if (v.size() > shown) s += L" and " + std::to_wstring(v.size() - shown) + L" more";
+    return s;
+}
+}  // namespace
+
+Plan BuildCustom(const CustomPreset& cp, const std::vector<SvcItem>& items, const Ctx& c) {
+    Plan p;
+    p.kind = PlanKind::Preset;
+    p.level = LEVEL_DEFAULT;
+    p.tab = cp.tab;
+    p.title = L"Custom: " + cp.name + L" (" + TabName(cp.tab) + L")";
+    p.source = std::wstring(L"custom:") + (cp.tab == TAB_DRIVERS ? L"drivers" : L"services") + L":" + cp.name;
+    std::vector<std::wstring> missing, otherTab, dropped;
+    int unreadable = 0;
+    for (auto& ci : cp.items) {
+        const SvcItem* s = nullptr;
+        for (auto& i : items) if (IEq(i.name, ci.name) && i.kind != Kind::UserInstance) { s = &i; break; }
+        if (!s) { missing.push_back(ci.name); continue; }
+        if (!OnTab(*s, (Tab)cp.tab)) { otherTab.push_back(s->name); continue; }
+        if (s->cfgUnknown) { unreadable++; continue; }   // R2
+        // The guards every built-in preset gets: never-touch and never-in-a-preset items, and drivers without sysok.
+        Guard g = CheckGuard(*s, c);
+        const bool drv = IsDriverType(s->type);
+        if (g.neverTouch || g.neverPreset) { dropped.push_back(s->name + L" (" + g.reason + L")"); continue; }
+        if (drv && !SysOk(*s, c)) {
+            dropped.push_back(s->name + L" (" + std::wstring(s->cfg.start == 1 ? L"a System-start driver" : L"a driver") +
+                              L" that Hadron's KB does not list as safe to change)");
+            continue;
+        }
+        if (SameStart(s->cfg, ci.target)) { p.alreadySet++; continue; }
+        PlanRow r;
+        r.name = s->name; r.display = s->display; r.driver = drv;
+        r.before = s->cfg; r.deps = s->deps; r.group = s->group;
+        r.op = OpTo(s->cfg, ci.target);
+        r.after = AfterOf(s->cfg, r.op);
+        r.reason = L"your custom preset \"" + cp.name + L"\"";
+        r.basis = L"user";
+        r.basisNote = L"your own list" + (cp.saved.empty() ? std::wstring(L", imported from a file") : L", saved " + cp.saved);
+        if (s->kind == Kind::UserInstance) r.blocked = L"Per-user instance: change its template instead";
+        else if (c.tiOn && IEq(s->name, L"TrustedInstaller")) r.blocked = L"Not while the TrustedInstaller toggle is on: the toggle needs this service";
+        else if (ci.target.Delayed() && !s->group.empty())
+            r.blocked = L"Windows doesn't allow a delayed auto-start service in a load-order group (" + s->group + L"): use Auto";
+        // The hardware guard built-in presets get (BuildPreset): a stricter start for an item whose KB entry names
+        // hardware is kept while that hardware is in use or was seen, and offered unticked for a hot-plug class.
+        if (r.blocked.empty() && ci.target.start > s->cfg.start) {
+            const KbEntry* e = c.kb ? c.kb->Find(s->name) : nullptr;
+            if (e && !e->hw.empty()) {
+                std::wstring ev;
+                int h = c.hw ? HwEvidence(*c.hw, e->hw, s->name, &ev) : 0;
+                if (!c.hw) ev = L"no hardware information: kept";
+                r.evidence = ev;
+                if (h == 0) r.blocked = L"Kept: hardware in use or seen before. " + ev;
+                else if (h == 2) r.include = false;
+            }
+        }
+        if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
+        p.rows.push_back(std::move(r));
+    }
+    DependencyCheck(&p, items);
+    SortRows(&p);
+    p.notes.push_back(L"Your custom preset \"" + cp.name + L"\": nothing is changed until you press Apply, and the apply is "
+                      L"snapshotted and undoable like every plan.");
+    if (!dropped.empty())
+        p.notes.push_back(L"Dropped " + std::to_wstring(dropped.size()) + L" item(s) that every preset leaves alone: " + NameList(dropped) + L".");
+    if (!missing.empty())
+        p.notes.push_back(std::to_wstring(missing.size()) + L" item(s) in the preset are not on this PC: " + NameList(missing) + L".");
+    if (!otherTab.empty())
+        p.notes.push_back(std::to_wstring(otherTab.size()) + L" item(s) are not on the " + TabName(cp.tab) + L" tab, so this preset leaves them: " +
+                          NameList(otherTab) + L".");
+    if (unreadable) p.notes.push_back(UnreadableNote(unreadable));
+    if (std::wstring hn = HwNote(cp.tab, c); !hn.empty()) p.notes.push_back(hn);
+    if (!cp.build.empty() && BuildNumber(cp.build) != BuildNumber(c.build))
+        p.notes.push_back(L"The preset was made on Windows build " + cp.build + L"; this PC runs build " +
+                          (c.build.empty() ? std::wstring(L"(unknown)") : c.build) + L". Check each row: services differ between builds.");
+    p.notes.push_back(L"Start types only. Changes take effect at the next restart; Hadron never restarts the PC.");
+    if (p.rows.empty()) p.emptyText = L"Nothing to change: every item is already set, protected or not on this PC.";
+    return p;
+}
+
+CustomPreset PresetFromPlan(const Plan& p, const std::wstring& name, const std::wstring& build) {
+    CustomPreset cp;
+    cp.name = name;
+    cp.hadron = HadronVersion();
+    cp.build = build;
+    cp.tab = p.tab;
+    for (auto& r : p.rows) {
+        if (!r.blocked.empty() || !r.include || r.after.start < 2) continue;
+        cp.items.push_back({r.name, StartCfg{r.after.start, r.after.start == 2 ? (r.after.delayed == 1 ? 1 : 0) : -1}});
+    }
+    return cp;
+}
+
 Plan BuildSingle(const SvcItem& s, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c) {
     Plan p;
     p.kind = PlanKind::Single;
@@ -1396,6 +1493,12 @@ std::wstring SourceLabel(const std::wstring& source) {
         return std::wstring(L"Default: as first seen (") + (after(L"default-first:") == L"drivers" ? L"Drivers" : L"Services") + L")";
     if (!after(L"default-stock:").empty())
         return std::wstring(L"Default: Windows stock (") + (after(L"default-stock:") == L"drivers" ? L"Drivers" : L"Services") + L")";
+    if (!after(L"custom:").empty()) {
+        std::wstring rest = after(L"custom:");
+        size_t colon = rest.find(L':');
+        std::wstring tab = rest.substr(0, colon) == L"drivers" ? L"Drivers" : L"Services";
+        return L"the custom preset \"" + (colon == std::wstring::npos ? rest : rest.substr(colon + 1)) + L"\" (" + tab + L")";
+    }
     if (source == L"single") return L"a single start-type change";
     if (!after(L"undo:").empty()) return L"the undo of the apply of " + StampText(after(L"undo:"));
     if (!after(L"resume:").empty()) return L"the resume of the apply of " + StampText(after(L"resume:"));

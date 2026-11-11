@@ -5,6 +5,7 @@
 // refuses a write before reaching the SCM (on a service name that does not exist).
 #include "modules/services/cli.h"
 #include "core/sys/sys.h"
+#include "modules/services/measure.h"
 #include "modules/services/plan.h"
 #include "modules/services/recovery.h"
 #include "modules/services/ti.h"
@@ -2552,6 +2553,327 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         }
         check(Store::Plain(L"\\\\?\\UNC\\srv\\share\\x") == L"\\\\srv\\share\\x" && Store::Plain(L"\\\\?\\C:\\x") == L"C:\\x",
               L"Store::Plain strips \\\\?\\ and \\\\?\\UNC\\ (--data-dir is kept without the prefix)");
+    }
+
+    // ---- custom presets: format, strict import, guards, store; measured before/after (fix/svcdrv-presets) ----------
+    {
+        auto has = [](const std::wstring& s, const wchar_t* sub) { return s.find(sub) != std::wstring::npos; };
+        err.clear();
+        // The fixture's stored preset: parse -> write reproduces it byte for byte.
+        std::string raw;
+        CustomPreset gp;
+        bool ok = ReadAll(fixture + L"\\presets\\20261111-090000.txt", &raw) && ParsePreset(raw, &gp, &err);
+        check(ok && WritePreset(gp) == raw && gp.name == L"Gaming rig" && gp.items.size() == 13 && gp.tab == TAB_SERVICES,
+              L"custom preset: the fixture's presets file parses (13 items) and writes back byte for byte" + (ok ? L"" : L": " + err));
+        {   // As the page loads it from the data folder: with its saved time from the file name.
+            Store fs(fixture);
+            std::vector<std::wstring> probs;
+            auto lp = LoadCustomPresets(fs, &probs);
+            for (auto& c : lp) if (c.name == L"Gaming rig") gp = c;
+            check(lp.size() == 2 && probs.empty() && gp.saved == L"2026-11-11 09:00 UTC" && gp.file == L"20261111-090000.txt",
+                  L"custom preset: the fixture's presets folder lists 2 presets, with their saved time from the file name");
+        }
+
+        // export -> import -> export through real files: byte-identical, and CREATE_NEW never replaces a file.
+        std::wstring dir = NewTempDir(L"presets");
+        CustomPreset mine;
+        mine.name = L"Round trip éè 中";
+        mine.hadron = HadronVersion();
+        mine.build = L"19045";
+        mine.items = {{L"DiagTrack", StartCfg{4, -1}}, {L"WSearch", StartCfg{2, 1}}, {L"Spooler", StartCfg{2, 0}}, {L"Fax", StartCfg{3, -1}}};
+        bool exists = false;
+        std::string a1, a2;
+        CustomPreset back;
+        bool e1 = ExportPresetFile(dir + L"\\one.txt", mine, &exists, &err);
+        bool i1 = e1 && ImportPresetFile(dir + L"\\one.txt", &back, &err);
+        bool e2 = i1 && ExportPresetFile(dir + L"\\two.txt", back, &exists, &err);
+        check(e1 && i1 && e2 && ReadAll(dir + L"\\one.txt", &a1) && ReadAll(dir + L"\\two.txt", &a2) && a1 == a2 && !a1.empty() &&
+                  back.name == mine.name && back.items.size() == 4 && back.items[1].target == StartCfg{2, 1} && back.file.empty(),
+              L"custom preset: export -> import -> export is byte-identical (UTF-8 name, auto-delayed kept)" + (err.empty() ? L"" : L": " + err));
+        err.clear();
+        CustomPreset other = mine;
+        other.name = L"Something else";
+        bool e3 = ExportPresetFile(dir + L"\\one.txt", other, &exists, &err);
+        std::string a3;
+        check(!e3 && exists && ReadAll(dir + L"\\one.txt", &a3) && a3 == a1 && has(err, L"never replaces"),
+              L"custom preset: export to an existing file is refused (CREATE_NEW) and the file is unchanged");
+        err.clear();
+
+        // Strict import: every refusal names its line.
+        const std::string head = "HXPRESET\t1\nhadron\t0.1.0\nbuild\t19045\ntab\tservices\nname\tX\n";
+        struct Bad { std::string text; const wchar_t* want; const wchar_t* what; };
+        const Bad bads[] = {
+            {"HXPRESET\t2\nhadron\t0.1.0\nbuild\t19045\ntab\tservices\nname\tX\nDiagTrack\tdisabled\n", L"line 1: format version '2' is not supported", L"an unknown format version"},
+            {"HXPRESET\t1.0\nhadron\t0.1.0\nbuild\t19045\ntab\tservices\nname\tX\nDiagTrack\tdisabled\n", L"line 1: format version", L"a malformed version"},
+            {"HXSVC\t1\tpreset\nDiagTrack\tdisabled\n", L"line 1: not a Hadron services preset", L"another file's header"},
+            {head + std::string(600, 'A') + "\tdisabled\n", L"line 6: the line is 609 bytes; the limit is 512", L"an overlong line"},
+            {head + "DiagTrack\tdisabled\nSysMain\toff\n", L"line 7: start type 'off' is not one of auto, auto-delayed, manual, disabled", L"a bad start type"},
+            {head + "Beep\tsystem\n", L"Hadron never sets Boot or System start", L"System start"},
+            {head + "DiagTrack\tDisabled\n", L"line 6: start type 'Disabled'", L"a start type in the wrong case"},
+            {"HXPRESET\t1\nhadron\t0.1.0\nbuild\t19045\nname\tX\nDiagTrack\tdisabled\n", L"line 4: expected the header line 'tab'", L"a missing header line"},
+            {"HXPRESET\t1\nhadron\t0.1.0\nbuild\t19045\ntab\tservices\n", L"line 5: missing; the header needs 'name'", L"a truncated header"},
+            {"HXPRESET\t1\nhadron\t0.1.0\nbuild\tlatest\ntab\tservices\nname\tX\nDiagTrack\tdisabled\n", L"line 3: the Windows build", L"a bad build"},
+            {"HXPRESET\t1\nhadron\t0.1.0\nbuild\t19045\ntab\tboth\nname\tX\nDiagTrack\tdisabled\n", L"line 4: tab 'both'", L"a bad tab"},
+            {"HXPRESET\t1\nhadron\t0.1.0\nbuild\t19045\ntab\tservices\nname\t\nDiagTrack\tdisabled\n", L"line 5: the preset needs a name", L"an empty name"},
+            {head + "DiagTrack\tdisabled\ndiagtrack\tmanual\n", L"line 7: diagtrack is listed twice", L"a duplicate item"},
+            {head + "DiagTrack\tdisabled\n\nSysMain\tmanual\n", L"line 7: an empty line among the items", L"an empty line among the items"},
+            {head + "DiagTrack\tdisabled\textra\n", L"line 6: expected a name, one tab and a start type; found 3 field(s)", L"an extra field"},
+            {head + "Diag\\Track\tdisabled\n", L"line 6: 'Diag\\Track' is not a service or driver name", L"a backslash in a name"},
+            {head + "Diag\xff\xfeTrack\tdisabled\n", L"line 6: not valid UTF-8 text", L"invalid UTF-8"},
+            {"HXPRESET\t1\nhadron\t0.1.0\nbuild\t19045\ntab\tdrivers\nname\tX\nbeep\tauto-delayed\n", L"line 6: auto-delayed is for services", L"auto-delayed on the drivers tab"},
+            {head, L"the preset lists no items", L"no items"},
+            {"", L"the file is empty", L"an empty file"},
+            {head + std::string(kPresetMaxFile, 'x'), L"larger than", L"a file over the size cap"},
+        };
+        for (auto& b : bads) {
+            CustomPreset x;
+            std::wstring e;
+            bool okp = ParsePreset(b.text, &x, &e);
+            check(!okp && has(e, b.want), std::wstring(L"custom preset import refuses ") + b.what + L" (\"" + e + L"\")");
+        }
+        {
+            std::string many = head;
+            for (size_t i = 0; i <= kPresetMaxItems; i++) many += "Svc" + std::to_string(i) + "\tmanual\n";
+            CustomPreset x;
+            std::wstring e;
+            bool okm = ParsePreset(many, &x, &e);
+            check(!okm && has(e, L"more than 4096 items"), L"custom preset import refuses more than 4096 items (\"" + e + L"\")");
+        }
+        {   // Notepad's form is read: a UTF-8 BOM, CRLF and trailing empty lines.
+            CustomPreset x;
+            std::wstring e;
+            std::string np = "\xEF\xBB\xBFHXPRESET\t1\r\nhadron\t0.1.0\r\nbuild\t19045\r\ntab\tservices\r\nname\tX\r\nDiagTrack\tdisabled\r\n\r\n\r\n";
+            check(ParsePreset(np, &x, &e) && x.items.size() == 1, L"custom preset import takes a UTF-8 BOM, CRLF line ends and trailing empty lines" +
+                                                                          (e.empty() ? L"" : L": " + e));
+        }
+        {   // A refused import file through the same path the Import button takes, with the line named.
+            CustomPreset x;
+            std::wstring e;
+            bool oki = ImportPresetFile(fixture + L"\\import\\bad-start.txt", &x, &e);
+            check(!oki && has(e, L"line 8: start type 'off'"),
+                  L"custom preset: importing import\\bad-start.txt is refused at line 8 (\"" + e + L"\")");
+        }
+        {   // R1 (review): the attribute check that runs on the open handle, for every attribute that refuses.
+            bool all = ImportAttrProblem(FILE_ATTRIBUTE_ARCHIVE, L"x").empty() && ImportAttrProblem(FILE_ATTRIBUTE_NORMAL, L"x").empty() &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_DIRECTORY, L"x"), L"is a folder") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_ARCHIVE, L"x"), L"cloud placeholder") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, L"x"), L"cloud placeholder") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_OFFLINE, L"x"), L"cloud placeholder") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_REPARSE_POINT, L"x"), L"is a link") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, L"x"), L"cloud placeholder");
+            check(all, L"custom preset import refuses a folder, a link (reparse point) and a cloud placeholder (recall on open, on data access, offline), and takes a plain file");
+            std::wstring e;
+            CustomPreset x;
+            bool okd = ImportPresetFile(dir, &x, &e);
+            check(!okd && has(e, L"is a folder"), L"custom preset import refuses a folder through its handle (\"" + e + L"\")");
+            std::wstring big = dir + L"\\big.txt";
+            std::string bigText = "HXPRESET\t1\n" + std::string(kPresetMaxFile, 'x');
+            bool wrote = WriteAll(big, bigText);
+            bool okb = wrote && ImportPresetFile(big, &x, &e);
+            check(wrote && !okb && has(e, L"larger than"), L"custom preset import stops reading one byte past the cap and refuses the file (\"" + e + L"\")");
+        }
+        {   // A cloud placeholder is refused unread (the attribute is set on a temp copy where the file system takes it).
+            std::wstring cp = dir + L"\\offline.txt";
+            std::wstring e;
+            bool made = ExportPresetFile(cp, mine, &exists, &e);
+            bool marked = made && SetFileAttributesW(sys::ToExtended(cp).c_str(), FILE_ATTRIBUTE_OFFLINE) &&
+                          (GetFileAttributesW(sys::ToExtended(cp).c_str()) & FILE_ATTRIBUTE_OFFLINE);
+            CustomPreset x;
+            if (marked) check(!ImportPresetFile(cp, &x, &e) && has(e, L"cloud placeholder"), L"custom preset: an offline (cloud) file is refused unread");
+            else info(L"custom preset: this file system doesn't keep FILE_ATTRIBUTE_OFFLINE; the cloud-placeholder refusal is not exercised here");
+        }
+
+        // Guards: protected, never-in-a-preset and third-party items are dropped with a note; plans go through RunApply.
+        World cw;
+        freshWorld(&cw);
+        Plan p = BuildCustom(gp, cw.items, cw.ctx);
+        MarkTi(&p, cw.fx.backend, false, cw.items);
+        std::wstring notes = Join(p.notes, L" | ");
+        check(!RowOf(p, L"WinDefend") && !RowOf(p, L"RpcSs") && !RowOf(p, L"Fax") && has(notes, L"Dropped 3 item(s) that every preset leaves alone") &&
+                  has(notes, L"WinDefend") && has(notes, L"RpcSs") && has(notes, L"Fax"),
+              L"custom preset guard: WinDefend (never in a preset), RpcSs (never touched) and Fax (no KB entry) are dropped with a note naming them");
+        check(has(notes, L"not on this PC: HxNotOnThisPc") && has(notes, L"not on the Services tab, so this preset leaves them: nvlddmkm") &&
+                  p.alreadySet == 1 && !RowOf(p, L"DiagTrack"),
+              L"custom preset: an item not on this PC and a driver in a services preset are named in notes; DiagTrack is already set");
+        {   // R2 (review): the hardware guard of built-in presets. bthserv: Bluetooth is present, so it is kept (blocked);
+            // FrameServer: a camera class never seen is a hot-plug class, offered unticked with its evidence.
+            const PlanRow* bt = RowOf(p, L"bthserv");
+            const PlanRow* fs = RowOf(p, L"FrameServer");
+            const PlanRow* sbt = RowOf(BuildPreset(LV_STRIPPED, TAB_SERVICES, cw.items, cw.ctx), L"bthserv");
+            check(bt && bt->blocked.find(L"Kept: hardware in use or seen before.") == 0 && !bt->include && !bt->canToggle && !bt->evidence.empty() &&
+                      sbt && sbt->blocked == bt->blocked && fs && !fs->include && fs->blocked.empty() && !fs->evidence.empty(),
+                  L"custom preset hardware guard: bthserv is kept as by Stripped (\"" + (bt ? bt->blocked : std::wstring(L"no row")) +
+                      L"\"), FrameServer is offered unticked with its evidence");
+            World nh;
+            freshWorld(&nh);
+            nh.ctx.hw = nullptr;
+            const PlanRow* bn = RowOf(BuildCustom(gp, nh.items, nh.ctx), L"bthserv");
+            check(bn && !bn->blocked.empty() && bn->evidence == L"no hardware information: kept",
+                  L"custom preset hardware guard: without hardware information a hardware-bound item is kept");
+        }
+        const PlanRow* ws = RowOf(p, L"WSearch");
+        const PlanRow* sm = RowOf(p, L"SysMain");
+        check(ws && ws->after == StartCfg{2, 1} && ws->op.delayed == 1 && sm && sm->after.start == 4 && sm->include && sm->basis == L"user" &&
+                  p.source == L"custom:services:Gaming rig" && SourceLabel(p.source) == L"the custom preset \"Gaming rig\" (Services)",
+              L"custom preset plan: WSearch is raised to Auto (delayed), SysMain lowered to Disabled; source and its label name the preset");
+        {
+            std::string drvRaw;
+            CustomPreset dp;
+            bool okd = ReadAll(fixture + L"\\presets\\20261111-093000.txt", &drvRaw) && ParsePreset(drvRaw, &dp, &err);
+            Plan pd = okd ? BuildCustom(dp, cw.items, cw.ctx) : Plan{};
+            std::wstring dn = Join(pd.notes, L" | ");
+            check(okd && pd.rows.empty() && !pd.emptyText.empty() && has(dn, L"Beep") && has(dn, L"nvlddmkm") && has(dn, L"build 19041"),
+                  L"custom preset guard (drivers): Beep (System start, no sysok) and nvlddmkm (no KB entry) are dropped; the build note is shown");
+        }
+        {   // The golden text of the fixture's custom plan.
+            std::string got = DumpPlan(p);
+            std::wstring gpth = golden + L"\\plan-services-custom.txt";
+            if (update) check(WriteAll(gpth, got), L"wrote golden " + gpth);
+            else {
+                std::string want;
+                bool have = ReadAll(gpth, &want);
+                check(have && want == got, L"golden plan-services-custom.txt" + std::wstring(have ? (want == got ? L"" : L" differs") : L" missing"));
+            }
+        }
+        {   // Ticks -> custom preset -> plan: the ticked rows come back with the same targets.
+            Plan st = PlanFor(LV_STRIPPED, TAB_SERVICES, cw);
+            TickUndetectable(&st);
+            CustomPreset fromTicks = PresetFromPlan(st, L"My stripped", L"19045");
+            std::string txt = WritePreset(fromTicks);
+            CustomPreset re;
+            bool okr = ParsePreset(txt, &re, &err);
+            Plan again = okr ? BuildCustom(re, cw.items, cw.ctx) : Plan{};
+            MarkTi(&again, cw.fx.backend, false, cw.items);
+            bool same = okr && (int)fromTicks.items.size() == st.Included();
+            for (auto& r : st.rows) {
+                if (!r.include || !r.blocked.empty()) continue;
+                const PlanRow* q = RowOf(again, r.name.c_str());
+                if (!q || !q->include || q->after.start != r.after.start || q->after.Delayed() != r.after.Delayed()) same = false;
+            }
+            check(same, L"custom preset: the Stripped plan's " + std::to_wstring(st.Included()) +
+                            L" ticked rows saved as a preset come back as the same ticked rows and targets");
+        }
+        {   // The plan a custom preset fills goes through the unchanged RunApply, snapshot and undo path.
+            World aw;
+            freshWorld(&aw);
+            auto before = CfgMap(aw.fx.backend);
+            Store s(NewTempDir(L"custom-apply"));
+            s.fixedStamp = L"20261111-111500";
+            Plan cp = BuildCustom(gp, aw.items, aw.ctx);
+            MarkTi(&cp, aw.fx.backend, false, aw.items);
+            ApplyEnv env = EnvFor(&aw.fx.backend, &s);
+            ApplyResult r;
+            bool oka = RunApply(cp, env, &r);
+            auto logs = LoadLogs(s, nullptr);
+            check(oka && r.ok == cp.Included() && r.failed == 0 && s.Exists(L"snap-20261111-111500.txt") && s.Exists(L"recovery-20261111-111500.zip") &&
+                      logs.size() == 1 && At(logs, 0).source == L"custom:services:Gaming rig",
+                  L"custom preset apply (fake): " + std::to_wstring(r.ok) + L" rows, snapshot and recovery first, the log names the source");
+            Plan u = BuildUndo(At(logs, 0), aw.fx.backend, aw.items, aw.ctx);
+            ApplyResult ru;
+            bool oku = RunApply(u, env, &ru);
+            // Start values exactly; an absent DelayedAutostart comes back as 0, as every Undo writes it (design note).
+            bool same = true;
+            for (auto& kv : CfgMap(aw.fx.backend)) {
+                const StartCfg& b0 = before[kv.first];
+                if (kv.second.start != b0.start || kv.second.Delayed() != b0.Delayed() || (b0.delayed >= 0 && kv.second.delayed != b0.delayed)) same = false;
+            }
+            check(oku && ru.failed == 0 && same, L"custom preset apply: Undo restores every start value (and every recorded delayed flag) exactly");
+        }
+        {   // The data folder store: CREATE_NEW files, a name taken refused, Remove hides without deleting.
+            Store s(NewTempDir(L"custom-store"));
+            s.fixedStamp = L"20261111-120000";
+            CustomPreset a = gp, b = gp;
+            std::wstring e1s, e2s, e3s;
+            bool sa = SaveCustomPreset(s, &a, {}, &e1s);
+            std::vector<std::wstring> probs;
+            auto list = LoadCustomPresets(s, &probs);
+            b.name = L"GAMING RIG";
+            bool sb = SaveCustomPreset(s, &b, list, &e2s);
+            check(sa && a.file == L"20261111-120000.txt" && list.size() == 1 && At(list, 0).name == L"Gaming rig" &&
+                      At(list, 0).saved == L"2026-11-11 12:00 UTC" && probs.empty() && !sb && has(e2s, L"exists"),
+                  L"custom preset store: saved as presets\\20261111-120000.txt, listed back, and a second \"GAMING RIG\" is refused");
+            bool rm = RemoveCustomPreset(s, At(list, 0), &e3s);
+            auto list2 = LoadCustomPresets(s, &probs);
+            check(rm && list2.empty() && s.Exists(L"presets\\20261111-120000.txt"),
+                  L"custom preset store: Remove hides it from the list and deletes nothing (its file stays)");
+        }
+
+        // ---- measured before/after ----
+        Measurement live;
+        std::wstring me;
+        bool took = TakeMeasurement(L"before", L"19045", L"machine-x", L"before Stripped (Services)", &live, &me);
+        check(took && live.ramTotal > 0 && live.ramUsed > 0 && live.ramUsed <= live.ramTotal && live.processes > 0 && live.created.size() == 19 &&
+                  live.boot.size() == 19 && live.boot < live.created,
+              L"measure: live values read (RAM, commit, " + std::to_wstring(live.processes) + L" processes, " + std::to_wstring(live.svchost) +
+                  L" svchost)" + (me.empty() ? L"" : L": " + me));
+        {
+            Store s(NewTempDir(L"measure"));
+            Measurement m = live;
+            bool sv = SaveMeasurement(s, &m, &me);
+            std::vector<std::wstring> probs;
+            auto ms = LoadMeasurements(s, &probs);
+            std::string text;
+            Measurement rp;
+            bool rd = s.Read(L"measure\\" + m.file, &text, &me) && ParseMeasurement(text, &rp, &me);
+            check(sv && ms.size() == 1 && probs.empty() && rd && WriteMeasurement(rp) == text && At(ms, 0).ramUsed == live.ramUsed &&
+                      At(ms, 0).commit == live.commit && At(ms, 0).processes == live.processes && At(ms, 0).svchost == live.svchost &&
+                      At(ms, 0).uptimeMin == live.uptimeMin && At(ms, 0).created == live.created && At(ms, 0).plan == live.plan,
+                  L"measure: record -> data folder -> read back is the same record, byte for byte" + (me.empty() ? L"" : L": " + me));
+        }
+        {   // Pairing: an after counts only from a boot that started after its before.
+            auto mk = [](const wchar_t* phase, const wchar_t* created, const wchar_t* boot) {
+                Measurement m;
+                m.phase = phase; m.created = created; m.boot = boot; m.machine = L"m";
+                return m;
+            };
+            std::vector<Measurement> ms = {mk(L"before", L"2026-11-11 08:12:31", L"2026-11-11 08:00:05"),
+                                           mk(L"after", L"2026-11-11 08:20:00", L"2026-11-11 08:00:05")};   // same boot
+            MeasurePair same = LatestPair(ms);
+            int pendSame = PendingBefore(ms, L"2026-11-11 08:00:05");
+            int pendNew = PendingBefore(ms, L"2026-11-11 09:05:40");
+            ms.push_back(mk(L"after", L"2026-11-11 09:18:02", L"2026-11-11 09:05:40"));
+            MeasurePair pr = LatestPair(ms);
+            check(same.before < 0 && pendSame < 0 && pendNew == 0 && pr.before == 0 && pr.after == 2 && PendingBefore(ms, L"2026-11-11 09:05:40") < 0,
+                  L"measure: an after from the same boot is not paired; after a restart the before is pending until its after is taken");
+            std::string bad = WriteMeasurement(At(ms, 0));
+            bad = bad.substr(0, bad.find("V\tprocesses"));
+            Measurement x;
+            std::wstring e;
+            bool okb = ParseMeasurement(bad, &x, &e);
+            check(!okb && has(e, L"processes"), L"measure: a record missing a value is refused (\"" + e + L"\")");
+        }
+        {   // The fixture's pair.
+            Store fs(fixture);
+            auto ms = LoadMeasurements(fs, nullptr);
+            MeasurePair pr = LatestPair(ms);
+            check(ms.size() == 2 && pr.before == 0 && pr.after == 1, L"measure: the fixture's before and after (one restart apart) pair up");
+        }
+        {   // R6 (review): which Hadron applies fall between a before and its after (from the undo logs).
+            Store fs(fixture);
+            auto ms = LoadMeasurements(fs, nullptr);
+            if (ms.size() == 2) {
+                const Measurement& b = ms[0];   // created 2026-11-11 08:12:31
+                const Measurement& a = ms[1];   // booted 2026-11-11 09:05:40
+                auto log = [&](const wchar_t* stamp, const wchar_t* source, bool rows, const std::wstring& machine) {
+                    UndoLog l;
+                    l.stamp = stamp; l.source = source; l.hasB = true; l.machine = machine;
+                    if (rows) l.rows.push_back(UndoRow{});
+                    return l;
+                };
+                std::vector<UndoLog> logs = {
+                    log(L"20261111-081000", L"preset:bloat:services", true, b.machine),           // before the before
+                    log(L"20261111-084500", L"custom:services:Gaming rig", true, b.machine),      // between: counted
+                    log(L"20261111-085000", L"preset:stripped:services", false, b.machine),       // no rows written
+                    log(L"20261111-085500-2", L"single", true, L"another-machine"),               // another PC
+                    log(L"20261111-090000", L"preset:minimum:services", true, b.machine),         // between: counted
+                    log(L"20261111-091000", L"preset:minimum:drivers", true, b.machine),          // after the after's boot
+                };
+                auto ap = AppliesBetween(b, a, logs);
+                check(ap.size() == 2 && ap[0].source == L"custom:services:Gaming rig" && ap[0].when == L"2026-11-11 08:45:00" &&
+                          ap[1].source == L"preset:minimum:services" && AppliesBetween(b, a, {}).empty(),
+                      L"measure: only applies of this machine with written rows between the before and the after's boot are named");
+            }
+        }
     }
 
     // ---- the page (module.cpp), on the fixture ---------------------------------------------------------------

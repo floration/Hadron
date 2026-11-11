@@ -1,0 +1,14 @@
+HXSVC	1	measure
+M	boot	2026-11-11 08:00:05
+M	build	19045
+M	created	2026-11-11 08:12:31
+M	machine	6f1c2a4e-fixture-0000-0000-000000000001
+M	phase	before
+M	plan	before Stripped (Services)
+M	uptime	12
+V	ram_used	5530337280
+V	ram_total	34208002048
+V	commit	7861174272
+V	commit_limit	39576711168
+V	processes	187
+V	svchost	78
