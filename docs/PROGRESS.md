@@ -11,6 +11,9 @@
 | `bios` guarded writes (rule 2 changed) | review passed (4 rounds, 1 waived); owner's first real write worked (build f) | module-builder-careful | module/bios-write | #5 |
 | `core/fs` header + design note | not started | lead | - | - |
 | `runas` module | merged; owner's-PC launch checks pending | module-builder | module/runas | #2 |
+| In-app layout/theme switch, settings.ini merge-on-save | merged | lead | claude/project-thread-7nnuw6 | #6 |
+| Auto-update from GitHub releases, Reading Room theme, anti-aliased shapes | in review; owner's call on moving the old exe pending | lead | claude/project-thread-7nnuw6 | #7 |
+| Core follow-ups from svcdrv (PR #8, docs/pipeline/svcdrv/7-finalize.md): TrustedInstaller helper into core, `--size`/`--dpi` fixture-render flag, ListView and theme APIs, shared F-key bar, opt-in per-list font | backlog, after the owner's current asks | lead | - | - |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)
