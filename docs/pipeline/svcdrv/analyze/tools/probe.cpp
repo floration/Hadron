@@ -157,7 +157,7 @@ int wmain(int argc, wchar_t** argv) {
         UndoRow u; u.seq = 1; u.name = L"aaa"; u.before = StartCfg{2, -1}; u.after = StartCfg{4, -1};
         u.hasI = u.hasD = true; u.result = L"ok"; u.afterObs = StartCfg{4, -1}; log.rows = {u};
         FakeBackend fb2; fb2.SetItems({Svc(L"aaa", 4, 1)});
-        Plan pu = BuildUndo(log, fb2, c);
+        Plan pu = BuildUndo(log, fb2, {Svc(L"aaa", 4, 1)}, c);
         Store st2(TempDir(L"p4u")); st2.fixedStamp = L"20261111-000001";
         ApplyResult r2; RunApply(pu, Env(&fb2, &st2), &r2); if (r2.aborted) printf("    APPLY ABORTED: %ls\n", r2.error.c_str());
         printf("    undo: after apply %ls (before Hadron: 2/-)\n", CfgText(CfgOf(fb2, L"aaa")).c_str());
@@ -172,14 +172,14 @@ int wmain(int argc, wchar_t** argv) {
         u.hasI = u.hasD = true; u.result = L"ok"; u.afterObs = StartCfg{4, -1}; log.rows = {u};
         FakeBackend fb; fb.SetItems({Svc(L"drvx", 0, -1, {}, 0x1)});   // Windows made it Boot-start since
         Ctx c = MakeCtx(nullptr, &hw);
-        Plan p = BuildUndo(log, fb, c);
+        Plan p = BuildUndo(log, fb, {}, c);
         const PlanRow* a = Row(p, L"drvx");
         printf("    row: %ls -> %ls blocked='%ls' canToggle=%d include=%d warn='%ls'\n", CfgText(a->before).c_str(),
                CfgText(a->after).c_str(), a->blocked.c_str(), a->canToggle, a->include, a->warning.c_str());
         Check(!a->blocked.empty() || !a->canToggle, "a Boot-start driver is blocked (not toggleable) in an Undo plan");
         // Also a never-touch (ErrorControl Critical) item
         FakeBackend fb2; SvcItem crit = Svc(L"drvx", 4, -1, {}, 0x1); crit.errctl = 3; fb2.SetItems({crit});
-        Plan p2 = BuildUndo(log, fb2, c);
+        Plan p2 = BuildUndo(log, fb2, {}, c);
         const PlanRow* b = Row(p2, L"drvx");
         Check(b && !b->blocked.empty(), "a never-touch item (ErrorControl Critical) is blocked in an Undo plan");
     }
@@ -509,11 +509,49 @@ int wmain(int argc, wchar_t** argv) {
         Ctx c = MakeCtx(&kb, &hw);
         Plan p = BuildPreset(LV_BLOAT, TAB_SERVICES, items, c);
         FakeBackend fb; fb.SetItems(items); fb.faults.deny.insert(L"bbb");   // admin write refused -> needs TI, toggle off
-        MarkTi(&p, fb, false);   // what BuildFrom does last
+        MarkTi(&p, fb, false, items);   // what BuildFrom does last
         const PlanRow* a = Row(p, L"aaa"); const PlanRow* b = Row(p, L"bbb");
         printf("    aaa include=%d dep='%ls'; bbb include=%d canToggle=%d\n", a->include, a->depWarning.c_str(), b->include, b->canToggle);
         std::wstring why;
         Check(consistent(p, items, &why), "a TI-excluded dependent unticks what it depends on");
+    }
+
+    printf("R6 A8: TI toggle off/on/off (plan rebuilt each time, as the UI does) and per-row toggles after\n");
+    {
+        Kb kb; std::wstring err;
+        kb.Parse("V\t1\tservices\nB\t19045\n" + K("aaa", "svc", "4", "", "") + K("bbb", "svc", "4", "", "") + K("ccc", "svc", "4", "", ""), &err);
+        // ccc <- bbb (TI-only) <- aaa ... aaa is a dependency of bbb; ccc depends on aaa too and is a normal row
+        std::vector<SvcItem> items = {Svc(L"aaa", 3), Svc(L"bbb", 3, -1, {L"aaa"}), Svc(L"ccc", 3, -1, {L"aaa"})};
+        FakeBackend fb; fb.SetItems(items); fb.faults.deny.insert(L"bbb");
+        std::wstring why; bool ok = true;
+        auto unwarnedConflict = [&](const Plan& p) {
+            std::map<std::wstring, int> fin;
+            for (auto& s : items) fin[Lower(s.name)] = s.cfg.start;
+            for (auto& r : p.rows) if (r.blocked.empty() && r.include) fin[Lower(r.name)] = r.after.start;
+            for (auto& r : p.rows) {
+                if (!r.blocked.empty() || !r.include || !r.depWarning.empty()) continue;
+                if (r.after.start == 4) for (auto& s : items) for (auto& d : s.deps) if (IEq(d, r.name) && fin[Lower(s.name)] != 4) return true;
+            }
+            return false;
+        };
+        for (bool ti : {false, true, false, true}) {
+            Ctx c = MakeCtx(&kb, &hw); c.tiOn = ti;
+            Plan p = BuildPreset(LV_BLOAT, TAB_SERVICES, items, c);
+            MarkTi(&p, fb, ti, items);
+            printf("    ti=%d:", ti); for (auto& r : p.rows) printf(" %ls=%d%s", r.name.c_str(), r.include, r.depWarning.empty() ? "" : "(w)"); printf("\n");
+            if (unwarnedConflict(p)) { ok = false; printf("    unwarned conflict after build, ti=%d\n", ti); }
+            // every single-row toggle sequence of length 3
+            for (int a = 0; a < 3; a++) for (int b2 = 0; b2 < 3; b2++) for (int c3 = 0; c3 < 3; c3++) {
+                Plan q = p;
+                for (int k : {a, b2, c3}) {
+                    if (!q.rows[k].canToggle || !q.rows[k].blocked.empty()) continue;
+                    q.rows[k].include = !q.rows[k].include;
+                    DependencyCheck(&q, items, k);
+                    if (unwarnedConflict(q)) { ok = false; printf("    unwarned conflict ti=%d after toggling %ls\n", ti, q.rows[k].name.c_str()); }
+                }
+            }
+        }
+        Check(ok, "A8: no unwarned conflict across TI off/on/off rebuilds and every 3-toggle sequence");
     }
     printf("R4 First-run recovery rows (fixture first.txt, real KB)\n");
     {

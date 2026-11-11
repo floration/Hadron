@@ -129,3 +129,32 @@ Hadron disabled.
 
 ### Hand-off
 Back to **Build** for A8 and A9 (both small). Round 3 will rerun the probe and the fuzzer.
+
+## Round 3 (c49ca9e), 2026-11-11 — passed, on to Design
+
+Clean rebuild of both the release build and the test-hooks build (`-DHADRON_SERVICES_TEST_HOOKS=ON`).
+`tests/tools/services_check.sh build-svctest`: genkb selftest and byte-identical services.db, fixture cmp, selftest
+**189/189** standalone and `--solo services`, 8 plan goldens plus the delayedlinger golden match, 12 screenshots.
+The release `HadronServices.exe` contains neither test hook. Independent logic re-run: `analyze/a-logic-r3.md`.
+
+| Item | Result |
+|---|---|
+| A8 TI marking vs dependency check | **fixed**: aaa <- bbb(TI) repro unticks aaa with a warning; all 27 three-toggle sequences after TI off/on/off/on rebuilds stay consistent. |
+| A9 non-settling mixed plans | **fixed**: ~205,000 fuzzed plans, 4 seeds (12345, 1, 777, 20261111), random and chain/cycle/`+group` dependencies, 6 toggles each: 0 unwarned conflicts, the untick-only fallback never ticks a row or raises a start type (fallback in ~2.5% of mixed plans, never in preset plans). A planted bug is caught in 4,700–9,500 plans per mode, so the checker works. Worst UI-thread toggle: 1.4 ms on the round-2 non-converging pair (was 1.7 s), 45 ms on an adversarial 400-row, 200-link cascade (Wine). |
+| Build's round-2 minors | `:put` skips keys now Start 0/1 (golden-checked, not run on real cmd), `Control` reports its own start, holding-folder owner check, Store hooks behind a CMake option: done. |
+
+New minor, round 3:
+- If Hadron's own start of TrustedInstaller succeeds but the wait for RUNNING fails, `Acquire` returns before setting
+  `started_` (ti.cpp:126-129), so TI isn't stopped and no `T` marker is logged. Low impact (TI idles out). Fix: set
+  `started_ = own` before checking the wait.
+- The release build's `--selftest` under Wine (no hooks) crashes after the expected data-folder failures:
+  selftest.cpp:1035 indexes `logs[0]` on an empty vector. Test code only; CI uses the hooks build. Guard the index.
+
+Still open for Finalize (all minor): M3, M8, M12, F3–F5, apply-time re-read of live dependents, canonical en-us KB
+URLs, UNC data dir, `FileCompany`'s unchecked `ExpandEnvironmentStringsW`, CI coverage of `:dry` miss/fail branches
+and `restore-online.cmd`, and the first windows-latest run (MSVC compile, `--live-test`, owner check on the runner's
+data folder, A1 on real cmd). The Needs-Windows list above is unchanged; James's PC checks still need a session there.
+
+For Design: the UI list in "Minor" above (U1 stale selection, U2 core focus rect, keyboard reach, sort-arrow overlap,
+off-screen selection after sort, columns hidden below ~1700 px, the "Hadron" column showing lowest level, the Stop TI
+"Why" text) and the gaps against the owner's words (empty Windows stock, KB coverage, TI toggle vs WinDefend).
