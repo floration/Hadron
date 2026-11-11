@@ -5,6 +5,7 @@
 
 #include "core/sys/win_compat.h"
 #include "core/ui/theme.h"
+#include "core/ui/aa.h"
 #include <string>
 
 namespace hx::ui {
@@ -38,16 +39,10 @@ inline void FrameRectC(HDC dc, const RECT& r, COLORREF c) {
     DeleteObject(b);
 }
 
-// Filled rounded rectangle with an optional 1px border (border == CLR_NONE for none).
+// Filled rounded rectangle with an optional 1px border (border == kNoColor for none), anti-aliased.
+// `radius` keeps GDI RoundRect's meaning (the corner ellipse's diameter), so callers didn't change.
 inline void RoundFill(HDC dc, const RECT& r, int radius, COLORREF fill, COLORREF border = kNoColor) {
-    HBRUSH b = CreateSolidBrush(fill);
-    HBRUSH ob = (HBRUSH)SelectObject(dc, b);
-    HPEN pen = (border == kNoColor) ? (HPEN)GetStockObject(NULL_PEN) : CreatePen(PS_SOLID, 1, border);
-    HPEN op = (HPEN)SelectObject(dc, pen);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(dc, ob); SelectObject(dc, op);
-    if (border != kNoColor) DeleteObject(pen);
-    DeleteObject(b);
+    AaRoundRect(dc, r, radius / 2.0, fill, border);
 }
 
 // DrawTextW wrappers. The caller owns the font (selected into dc); colour and transparent bg set here.

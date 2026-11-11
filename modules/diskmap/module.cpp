@@ -62,10 +62,7 @@ void Outline(HDC dc, RECT r, COLORREF c, int width) {
     for (int i = 0; i < width; i++) { FrameRectC(dc, r, c); InflateRect(&r, -1, -1); }
 }
 void RoundOutline(HDC dc, const RECT& r, int radius, COLORREF c) {
-    HPEN p = CreatePen(PS_SOLID, 1, c), op = (HPEN)SelectObject(dc, p);
-    HBRUSH ob = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(p);
+    AaRoundRect(dc, r, radius / 2.0, kNoColor, c);
 }
 void GradV(HDC dc, const RECT& r, COLORREF top, COLORREF bot) {
     TRIVERTEX v[2] = {
