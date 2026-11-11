@@ -104,6 +104,15 @@ for screenshots. `--screenshot` renders deterministically from the fixture
    made general; the 9900K result labelled as the owner's measurement on a different CPU (#27–#30).
 7. Platform/contract fixes with no visible behaviour change (#1, #2, #8, #10, #11, #13–#20, #22).
 
+Settled during the build (lead, 2026-11-11, under items 1, 4 and 6 above):
+- Export lists the basis of every note/advice line and the source of each number printed (rule 7).
+- Values are marked unverified when the board/BIOS check can't run (no SMBIOS, snapshot without
+  `system.txt`), and a snapshot loaded for compare is checked against its own `system.txt`.
+- MSI SMBIOS reports the BIOS version as `A.F0`; the guard accepts it as `7E06vAF` (basis: the legacy
+  title `BIOS 7E06vAF (A.F0)`). Still to confirm on the owner's PC.
+- The detail pane shows "Claim check" even when an entry has no effect text (legacy hid it).
+- Snapshot loads are capped (4 MB per variable, 16 MB per text file, 256 MB in total) against hostile files.
+
 ## Acceptance
 Builds standalone (`HadronBios.exe`) and in the suite; `--selftest` passes under Wine; screenshots in both
 layouts × dark/light plus a non-solo suite shot; `genkb.py` passes and its output is what's embedded;

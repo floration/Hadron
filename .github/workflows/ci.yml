@@ -32,6 +32,13 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake -DCMAKE_BUILD_TYPE=Release
           cmake --build build
+      # Hard rule 7: the BIOS knowledge-base generator rejects unsourced numbers; the committed
+      # settings.db must be exactly what it generates.
+      - name: BIOS KB generator
+        run: |
+          python3 tools/bios/genkb.py --selftest
+          python3 tools/bios/genkb.py legacy/bios-explorer/app/settings.db /tmp/settings.db
+          cmp /tmp/settings.db modules/bios/data/settings.db
       - name: Selftests (Wine)
         run: |
           export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
@@ -72,6 +79,10 @@ jobs:
             done
           done
           shot build/Hadron.exe --module runas --screenshot shots/runas-suite-baseline.png
+      - name: BIOS selftests and screenshots (Wine + Xvfb)
+        run: |
+          export WINEPREFIX="$PWD/.wine"
+          bash tests/tools/bios_check.sh build shots
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-linux
@@ -108,6 +119,9 @@ jobs:
           build\Hadron.exe --solo diskmap --selftest --fixture dmfix\tree; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronRunAs.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\Hadron.exe --solo runas --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tests\fixtures\make_bios_snapshot.py modules\bios\data\settings.db biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronBios.exe --selftest --fixture biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\Hadron.exe --solo bios --selftest --snapshot biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
       # A real de-elevated launch, reading back the child's integrity. Informational: the hosted
       # runner has no interactive Explorer shell and may run with UAC off (no linked medium token),
       # so a failure here can be the runner, not the code. The owner's PC is the real check.
@@ -141,6 +155,12 @@ jobs:
             }
           }
           build\Hadron.exe --module runas --screenshot "shots\runas-suite-baseline.png"
+          foreach ($th in 'dark','light') {
+            foreach ($ly in 'baseline','console') {
+              build\HadronBios.exe --fixture biosfix\snap --theme $th --layout $ly --screenshot "shots\bios-$ly-$th.png"
+            }
+          }
+          build\Hadron.exe --module bios --snapshot biosfix\snap --screenshot "shots\bios-suite-baseline.png"
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-windows
