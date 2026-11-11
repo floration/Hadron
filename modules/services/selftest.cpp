@@ -2516,8 +2516,8 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         std::string raw;
         CustomPreset gp;
         bool ok = ReadAll(fixture + L"\\presets\\20261111-090000.txt", &raw) && ParsePreset(raw, &gp, &err);
-        check(ok && WritePreset(gp) == raw && gp.name == L"Gaming rig" && gp.items.size() == 11 && gp.tab == TAB_SERVICES,
-              L"custom preset: the fixture's presets file parses (11 items) and writes back byte for byte" + (ok ? L"" : L": " + err));
+        check(ok && WritePreset(gp) == raw && gp.name == L"Gaming rig" && gp.items.size() == 13 && gp.tab == TAB_SERVICES,
+              L"custom preset: the fixture's presets file parses (13 items) and writes back byte for byte" + (ok ? L"" : L": " + err));
         {   // As the page loads it from the data folder: with its saved time from the file name.
             Store fs(fixture);
             std::vector<std::wstring> probs;
@@ -2606,6 +2606,25 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             check(!oki && has(e, L"line 8: start type 'off'"),
                   L"custom preset: importing import\\bad-start.txt is refused at line 8 (\"" + e + L"\")");
         }
+        {   // R1 (review): the attribute check that runs on the open handle, for every attribute that refuses.
+            bool all = ImportAttrProblem(FILE_ATTRIBUTE_ARCHIVE, L"x").empty() && ImportAttrProblem(FILE_ATTRIBUTE_NORMAL, L"x").empty() &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_DIRECTORY, L"x"), L"is a folder") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_ARCHIVE, L"x"), L"cloud placeholder") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, L"x"), L"cloud placeholder") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_OFFLINE, L"x"), L"cloud placeholder") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_REPARSE_POINT, L"x"), L"is a link") &&
+                       has(ImportAttrProblem(FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, L"x"), L"cloud placeholder");
+            check(all, L"custom preset import refuses a folder, a link (reparse point) and a cloud placeholder (recall on open, on data access, offline), and takes a plain file");
+            std::wstring e;
+            CustomPreset x;
+            bool okd = ImportPresetFile(dir, &x, &e);
+            check(!okd && has(e, L"is a folder"), L"custom preset import refuses a folder through its handle (\"" + e + L"\")");
+            std::wstring big = dir + L"\\big.txt";
+            std::string bigText = "HXPRESET\t1\n" + std::string(kPresetMaxFile, 'x');
+            bool wrote = WriteAll(big, bigText);
+            bool okb = wrote && ImportPresetFile(big, &x, &e);
+            check(wrote && !okb && has(e, L"larger than"), L"custom preset import stops reading one byte past the cap and refuses the file (\"" + e + L"\")");
+        }
         {   // A cloud placeholder is refused unread (the attribute is set on a temp copy where the file system takes it).
             std::wstring cp = dir + L"\\offline.txt";
             std::wstring e;
@@ -2629,6 +2648,22 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         check(has(notes, L"not on this PC: HxNotOnThisPc") && has(notes, L"not on the Services tab, so this preset leaves them: nvlddmkm") &&
                   p.alreadySet == 1 && !RowOf(p, L"DiagTrack"),
               L"custom preset: an item not on this PC and a driver in a services preset are named in notes; DiagTrack is already set");
+        {   // R2 (review): the hardware guard of built-in presets. bthserv: Bluetooth is present, so it is kept (blocked);
+            // FrameServer: a camera class never seen is a hot-plug class, offered unticked with its evidence.
+            const PlanRow* bt = RowOf(p, L"bthserv");
+            const PlanRow* fs = RowOf(p, L"FrameServer");
+            const PlanRow* sbt = RowOf(BuildPreset(LV_STRIPPED, TAB_SERVICES, cw.items, cw.ctx), L"bthserv");
+            check(bt && bt->blocked.find(L"Kept: hardware in use or seen before.") == 0 && !bt->include && !bt->canToggle && !bt->evidence.empty() &&
+                      sbt && sbt->blocked == bt->blocked && fs && !fs->include && fs->blocked.empty() && !fs->evidence.empty(),
+                  L"custom preset hardware guard: bthserv is kept as by Stripped (\"" + (bt ? bt->blocked : std::wstring(L"no row")) +
+                      L"\"), FrameServer is offered unticked with its evidence");
+            World nh;
+            freshWorld(&nh);
+            nh.ctx.hw = nullptr;
+            const PlanRow* bn = RowOf(BuildCustom(gp, nh.items, nh.ctx), L"bthserv");
+            check(bn && !bn->blocked.empty() && bn->evidence == L"no hardware information: kept",
+                  L"custom preset hardware guard: without hardware information a hardware-bound item is kept");
+        }
         const PlanRow* ws = RowOf(p, L"WSearch");
         const PlanRow* sm = RowOf(p, L"SysMain");
         check(ws && ws->after == StartCfg{2, 1} && ws->op.delayed == 1 && sm && sm->after.start == 4 && sm->include && sm->basis == L"user" &&
@@ -2765,6 +2800,32 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             auto ms = LoadMeasurements(fs, nullptr);
             MeasurePair pr = LatestPair(ms);
             check(ms.size() == 2 && pr.before == 0 && pr.after == 1, L"measure: the fixture's before and after (one restart apart) pair up");
+        }
+        {   // R6 (review): which Hadron applies fall between a before and its after (from the undo logs).
+            Store fs(fixture);
+            auto ms = LoadMeasurements(fs, nullptr);
+            if (ms.size() == 2) {
+                const Measurement& b = ms[0];   // created 2026-11-11 08:12:31
+                const Measurement& a = ms[1];   // booted 2026-11-11 09:05:40
+                auto log = [&](const wchar_t* stamp, const wchar_t* source, bool rows, const std::wstring& machine) {
+                    UndoLog l;
+                    l.stamp = stamp; l.source = source; l.hasB = true; l.machine = machine;
+                    if (rows) l.rows.push_back(UndoRow{});
+                    return l;
+                };
+                std::vector<UndoLog> logs = {
+                    log(L"20261111-081000", L"preset:bloat:services", true, b.machine),           // before the before
+                    log(L"20261111-084500", L"custom:services:Gaming rig", true, b.machine),      // between: counted
+                    log(L"20261111-085000", L"preset:stripped:services", false, b.machine),       // no rows written
+                    log(L"20261111-085500-2", L"single", true, L"another-machine"),               // another PC
+                    log(L"20261111-090000", L"preset:minimum:services", true, b.machine),         // between: counted
+                    log(L"20261111-091000", L"preset:minimum:drivers", true, b.machine),          // after the after's boot
+                };
+                auto ap = AppliesBetween(b, a, logs);
+                check(ap.size() == 2 && ap[0].source == L"custom:services:Gaming rig" && ap[0].when == L"2026-11-11 08:45:00" &&
+                          ap[1].source == L"preset:minimum:services" && AppliesBetween(b, a, {}).empty(),
+                      L"measure: only applies of this machine with written rows between the before and the after's boot are named");
+            }
         }
     }
 
