@@ -6,6 +6,7 @@
 #pragma once
 
 #include "modules/services/backend.h"
+#include "modules/services/custom.h"
 #include "modules/services/hw.h"
 #include "modules/services/kb.h"
 #include "modules/services/model.h"
@@ -28,6 +29,8 @@ struct Ctx {
     std::wstring build;                // running build, e.g. "19045"
     std::wstring machine;              // machine GUID (first.txt must match)
     bool tiOn = false;
+    const SxsStock* sxs = nullptr;     // this PC's WinSxS manifest values, when read (fix/svcdrv-stock)
+    bool sxsPending = false;           // the manifest pass is still running (review F2: the stock plan waits)
     // Filled by Prepare() from hw.
     std::set<std::wstring> filters, bootChain;
     void Prepare();
@@ -45,6 +48,23 @@ bool IsStorageDriver(const std::wstring& name);   // never given a Windows-stock
 // files sit on): the registry fallback never writes them either.
 bool IsNamedNeverPreset(const std::wstring& name);
 
+// An item's Windows-stock value (fix/svcdrv-stock; DECISIONS 2026-11-11, owner). This PC's own WinSxS manifests come
+// first (owner-measured, read on this PC), cross-checked with the KB's value (two agreeing third-party tables, a
+// Microsoft page, or a measurement). Apply: one value, sources agree or only one has a value. Show: shown with its
+// sources, never applied (the manifests and the KB disagree; the tables disagree; only a configuration-setting
+// default, which can be a Server value, gives it and no table agrees; or Windows sets it at runtime). Drivers take a
+// manifest value only when their KB entry has sysok; storage drivers never get one.
+struct StockPick {
+    enum Kind { None, Apply, Show } kind = None;
+    StartCfg cfg;                // Apply: the target (delayed 0/1 for Auto, -1 otherwise); Show: a value to display
+    bool hasCfg = false;         // Show: cfg holds a value
+    std::wstring value;          // the detail pane's "Windows stock" text
+    std::wstring reason, basis, basisNote;   // a plan row's texts
+    std::wstring basisCond;      // BasisLabel's condition for an owner-measured value read from the manifests
+    std::wstring why;            // Show: why it is not applied
+};
+StockPick StockFor(const SvcItem& s, const Ctx& c);
+
 enum class PlanKind { Preset, Single, Undo, Resume, Control };
 
 struct PlanRow {
@@ -57,6 +77,7 @@ struct PlanRow {
     bool include = true, canToggle = true;
     std::wstring blocked;              // non-empty: shown for information, never applied
     std::wstring reason, basis, basisNote, evidence, warning, contested;
+    std::wstring basisCond;            // BasisLabel's condition (manifest stock rows: "read on this PC by Hadron (...)")
     std::wstring depWarning;           // DependencyCheck's own warning, recomputed on every toggle
     bool depUnticked = false;          // DependencyCheck unticked it (ticked again when the reason goes)
     bool depKept = false;              // the user ticked it while it had a dependency warning: never unticked by the check
@@ -95,6 +116,16 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
 // stock: Windows stock values from the KB (R20: an empty plan says Hadron has no data for the build). Else "as first
 // seen": first.txt, only when it is from this PC (machine GUID) and this Windows build (R11).
 Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const Ctx& c);
+// A custom preset (custom.h) as a plan on its own tab. It only fills the plan: the rows go through the same plan,
+// confirm, snapshot and undo path as every plan. The guards built-in presets get drop items with a note naming them:
+// never-touch and never-in-a-preset items (CheckGuard), and drivers Hadron's KB does not list as safe to change
+// (sysok). CheckGuard's never-in-a-preset set includes items with no KB entry for this build (third-party or
+// unknown), as for built-in presets. Items not on this PC or on the other tab are named in a note too. Unlike a
+// built-in preset it may raise a start type: the list is the user's own. Source "custom:<tab>:<name>".
+Plan BuildCustom(const CustomPreset& cp, const std::vector<SvcItem>& items, const Ctx& c);
+// The ticked, unblocked rows of a start-type plan as a custom preset's items (each row's planned start type), named
+// `name`, on the plan's tab, stamped with this Hadron's version and the build given.
+CustomPreset PresetFromPlan(const Plan& p, const std::wstring& name, const std::wstring& build);
 // "10.0.19045.5737" and "19045" -> "19045": the build number alone, for comparing builds.
 std::wstring BuildNumber(const std::wstring& build);
 Plan BuildSingle(const SvcItem& item, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c);

@@ -7,7 +7,7 @@ The KB has three files:
 
 Commands:
 ```
-python3 tools/services/genkb.py --selftest          # 65 must-fail cases, 17 ok texts, 3 marker cases, a warning case, the committed KB
+python3 tools/services/genkb.py --selftest          # 70 must-fail cases, 17 ok texts, 3 marker cases, a warning case, the committed KB
 python3 tools/services/genkb.py                     # regenerates modules/services/data/services.db
 python3 tools/services/genkb.py /tmp/services.db    # writes elsewhere (CI then runs cmp against the committed file)
 ```
@@ -42,6 +42,7 @@ Hadron's own inference.
 | `hw` | Hardware hint: `class:<Class>`, `svc:<service>`, `self`, `vmguest` or `hvhost`. Hardware that is present or was seen before keeps the item |
 | `contested` | Must name sources on both sides (two or more `@KEY`s). Contested items can't be in `bloat` |
 | `stock`, `stock_basis`, `stock_note` | The Windows stock value (`"2/1"`, `"3/-"` or an int). Needs an `owner-measured` or `published` basis. Never set on storage drivers |
+| `stock_disagree` | Two third-party tables that disagree: the text (two `@KEY`s, the word "disagree"). Shown, never applied; can't be combined with `stock` |
 | `builds` | Five-digit builds the entry is for. The default is `BUILD` (19045) |
 
 The Windows stock table:
@@ -51,9 +52,18 @@ The Windows stock table:
   type. The note quotes it and says what the page applies to. "Automatic" without "(Delayed Start)" is written
   `2/0` (the plan then clears a lingering DelayedAutostart), so a page that doesn't say which one needs a
   "(reasoning)" clause in the note.
-- genkb fails a `published` stock note that cites anything but learn.microsoft.com pages, or that doesn't say its
-  page "names no build": the module words every published stock value as "from a Microsoft page (it names no
-  build)". A driver with a stock value needs `sysok`.
+- Third-party tables (fix/svcdrv-stock, DECISIONS 2026-11-11, owner): `TABLE_WINTIPS` and `TABLE_TWEAKHOUND` at
+  the end of `kb.py` are two independent captures of a Windows 10 service list. A service with no Microsoft value
+  gets one only where both tables give the same start type ("Trigger Start" ignored); where they differ the entry
+  gets `stock_disagree` and no value. Drivers: neither table lists any, so none.
+- Each K line carries `stock_src`: `microsoft` (every cited page is on learn.microsoft.com), `table` (any other
+  page), `disagree`, or empty. The module words a value by it: "from a Microsoft page (it names no build)" or "from
+  two agreeing third-party tables (they name no build)".
+- genkb fails a `published` stock note that doesn't say it "names no build"; one that cites a non-Microsoft page
+  and doesn't say "third-party table" or cites fewer than two sources; a `stock_disagree` with fewer than two
+  sources, without "disagree", or next to a `stock` value. A driver with a stock value needs `sysok`.
+- On a PC the module's first source is the PC's own WinSxS component manifests
+  (`modules/services/sxsstock.cpp`); the KB value is its cross-check. See docs/design/services.md.
 - Not usable as client stock: the `@IOT` and `@PERUSER` "Startup Type (Default)" columns ("the current version of
   Windows"; they disagree with each other), `@WS16` (Server 2016) and BITS (its page gives a start type that
   depends on queued jobs). `docs/pipeline/fixes/svcdrv-kb.md` has the details.
@@ -96,13 +106,14 @@ Numbers:
 ## services.db format
 - UTF-8, LF line ends, TAB-separated fields, bios escaping.
 - `V\t1\tservices`, then `B\t<build>`.
-- One `K` line per entry, 26 fields:
+- One `K` line per entry, 27 fields (the module still reads 26-field lines, without `stock_src`):
 ```
 K name kind builds title expl if_off test
   lvBloat lvStripped lvMinimum            target 3|4 or empty
   whyBloat whyStripped whyMinimum
   sysok never basis basisNote pbasis pbasisNote
-  stock stockBasis stockNote hw contested sources
+  stock stockBasis stockNote hw contested sources stock_src
 ```
+- `stockNote` holds the `stock_disagree` text on a `disagree` line (stock and stockBasis empty).
 - `basisNote`, `pbasisNote`, `stockNote` and `contested` carry expanded "label (url)" text. The module shows them
   as written.

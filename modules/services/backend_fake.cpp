@@ -39,6 +39,8 @@ bool FakeBackend::Load(const std::wstring& dir, std::wstring* err) {
     if (s.Exists(L"events7040.txt")) {
         if (!s.Read(L"events7040.txt", &ev, &eerr) || !ParseEventsFixture(ev, &events_, &eerr)) { *err = L"events7040.txt: " + eerr; return false; }
     }
+    DWORD a = GetFileAttributesW((dir + L"\\sxs").c_str());
+    sxsDir_ = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) ? dir + L"\\sxs" : L"";
     return true;
 }
 

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Hand-written fixture (not Microsoft's file) for three cases from the owner's live run of --dump-stock-live:
+     HxDtc: serviceData demand plus a setting element named DelayedAutostart with no legacyName (MSDTC's shape): the
+            setting default fills delayed=1 as the lowest layer.
+     HxClr: only DelayedAutostart=1 from a registry value, set the same in two manifests (clr_optimization's shape):
+            no start value and no conflict.
+     HxAuto: serviceData auto and no DelayedAutostart anywhere (irmon's shape): delayed is absent ("-"), not 0. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
+  <assemblyIdentity name="Microsoft-Windows-Fixture-LiveCases" version="10.0.19041.1" processorArchitecture="amd64" />
+  <serviceData name="HxDtc" errorControl="normal" start="demand" type="win32OwnProcess" />
+  <serviceData name="HxAuto" errorControl="normal" start="auto" type="win32ShareProcess" />
+  <registryKeys>
+    <registryKey keyName="HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\HxClr">
+      <registryValue name="DelayedAutostart" valueType="REG_DWORD" value="0x00000001" />
+    </registryKey>
+  </registryKeys>
+  <configuration xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+    <configurationSchema>
+      <xsd:schema>
+        <xsd:element name="DelayedAutostart" default="1" type="xsd:unsignedInt" wcm:handler="regkey('HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\HxDtc')" />
+      </xsd:schema>
+    </configurationSchema>
+  </configuration>
+</assembly>

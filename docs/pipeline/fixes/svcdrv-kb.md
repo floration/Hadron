@@ -166,3 +166,102 @@ The reviewer found no category 1-4 issues. The small ones, all applied:
   (two must-fail cases). WSearch's note now says "the page names no build".
 - **F3**: the chip reads "Default: Windows stock (N sourced)".
 - **N1**: genkb fails `stock` on a driver without `sysok` (one must-fail case).
+
+## 7. Stock from tables and from this PC's manifests (fix/svcdrv-stock)
+Owner's call (DECISIONS 2026-11-11): rule 7 counts a linkable third-party table as `published`, and the stock values
+come first from the PC's own WinSxS manifests, cross-checked with the tables.
+
+### Sources
+| Key | Table | Version it states |
+|---|---|---|
+| `@TBLWINTIPS` | wintips.org, "Default Startup Type of Services on Windows 10 PRO OS", https://www.wintips.org/wp-content/uploads/2021/09/DefaultServicesWin10.pdf | Windows 10 Pro; no version or build (uploaded 2021-09, per the URL path) |
+| `@TBLTWEAKHOUND` | TweakHound, "Windows 10 Default Services v20H2", https://tweakhound.com/?p=18808 | Windows 10 20H2, build 19042.685 (23 Dec 2020) |
+
+Neither names 19045/22H2, so every table note says the value "names no build". They are independent captures: they
+differ on six services, and each has rows the other lacks. Both were read with WebFetch on 2026-11-11 and
+transcribed by display name; names were mapped to service names through the IoT page, the fixture and the KB
+titles. Unmapped rows (ignored): Local Profile Assistant Service, Microsoft Update Health Service, Wi-Fi Direct Services Connection Manager Service, Windows Mixed Reality
+OpenXR Service, WPF Font Cache. A page I could not fetch (winhelponline) is not used.
+
+### Counts (289 KB entries)
+- **Sourced: 184.** 179 from two agreeing tables (`stock_src` `table`), 5 from Microsoft pages (`microsoft`,
+  unchanged: msiserver, W32Time, TimeBrokerSvc, WSearch, BrokerInfrastructure).
+- **Sources disagree: 5** (shown in the detail pane, never applied): BITS (Manual / Automatic delayed),
+  DeviceAssociationService (Manual / Automatic, both trigger), WlanSvc (Automatic / Manual), wscsvc (Automatic /
+  Automatic delayed), wuauserv (Automatic / Manual, both trigger). W32Time also differs between the tables
+  (Automatic delayed / Manual trigger) but keeps its Microsoft value.
+- **None: 100.** 84 drivers (neither table lists drivers, so no driver gets a value) and 16 services the tables
+  don't list (per-user templates, OEM and third-party entries).
+- Follow-up: 40 services both tables agree on have no KB entry yet (AssignedAccessManagerSvc, BDESVC, camsvc,
+  DispBrokerDesktopSvc, DisplayEnhancementService, DoSvc, edgeupdate, edgeupdatem, fhsvc, GraphicsPerfSvc,
+  IpxlatCfgSvc, LxpSvc, MicrosoftEdgeElevationService, NaturalAuthentication, NcdAutoSetup, p2pimsvc, p2psvc,
+  PeerDistSvc, perceptionsimulation, PNRPAutoReg, PNRPsvc, PushToInstall, SDRSVC, Sense, SgrmBroker,
+  SharedRealitySvc, shpamsvc, spectrum, ssh-agent, TokenBroker, TroubleshootingSvc, VacSvc, WarpJITSvc, wbengine,
+  Wcncsvc, WebClient, WManSvc, workfolderssvc, WpcMonSvc, WwanSvc). On a PC the manifests cover them.
+
+### genkb
+- K lines have 27 fields; the last is `stock_src` (`microsoft`, `table`, `disagree` or empty).
+- Five new must-fail cases (70 in all): a non-Microsoft note without "third-party table"; a table value from one
+  table; a table note without "names no build"; `stock_disagree` naming one source; `stock_disagree` with a value.
+
+### This PC's WinSxS manifests (`modules/services/sxsstock.cpp`)
+- Method from the read-only probe on the owner's PC (19045.2965 Pro): each manifest is "DCM\x01" + an msdelta
+  delta against wcp.dll's type-614 resource; 18,883 manifests decompressed with no failure in about 18 s.
+- Precedence: edition file override, then serviceData start or the Services\X registry value, then a
+  configuration-setting default (low confidence: applied only when the KB's value agrees).
+- Cross-check, per item: manifest and KB agree, or manifest only: applied (`owner-measured`, "read from this PC's
+  WinSxS component manifests, Windows build N.UBR (edition)"). KB only: applied as before. Disagree, tables
+  disagree, setting default alone with no agreeing table, or on the runtime list (WlanSvc, stisvc, camsvc, IKEEXT,
+  PolicyAgent, iphlpsvc, ssh-agent, WinHttpAutoProxySvc, BITS, WinRM, dcsvc, dmwappushservice): shown, not applied.
+- The probe's list of manifest-vs-stock candidates (Audiosrv, AudioEndpointBuilder, IKEEXT, PolicyAgent, camsvc,
+  stisvc, WlanSvc, ssh-agent, iphlpsvc, BITS, dcsvc, dmwappushservice, WinRM, MSDTC) came from the probe session's
+  knowledge, not a source; the module doesn't hard-code them as stock. Audiosrv/AudioEndpointBuilder resolve through
+  the edition file; the rest are either on the runtime list or caught by the cross-check.
+- Cache: `sxs-v<scanner version>-<build>.<UBR>-<EditionID>.txt` in the data folder, written once after `EnsureRoot` (A1).
+- Tests: hand-written XML fixtures (`tests/fixtures/services/sxs/`, one per layer, plus an edition file) through the
+  fake backend's reader, and scanner, edition, conflict, cache and cross-check cases in the selftest. Live
+  decompression is not run under Wine; it is checked on the owner's PC from the project folder.
+
+### Goldens changed
+- `plan-services-stock.txt`: 6 applied rows (DiagTrack and XblGameSave from the tables; OneSyncSvc and PcaSvc from
+  the fixture's manifests; TimeBrokerSvc and WSearch from Microsoft pages), 4 shown-not-applied rows (DPS setting
+  default only, SysMain manifest vs tables, stisvc and dmwappushservice runtime-set), 93 of 110 with a value.
+- `plan-drivers-stock.txt`: the manifests note, and "Hadron has no Windows stock value for any item on this tab".
+
+### Review and audit round (fix/svcdrv-stock)
+Code review F1-F11 and kb-auditor M1-M2, s1-s6 (`docs/pipeline/fixes/svcdrv-stock-audit.md`), all applied:
+- **F1**: `--out` of `--dump-plan` and `--dump-stock-live` opens with `CREATE_NEW | FILE_FLAG_OPEN_REPARSE_POINT` and
+  refuses an existing path ("already exists; Hadron never overwrites an --out file").
+- **F2**: while the manifest pass runs, the stock plan is empty ("still reading this PC's component manifests") and
+  Apply is refused for it; when the manifests arrive and the rebuilt plan's ticks differ, a notice says so.
+- **F3**: an unreadable edition file marks every service a mapped setting targets: shown, not applied; the plan note
+  gives the error; that scan is not cached.
+- **F4/F10**: a scan with failed or skipped manifests, or a listing that ended on anything but
+  `ERROR_NO_MORE_FILES`, is not cached, its manifest values are shown, not applied, and the plan note gives the
+  counts. The `FindFirstFileExW` error text is shown.
+- **F5**: the cache carries the scanner version (header and name `sxs-v2-...`); another version is renamed aside.
+- **F6**: the per-user template fallback only for `Kind::UserInstance`.
+- **F7**: `DeltaFree` in a scope guard; an expanded manifest over 64 MB, or one that can't be allocated, counts as a
+  failure.
+- **F8**: no msdelta.h in this toolchain. As far as I know the SDK defines `DELTA_APPLY_FLAG_ALLOW_PA19` as 1, not 4.
+  The probe's 4 worked on all 18,883 manifests and stays first (`kDeltaApplyFlagsProbe`); a failure is retried once
+  with 1. The owner's live run of 9c1ce0e (flag 4 only): 18,883 manifests, 0 failures, 3.7 s.
+- **F9/M1**: rule 7 kind stays `owner-measured`, but the label is "read on this PC by Hadron (component manifests,
+  build N.UBR, edition)" (`BasisLabel(basis, cond)`), and the note says "the start type this PC's WinSxS component
+  manifests install the service with". Fixture rows (s3) say "the test fixture's hand-written manifests (not a real
+  PC)" and "Test data only."
+- **F11**: the manifest pass's notices survive Refresh; a cache another instance wrote meanwhile is not an error.
+- **M2**: the after-setup list is split: start type (WlanSvc, stisvc, camsvc, IKEEXT, PolicyAgent, iphlpsvc,
+  ssh-agent, WinHttpAutoProxySvc) and DelayedAutostart (BITS, WinRM, dcsvc, dmwappushservice), each worded as
+  reasoning from a probe on one PC, not checked per service.
+- **s1**: W32Time's note names both tables' contrary values (genkb takes the source kind from the note's first
+  @KEY). **s2**: table labels and notes say what each page states (TweakHound: build 19042.685, a VM; wintips: no
+  build, upload date only in its URL, Office installed). **s4**: the Diagnostics Hub row is mapped (179 table values).
+  **s5**: DECISIONS and sxsstock.h no longer say the probe "matched the known values". **s6**: shown rows are counted
+  as "kept, protected or not applied" and their Planned value is the current one.
+- Owner's live run (a)-(c): a setting element named `DelayedAutostart` with no `legacyName` (MSDTC) is now read as
+  the lowest layer; a DelayedAutostart-only name with the same value in several manifests (clr_optimization) is not
+  a conflict and gives no start; the dump prints delayed as the files give it, "-" when none does. A fixture case for
+  each (`f-live-cases.manifest`, `g-live-cases-x86.manifest`).
+- Goldens: every plan's Rows line ("kept, protected or not applied"); `plan-services-stock.txt` for the fixture and
+  table wording, the split after-setup texts and Planned = now on shown rows.

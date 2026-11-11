@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Hand-written fixture in the shape of a decompressed WinSxS component manifest (not Microsoft's file).
+     PcaSvc: demand, agrees with the KB's tables (a row: the fixture runs it Auto).
+     OneSyncSvc: demand, per-user template, no KB stock value (manifest only: a row).
+     SysMain: demand, the KB's tables say Automatic (sources disagree: shown, not applied).
+     stisvc: demand, on the runtime list (shown, not applied).
+     CDPUserSvc: auto, per-user template (instances map to it). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
+  <assemblyIdentity name="Fixture-Services" version="10.0.19041.1" processorArchitecture="amd64" />
+  <serviceData name="PcaSvc" errorControl="normal" start='demand' type="win32ShareProcess" />
+  <serviceData name="OneSyncSvc" errorControl="normal" start="demand" type="userServiceTemplate win32ShareProcess" />
+  <serviceData name="SysMain" errorControl="normal" start="demand" type="win32ShareProcess" />
+  <serviceData name="stisvc" errorControl="normal" start="demand" type="win32OwnProcess" />
+  <serviceData
+      name="CDPUserSvc"
+      start="auto"
+      type="userServiceTemplate win32ShareProcess" />
+  <!-- <serviceData name="Commented" start="disabled" /> is a comment and must be ignored -->
+  <![CDATA[ <serviceData name="InCdata" start="disabled" /> ]]>
+</assembly>

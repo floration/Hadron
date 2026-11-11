@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hand-written fixture in the shape of %windir%\servicing\Editions\ProfessionalEdition.xml (not Microsoft's file). -->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Audio-AudioCore" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <Start_AudioSrv>2</Start_AudioSrv>
+      <Start_EndpointBuilder> 2 </Start_EndpointBuilder>
+    </component>
+    <component name="Microsoft-Windows-Unknown" processorArchitecture="amd64">
+      <Start_Nothing>4</Start_Nothing>
+    </component>
+  </settings>
+</unattend>

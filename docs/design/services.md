@@ -20,6 +20,12 @@ disagree, the spec wins.
   and fixture mode never applies.
 - Presets change only `Start` and `DelayedAutostart`. They take effect at the next restart, and Hadron never restarts
   the PC.
+- **Custom presets** (fix `svcdrv-presets`): the plan's ticks are saved under a name, listed on their own page, and
+  opened like a built-in preset. They are exported and imported as plain text. An opened or imported custom preset only
+  fills a plan; the apply, snapshot and undo path is the same one every plan takes.
+- **Measured before/after** (fix `svcdrv-presets`): Measure records RAM in use, committed memory, the process count
+  and the `svchost.exe` count, with when and how long after boot. A "before" taken at plan time and an "after"
+  taken after the next restart are shown side by side, labelled `owner-measured` with their conditions.
 
 ## Files
 | File | Role |
@@ -37,13 +43,15 @@ disagree, the spec wins.
 | `recovery.*` | `restore.cmd`, `restore-online.cmd`, `README.txt` and `.reg` files, plus a stored-only zip writer |
 | `plan.*` | Guards, presets, single/default/undo/resume/control plans, dependency checks, apply order, `RunApply` |
 | `ti.*` | TrustedInstaller impersonation (B6). Token work only; it starts and stops TI through the `Backend` |
+| `custom.*` | Custom presets: the `HXPRESET` text format, its strict parser, the `presets\` store (save, list, tombstone remove), export and import |
+| `measure.*` | Measurements: `TakeMeasurement` (GlobalMemoryStatusEx and a Toolhelp32 walk), the `measure` record, the `measure\` store and before/after pairing |
 | `module.cpp` | The UI (`hx::Module`) |
 | `selftest.cpp`, `cli.h` | `--selftest`, `--dump-plan` and `--live-test` |
 | `selftest_evidence.*` | The selftest part for follow-ups 6-9 (signer, 7040, interface evidence, registry fallback), on the fake backend |
 | `standalone.cpp` | `HadronServices.exe`. Intercepts `--dump-plan` and `--live-test` before the GUI starts |
 | `tools/services/kb.py`, `genkb.py` | The KB source and the rule-7 gate (see `tools/services/README.md`) |
-| `tests/fixtures/services/` | The fixture machine (`make_services_fixture.py` writes it; CI compares), with `signers.txt` and `events7040.txt` |
-| `tests/golden/services/` | 10 plan goldens (`plan-<services\|drivers>-<default\|bloat\|stripped\|minimum\|stock>.txt`), `plan-services-default-delayedlinger.txt`, `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt` |
+| `tests/fixtures/services/` | The fixture machine (`make_services_fixture.py` writes it; CI compares), with `signers.txt`, `events7040.txt`, `sxs\`, `presets\`, `measure\` and `import\` |
+| `tests/golden/services/` | 10 plan goldens (`plan-<services\|drivers>-<default\|bloat\|stripped\|minimum\|stock>.txt`), `plan-services-default-delayedlinger.txt`, `plan-services-custom.txt` (the fixture's "Gaming rig"), `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt` |
 
 ## Formats
 All formats share these rules:
@@ -132,6 +140,42 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 **Events** (fixture `events7040.txt`, kind `events`): `A sid account` (how the fixture resolves a SID) and
 `E <event XML>` (one rendered System-log event per line, bios-escaped).
 
+**Custom preset** (`presets\<yyyyMMdd-HHmmss>.txt`, and every export/import file). Its own format, because the user
+edits and shares it, so it has no escaping and a strict reader (`custom.cpp`, `ParsePreset`):
+```
+HXPRESET<TAB>1
+hadron<TAB><Hadron version>
+build<TAB><Windows build>
+tab<TAB>services|drivers
+name<TAB><preset name>
+<item><TAB>auto|auto-delayed|manual|disabled      one line per item
+```
+- UTF-8 (a BOM is accepted), LF or CRLF, trailing empty lines allowed. Written with LF, no BOM.
+- Refused (a line's error starts `line N: ...`; the whole-file ones say what is wrong): a different magic or a version other than 1; a missing or misordered header line;
+  a line over 512 bytes; invalid UTF-8; a field count other than 2; a start type outside the four words (`boot` and
+  `system` get a note that Hadron never sets them); `auto-delayed` on the drivers tab; a duplicate item; an empty line
+  between items; an item name that is empty, over 256 characters, or holds a control character, `\` or `/`, or
+  starts or ends with a space; a preset name that is empty, over 80 characters, holds a control character, or
+  starts or ends with a space; more than 4096 items; an empty file, no items, or a file over 1 MiB.
+- `ImportPresetFile` opens one handle on the entry itself (`FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`)
+  and reads its attributes from that handle (`FileAttributeTagInfo`) before any byte. A folder, a link (reparse point,
+  so a link to a placeholder can't trigger a recall), or a file with `RECALL_ON_DATA_ACCESS`, `RECALL_ON_OPEN` or
+  `OFFLINE` (a cloud placeholder) is refused unread (hard rule 1). It reads in a loop up to one byte past 1 MiB.
+- Removing a preset writes a tombstone `presets\removed-<stamp>.txt` (`HXPRESET-REMOVED\t1`, then the file name);
+  no file in the data folder is ever deleted. The list skips tombstoned files.
+- Export opens with `CREATE_NEW`. If the file exists, it says so and writes nothing; the user picks another name.
+
+**Measurement** (`measure\measure-<yyyyMMdd-HHmmss>[-N].txt`, kind `measure`), in the shared `HXSVC` format:
+- `M` lines: `boot` (UTC boot time, from now minus `GetTickCount64`), `build`, `created` (UTC), `machine`, `phase`
+  (`before` or `after`), `plan` (the plan's title, or empty), `uptime` (whole minutes after boot).
+- `V` lines: `ram_used` and `ram_total` (`ullTotalPhys - ullAvailPhys`, `ullTotalPhys`: the physical memory Windows
+  can use, a little less than installed), `commit` and
+  `commit_limit` (`ullTotalPageFile - ullAvailPageFile`, `ullTotalPageFile`), `processes` and `svchost` (a Toolhelp32
+  snapshot; `svchost.exe` by image name, case-insensitive). Bytes for memory.
+- The reader refuses a record that is missing any of these values.
+- **Pairing:** the newest `after`, with the newest `before` of the same machine taken before that after's boot. "Measure
+  after" is offered only when the newest before was taken before the current boot.
+
 ## Safety mechanics (hard rules 1, 4 and 5; spec §5)
 - **Write path.** `ChangeServiceConfigW` and `ChangeServiceConfig2W` (delayed flag), `StartServiceW`,
   `ControlServiceExW` and `RegSetValueExW` (the registry fallback) appear only in `backend_live.cpp`. Each refuses
@@ -193,7 +237,7 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 - **Registry fallback** (follow-up 9; `regfallback.*`, `RunApply`, `backend_live.cpp` `WriteRegStart`). For start
   types the SCM refuses to administrators (`CanWrite` denied, e.g. a service whose security descriptor withholds
   `SERVICE_CHANGE_CONFIG`):
-  - Off by default, behind the plan screen's "Registry fallback" switch (Console F7). The switch is per apply: never
+  - Off by default, behind the plan screen's "Registry fallback" switch (Console F9; F7 and F8 are Save as preset and Measure before). The switch is per apply: never
     persisted, off at every launch, and off again when the plan closes or an apply ends. It is shown only on a plan
     with rows the SCM refuses (or registry rows to undo). With the TrustedInstaller toggle on, TI's SCM write is used
     instead.
@@ -316,26 +360,52 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   - Present or phantom ("seen before") hardware is blocked as "Kept".
   - Use-based Stripped items (no hardware hint) are offered unticked at Stripped with "use cannot be detected: tick if you don't use it" (kb-auditor M16, spec §5.3). At Minimum the same rows are ticked and say "use cannot be detected: ticked at Minimum, untick if you use it" (R18, proxy Q1: Minimum is only what is needed to boot, network, play games and run Hadron); plan, confirm and undo still gate them.
 - **"No guidance"** is a keep-the-default rating (DECISIONS.md, proxy): an IoT No guidance keeps an item out of Pure bloat; a WS16 No guidance alone does not, but the pbasis says so.
-- **Windows stock.** The KB has a small stock table (`STOCK` at the end of `tools/services/kb.py`, fix/svcdrv-kb):
-  five services whose default or expected start type a Microsoft page for Windows client states (msiserver,
-  W32Time, TimeBrokerSvc, WSearch, BrokerInfrastructure), each `published` with its URL. None of the pages names
-  build 19045, and each stock note says what its page applies to. No driver has a stock value. Every other item
-  is "no data": `docs/pipeline/fixes/svcdrv-kb.md` says why the larger tables that exist (IoT, per-user services,
-  Server 2016) are not used.
-  - The plan writes only items with a stock value; the note says how many of the tab's items have one.
+- **Windows stock** (fix/svcdrv-stock; DECISIONS 2026-11-11, owner). Two sources, in this order:
+  1. **This PC's WinSxS component manifests** (`sxsstock.cpp`). On a Worker after the list is shown, once per
+     session: every `%windir%\WinSxS\Manifests\*.manifest` ("DCM\x01" + a delta) is expanded with msdelta's
+     `ApplyDeltaB` (`DELTA_APPLY_FLAG_ALLOW_PA19`) against the dictionary in the newest servicing-stack `wcp.dll`
+     (resource type 614, name 1). wcp.dll is loaded `LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE`
+     (no code runs); msdelta.dll by `LoadLibraryEx(LOAD_LIBRARY_SEARCH_SYSTEM32)` + `GetProcAddress`. Both are
+     Windows system DLLs (rule 3). A manifest with a reparse-point, recall or offline attribute is skipped
+     unopened, and the attributes are checked again on the handle (`FILE_FLAG_OPEN_REPARSE_POINT |
+     FILE_FLAG_BACKUP_SEMANTICS`). Hadron's own XML scanner takes, in precedence order: (1) the edition file's
+     override (`%windir%\servicing\Editions\<EditionID>Edition.xml`, `<component name><Start_X>n</Start_X>`,
+     mapped through the manifest setting of that component and name); (2) `<serviceData name start>` or the
+     `registryKey ...\Services\X` `Start` value (and `DelayedAutostart`); (3) a configuration-setting default
+     (`<xsd:element default wcm:handler="regkey('...\Services\X')" wcm:legacyName="Start|DelayedAutostart">`).
+     Two manifests with different values for a name are a conflict: no value. A per-user instance maps to its
+     template. The result is cached in the data folder as `sxs-v<scanner version>-<build>.<UBR>-<EditionID>.txt` (temp + rename, never
+     overwritten), only after `EnsureRoot` passes again on that worker (A1); an unusable cache is renamed aside and
+     the manifests are read again. Basis: `owner-measured`, condition "read from this PC's WinSxS component
+     manifests, Windows build N.UBR (edition)".
+  2. **Hadron's KB** (19045 only): five Microsoft-page values (`STOCK`) and the values where two third-party tables
+     agree (`stock_src` `table`); `stock_disagree` where the tables differ (tools/services/README.md).
+  - How they combine (`StockFor` in plan.cpp): manifest and KB agree, or only the manifest has a value: applied
+    from the manifest (the KB source is named when it agrees). Only the KB has one: applied from the KB. They
+    disagree, the tables disagree with each other, or only a setting default gives the manifest value (setting
+    defaults can be Server values, e.g. Themes) and no KB value agrees: shown with both sources, never applied.
+    Services the probe flagged as changed after setup (a probe-session judgement, not a source: start type for
+    WlanSvc, stisvc, camsvc, IKEEXT, PolicyAgent, iphlpsvc, ssh-agent, WinHttpAutoProxySvc; DelayedAutostart for BITS,
+    WinRM, dcsvc, dmwappushservice) are always shown, never applied. So are manifest values from an incomplete scan
+    (failed or skipped manifests, a cut-short listing) and, when the edition file can't be read, values its settings
+    can set; such scans are never cached. While the pass runs the stock plan is empty ("still reading this PC's
+    component manifests") and can't be applied. An applied manifest row keeps rule 7's `owner-measured` kind but is
+    labelled "read on this PC by Hadron (component manifests, build N.UBR, edition)"; fixture rows say they come
+    from the test fixture's hand-written manifests. Drivers take a manifest value only when their KB entry has
+    `sysok`; storage drivers never get one. On a build other than 19045 only the manifests give values.
+  - Shown rows are unticked and can't be ticked ("Not applied: <why>"); the plan notes count them.
   - An explanation-only (`never`) KB entry doesn't block its stock row: `never` means not in a preset level.
     Never-touch items, protected services and the named never-preset list still block (DECISIONS 2026-11-11).
   - With no stock value the plan is empty, with no Apply button and no sum, and never a bare "Nothing to change."
-    (R20, proxy Q2). On a build the KB has no stock values for, it says "Hadron has no Windows-stock data for build N
-    yet: nothing will be changed." and the chip "(no data for this build yet)". On 19045, a tab with no value (Drivers)
-    says "Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed." and the chip
-    "(no data on this tab)". The detail's Windows stock line uses the chip's words; a row without a value on a tab
-    that has some says "no data for this item yet". `StockKnown()` counts per tab; the Services chip reads
-    "Default: Windows stock (N sourced)".
-  - A published stock value is worded "from a Microsoft page (it names no build)". genkb enforces that: a published
-    stock note cites learn.microsoft.com pages only and says its page "names no build"; a driver with a stock value
-    needs `sysok`.
-  - The mechanism is also selftested with an in-memory KB.
+    (R20, proxy Q2). Without manifests on a build the KB has no values for: "Hadron has no Windows-stock data for
+    build N yet: nothing will be changed." and the chip "(no data for this build yet)". A tab with no value says
+    "Hadron's KB has no Windows stock value for any item on this tab" (or "Hadron has no ..." when manifests were
+    read) and the chip "(no data on this tab)". The detail's Windows stock line gives the value and its source
+    ("this PC's component manifests, build N.UBR", "two agreeing third-party tables", "the page names no build"),
+    "not applied: <why>" with both sources, "still reading this PC's component manifests", or the chip's words.
+  - Tests: the scanner and edition mapping on hand-written XML in the selftest; the fake backend reads
+    `tests/fixtures/services/sxs/` (hand-written manifests in the decompressed shape, an edition file, build and
+    edition). Live decompression is checked on a real Windows PC only, never under Wine.
   - Stock values are never applied to storage drivers.
 - **"Default: as first seen"** (the first-run snapshot).
   - KB guards don't apply: it restores what the PC had.
@@ -397,6 +467,38 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 - **Pending marker.** A start type that waits for a restart is `(pending)` in Baseline and `!` in Console, by
   design: each layout's legend explains its own mark (Console's cells are fixed-width).
 
+- **Custom presets (fix `svcdrv-presets`).**
+  - *The guard.* A custom preset gets the full built-in preset guard: `CheckGuard`'s never-touch and never-preset items,
+    items Hadron's KB doesn't know (third-party, as for built-in presets: e.g. `Fax` and `nvlddmkm` on the fixture), and
+    drivers the KB doesn't mark safe to change. Each is dropped with one note naming them ("item(s) that every preset
+    leaves alone"). Unlike a built-in preset, a custom one may raise a start type (it is the user's own list).
+    A stricter start for an item whose KB entry names hardware gets `BuildPreset`'s hardware check (review R2): kept
+    (blocked) while the hardware is present or was seen, unticked for a hot-plug class never seen, kept without
+    hardware information; the row shows the evidence.
+  - *Rows Hadron can't do.* Missing items, items of the other tab and unreadable items are counted in notes. A build
+    other than the PC's adds a note. TrustedInstaller-owned rows are blocked unless the TI toggle is on, as in every plan.
+  - *Where a preset comes from.* "Save ticks as custom preset" on a preset or single plan saves the included,
+    unblocked rows' targets (a plan's row set, not the whole tab). An import opens straight into a plan; to keep it,
+    save it from that plan. The undo log's `B` source is `custom:<tab>:<name>`, shown as `the custom preset "<name>"`.
+  - *Names.* A duplicate name (case-insensitive) is refused at save; the default name is `<plan> (<Tab>)`.
+  - *Removing* writes a tombstone instead of deleting a file (hard rule 1 applies to Hadron's own data too).
+  - *Export* never replaces: `CREATE_NEW` only, without an overwrite prompt, so there is one path and no race.
+  - Saving, removing, exporting and importing run on a `Worker`; the Open/Save dialogs run on the UI thread before it
+    starts. Writes are off in fixture mode, read-only mode, without elevation, and when the data folder was refused (A1).
+- **Measure (fix `svcdrv-presets`).**
+  - The only numbers on the page are recorded values and their difference (`After - before`, computed from the two
+    records). No estimate anywhere; the page says Hadron never predicts what a change saves.
+  - "Measure after" requires a before from an earlier boot; the banner offering it shows only in live mode and can
+    be dismissed for the session.
+  - The fairness text is "test it" guidance without numbers: same apps, same minutes after boot, repeat the pair,
+    and test frame rates in the game itself.
+  - Measurements of another machine (machine GUID) are never paired. A pair whose minutes after boot, Windows build
+    or usable physical memory differ is shown with a warning saying so.
+  - "Between them" (review R6) names every Hadron apply of that machine whose undo log has a `B` record and at least
+    one row, stamped after the before was recorded and before the after's boot (`AppliesBetween`). When there is
+    none it says "No Hadron apply was recorded between these two: the difference is not from a Hadron change."
+  - The basis reads "owner-measured (measured on this PC by you)".
+
 ## Deviations from the spec
 - **Hardware evidence** (spec §5.5; Analyze docs D3; DECISIONS.md, proxy). The devnode-only deviation is closed by
   follow-up 8 (docs/pipeline/fixes/svcdrv-evidence.md):
@@ -426,12 +528,18 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 | `--focus list\|search\|detail\|<n>` | module | Draw that focus state, or focus the n-th tab stop (design screenshots) |
 | `--sort <key>[:desc]` | module | Sort the list by a column key, e.g. `kb:desc` |
 | `--keys F1,F2,text:abc,...` | module | Replay keys after the fixture loads (`F1`-`F12`, `up`, `down`, `pgup`, `pgdn`, `home`, `end`, `tab`, `esc`, `space`, `enter`, `text:<chars>`) |
+| `--presets` | module | Open the custom presets page |
+| `--import <file>` | module | Import that file as the Import button does (no dialog): a refusal shows on the presets page, a valid file opens its plan |
+| `--plan custom:<name>` | module | Open the fixture's saved custom preset of that name as a plan |
+| `--save <name>` | module | With `--plan`: open the "save ticks as custom preset" form with that name typed (fixture mode refuses the write) |
+| `--measure` | module | Open the measure page (the fixture's `measure\` pair) |
 | `--ti on` | module | Start with the TrustedInstaller toggle on (fixture renders only; live it is off at every launch) |
 | `--regfallback on` | module | Start with the registry fallback switch on (fixture renders only; live it is off at every launch and after every apply) |
 | `--data-dir <dir>` | module, `--live-test` | Use another data folder instead of `%ProgramData%\Hadron\services\` |
 | `--readonly` | module | Never arm the backend. Without `--data-dir` it opens the default data folder read-only, so the first-run snapshot, undo logs and interrupted banner still show |
 | `--selftest [--update-golden] [--golden <dir>]` | selftest | Run the selftest. `--golden` points at another golden folder (default `<fixture>\..\..\golden\services`); `--update-golden` rewrites every golden it compares instead of comparing |
-| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (Services: the fixture's WSearch row; Drivers: no data, the plan says so) |
+| `--dump-stock-live [--out <file>]` | `HadronServices.exe` (Release and test builds) | Read this PC's WinSxS manifests with the live reader and write UTF-8 TSV: `#` header lines (build.UBR, EditionID, manifests, decompress failures, skipped, elapsed ms), then name, start, delayed, layer (`edition`, `serviceData`, `registry`, `settingDefault`), conflict, source file. Read only: no backend, no SCM or registry writes, no data folder, no cache. Exit 1 with the reason when wcp.dll or msdelta.dll can't be loaded or no manifest could be read |
+| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (Services: manifest, table and Microsoft rows and the shown-not-applied rows from the fixture's `sxs\`; Drivers: no data, the plan says so) |
 | `--live-test HadronTest<name> [--ti] [--data-dir <dir>]` | `HadronServices.exe`, test build only (R25) | CI's round trip on a dummy service (see below) |
 
 **Regenerating goldens** (only when a change is meant to alter them, and review every diff):
@@ -439,7 +547,7 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 python3 -I tools/services/genkb.py                     # the KB first: plan text carries pbasis notes
 wine build/HadronServices.exe --selftest --fixture tests/fixtures/services --update-golden
 ```
-`--update-golden` rewrites the 10 plan goldens, `plan-services-default-delayedlinger.txt`, `restore.cmd`,
+`--update-golden` rewrites the 10 plan goldens, `plan-services-default-delayedlinger.txt`, `plan-services-custom.txt`, `restore.cmd`,
 `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt`. Then run `tests/tools/services_check.sh`, which
 compares them again (with `--dump-plan`) and fails on any difference.
 
@@ -450,10 +558,14 @@ compares them again (with `--dump-plan`) and fails on any difference.
 3. both selftests;
 4. the 10 `--dump-plan` comparisons (5 plans on each tab, `stock` included) against `tests/golden/services`, plus
    `plan-services-default-delayedlinger.txt` (the `delayedlinger` fixture);
-5. the screenshots (including the `forged` Undo plan and the `multi` banner).
+5. the screenshots (including the `forged` Undo plan and the `multi` banner, and the presets page, the import
+   refusal, the custom plan, the save form and the measure page in both layouts).
 
 Regression fixtures from Analyze (written by `make_services_fixture.py`, compared by CI): `delayedlinger/` (A7),
-`forged/` (A4), `multi/` (an interrupted undo of an interrupted apply). The selftest also writes and compares
+`forged/` (A4), `multi/` (an interrupted undo of an interrupted apply).
+Hand-written fixtures for custom presets and measurements (not generated, and not compared by step 2): `presets/`
+(two saved presets), `import/bad-start.txt` (refused at line 8) and `measure/` (a before/after pair). The selftest
+compares the custom plan with `plan-services-custom.txt`. The selftest also writes and compares
 `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt`.
 
 CI runs it in the Wine job. The MSVC job runs:
