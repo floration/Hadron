@@ -54,7 +54,7 @@ public:
         line(L"Hello from Hadron", fonts_.title, t.text1, 30, DT_LEFT);
         line(L"The module contract works, standalone and in the suite.", fonts_.ui, t.text2, 86, DT_LEFT);
         line(host_ && host_->IsElevated() ? L"Elevated: yes" : L"Elevated: no", fonts_.ui, t.text2, 128, DT_LEFT);
-        line(L"Opened " + std::to_wstring(opened_) + L" time(s) (saved in settings)", fonts_.small, t.text3, 164, DT_LEFT);
+        line(L"Opened " + std::to_wstring(opened_) + L" time(s) (saved in settings)", fonts_.caption, t.text3, 164, DT_LEFT);
         line(L"HadronHello.exe  ·  Hadron.exe --solo hello", fonts_.mono, t.accent, 206, DT_LEFT);
     }
 

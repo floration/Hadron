@@ -27,7 +27,7 @@ inline int S(int px, UINT dpi) { return MulDiv(px, (int)dpi, 96); }
 
 // Per-DPI fonts, rebuilt on WM_DPICHANGED (OnDpiChanged). Segoe UI, with Consolas for numbers.
 struct Fonts {
-    HFONT ui = nullptr, semi = nullptr, small = nullptr, title = nullptr, mono = nullptr;
+    HFONT ui = nullptr, semi = nullptr, caption = nullptr, title = nullptr, mono = nullptr;
 
     void Build(UINT dpi) {
         Free();
@@ -38,12 +38,12 @@ struct Fonts {
         };
         ui    = f(15, FW_NORMAL,   L"Segoe UI");
         semi  = f(15, FW_SEMIBOLD, L"Segoe UI");
-        small = f(12, FW_NORMAL,   L"Segoe UI");
+        caption = f(12, FW_NORMAL,   L"Segoe UI");
         title = f(20, FW_SEMIBOLD, L"Segoe UI");
         mono  = f(14, FW_NORMAL,   L"Consolas");
     }
     void Free() {
-        for (HFONT* h : {&ui, &semi, &small, &title, &mono})
+        for (HFONT* h : {&ui, &semi, &caption, &title, &mono})
             if (*h) { DeleteObject(*h); *h = nullptr; }
     }
     ~Fonts() { Free(); }

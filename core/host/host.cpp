@@ -11,6 +11,7 @@
 #include "core/ui/theme.h"
 #include <windowsx.h>
 #include <dwmapi.h>
+#include <objbase.h>   // CoInitializeEx/CoUninitialize: WIN32_LEAN_AND_MEAN excludes OLE on MSVC
 #include <set>
 #include <string>
 #include <vector>
@@ -208,10 +209,10 @@ void Host::PaintChrome(HDC dc, const RECT& cl) {
     std::wstring s = status_.empty()
         ? (elevated_ ? L"Running as administrator" : L"Not elevated — some features are limited")
         : status_;
-    TextLeft(dc, s, sr, fonts_.small, t.text2);
+    TextLeft(dc, s, sr, fonts_.caption, t.text2);
     if (busy_) {
         RECT br = st; br.right -= S(12, dpi_);
-        SelectObject(dc, fonts_.small); SetTextColor(dc, t.accent); SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, fonts_.caption); SetTextColor(dc, t.accent); SetBkMode(dc, TRANSPARENT);
         DrawTextW(dc, L"Working…", -1, &br, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
     }
 }
