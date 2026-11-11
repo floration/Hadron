@@ -1,0 +1,188 @@
+service	startup_ws2016	recommendation	comment
+AxInstSV	Manual	OK to disable	OK to disable if feature not needed
+AJRouter	Manual	No guidance	None
+AppReadiness	Manual	Do not disable	None
+AppIDSvc	Manual	No guidance	None
+Appinfo	Manual	No guidance	Supports UAC same-desktop elevation
+ALG	Manual	No guidance	None
+AppMgmt	Manual	No guidance	None
+AppXSvc	Manual	No guidance	None
+tzautoupdate	Disabled	Already disabled	None
+BITS	Manual	No guidance	None
+BrokerInfrastructure	Automatic	No guidance	None
+BFE	Automatic	No guidance	None
+bthserv	Manual	OK to disable	OK to disable if not used. Another disabling mechanism: [Disabling Bluetooth and Infrared Beaming](/previous-versions/tn-archive/dd252791(v=technet.10))
+CDPUserSvc	Automatic	OK to disable	User service template
+CertPropSvc	Manual	No guidance	None
+ClipSVC	Manual	No guidance	None
+KeyIso	Manual	No guidance	None
+EventSystem	Automatic	No guidance	None
+COMSysApp	Manual	No guidance	None
+Browser	Disabled	Already disabled	None
+CDPSvc	Automatic	No guidance	None
+DiagTrack	Automatic	No guidance	None
+PimIndexMaintenanceSvc	Manual	OK to disable	User service template
+CoreMessagingRegistrar	Automatic	No guidance	None
+VaultSvc	Manual	No guidance	None
+CryptSvc	Automatic	No guidance	None
+DsSvc	Manual	No guidance	None
+DcpSvc	Manual	No guidance	None
+DcomLaunch	Automatic	No guidance	None
+DeviceAssociationService	Manual	No guidance	None
+DeviceInstall	Manual	No guidance	None
+DmEnrollmentSvc	Manual	No guidance	None
+DsmSvc	Manual	No guidance	None
+DevQueryBroker	Manual	No guidance	None
+Dhcp	Automatic	No guidance	None
+DPS	Automatic	No guidance	None
+WdiServiceHost	Manual	No guidance	None
+WdiSystemHost	Manual	No guidance	None
+TrkWks	Automatic	No guidance	None
+MSDTC	Automatic	No guidance	None
+dmwappushservice	Manual	OK to disable	Service required on client devices for Intune, Mobile Device Management (MDM),  and similar management technologies, and for Unified Write Filter. Not needed for Server.
+Dnscache	Automatic	No guidance	None
+MapsBroker	Automatic	OK to disable	Disabling this service breaks apps that rely on it; OK to disable if apps not relying on it
+embeddedmode	Manual	No guidance	None
+EFS	Manual	No guidance	None
+EntAppSvc	Manual	No guidance	None
+EapHost	Manual	No guidance	None
+fdPHost	Manual	No guidance	None
+FDResPub	Manual	No guidance	None
+lfsvc	Manual	OK to disable	Disabling breaks apps that rely on the service; OK to disable if apps not relying on it
+gpsvc	Automatic	No guidance	None
+hidserv	Manual	No guidance	None
+HvHost	Manual	Do not disable	Performance enhancers for guest VMs. Not used today except for explicitly populated VMs, but Application Guard can also use it.
+vmickvpexchange	Manual	Do not disable	See HvHost
+vmicguestinterface	Manual	Do not disable	See HvHost
+vmicshutdown	Manual	Do not disable	See HvHost
+vmicheartbeat	Manual	Do not disable	See HvHost
+vmicvmsession	Manual	Do not disable	See HvHost
+vmicrdv	Manual	Do not disable	See HvHost
+vmictimesync	Manual	Do not disable	See HvHost
+vmicvss	Manual	Do not disable	See HvHost
+IKEEXT	Manual	No guidance	None
+UI0Detect	Manual	No guidance	None
+SharedAccess	Manual	OK to disable	Required for clients used as WiFi hotspots and both ends of Miracast projection. You can block ICS with the GPO setting called **Prohibit use of Internet Connection Sharing on your DNS domain network**.
+iphlpsvc	Automatic	No guidance	None
+PolicyAgent	Manual	No guidance	None
+KPSSVC	Manual	No guidance	None
+KtmRm	Manual	No guidance	None
+lltdsvc	Manual	OK to disable	OK to disable if no dependencies on Network Map
+LSM	Automatic	No guidance	None
+diagnosticshub.standardcollector.service	Manual	No guidance	None
+wlidsvc	Manual	OK to disable	Microsoft Accounts are N/A on Windows Server
+AppVClient	Disabled	Already disabled	None
+MSiSCSI	Manual	Do not disable	Our diagnostic data indicates the system uses this service on both client and server, so there's no benefit to disabling it.
+NgcSvc	Manual	OK to disable	Needed to sign in with PIN and Windows Hello, which Windows Server doesn't support.
+NgcCtnrSvc	Manual	OK to disable	None
+swprv	Manual	No guidance	None
+smphost	Manual	Do not disable	Storage management APIs fail without this service. For example, the `Get-WmiObject -class MSFT_Disk -Namespace Root\Microsoft\Windows\Storage` command stops working.
+NetTcpPortSharing	Disabled	Already disabled	None
+Netlogon	Manual	No guidance	None
+NcbService	Manual	OK to disable	None
+Netman	Manual	No guidance	None
+NcaSvc	Manual	No guidance	None
+netprofm	Manual	No guidance	None
+NlaSvc	Automatic	No guidance	None
+NetSetupSvc	Manual	No guidance	None
+nsi	Automatic	No guidance	None
+CscService	Disabled	Already disabled	None
+defragsvc	Manual	No guidance	None
+PerfHost	Manual	No guidance	None
+pla	Manual	No guidance	None
+PhoneSvc	Manual	OK to disable	Used by modern Voice over Internet Protocol (VoIP) apps.
+PlugPlay	Manual	No guidance	None
+WPDBusEnum	Manual	No guidance	None
+Power	Automatic	No guidance	None
+Spooler	Automatic	OK to disable if not a print server or a DC	On a domain controller, installing the DC role adds a thread to the spooler service that's responsible for performing *print pruning*, which removes the stale print queue objects from the Active Directory. If the spooler service isn't running on at least one DC in each site, then the AD can't remove old queues that no longer exist. Learn more at ["Disabling Unnecessary Services? A Word to the Wise](https://techcommunity.microsoft.com/t5/ask-the-performance-team/disabling-unnecessary-services-a-word-to-the-wise/ba-p/373444).
+PrintNotify	Manual	OK to disable if not a print server	None
+wercplsupport	Manual	No guidance	None
+PcaSvc	Automatic	OK to disable	None
+QWAVE	Manual	OK to disable	Client-side QoS service
+RmSvc	Manual	OK to disable	None
+RasAuto	Manual	No guidance	None
+RasMan	Manual	No guidance	None
+SessionEnv	Manual	Do not disable	None
+TermService	Manual	Do not disable	None
+UmRdpService	Manual	Do not disable	Supports redirections on the server side of the connection.
+RpcSs	Automatic	No guidance	None
+RpcLocator	Manual	No guidance	None
+RemoteRegistry	Automatic	Do not disable	None
+RSoPProv	Manual	No guidance	None
+RemoteAccess	Disabled	Already disabled	Already disabled
+RpcEptMapper	Automatic	No guidance	None
+seclogon	Manual	No guidance	None
+SstpSvc	Manual	Do not disable	Disabling breaks RRAS
+SamSs	Automatic	Do not disable	None
+SensorDataService	Manual	OK to disable	None
+SensrSvc	Manual	OK to disable	None
+SensorService	Manual	OK to disable	None
+LanmanServer	Automatic	Do not disable	Needed for remote management, IPC$, SMB file sharing
+ShellHWDetection	Automatic	OK to disable	None
+SCardSvr	Disabled	Already disabled	None
+ScDeviceEnum	Manual	OK to disable	Needed almost exclusively for WinRT apps
+SCPolicySvc	Manual	No guidance	None
+SNMPTRAP	Manual	No guidance	None
+sppsvc	Automatic	No guidance	None
+sacsvr	Manual	No guidance	None
+svsvc	Manual	No guidance	None
+SSDPSRV	Manual	OK to disable	None
+StateRepository	Manual	No guidance	None
+WiaRpc	Manual	OK to disable	None
+StorSvc	Manual	No guidance	None
+TieringEngineService	Manual	No guidance	None
+SysMain	Manual	No guidance	None
+OneSyncSvc	Automatic	OK to disable	User service template
+SENS	Automatic	No guidance	None
+SystemEventsBroker	Automatic	Do not disable	Despite this service's description implying it's only for WinRT apps, it's also needed for task scheduler, broker infrastructure service, and other internal components.
+Schedule	Automatic	No guidance	None
+lmhosts	Manual	No guidance	None
+TapiSrv	Manual	Do not disable	Disabling breaks Routing and Remote Access Service (RRAS)
+Themes	Automatic	Do not disable	Can't set accessibility themes when this service is disabled
+tiledatamodelsvc	Automatic	Do not disable	Start menu breaks If you disable this service
+TimeBrokerSvc	Manual	Do not disable	Despite this service's name implying it's only for WinRT apps, it's needed for task scheduler, broker infrastructure service, and other internal components.
+TabletInputService	Manual	Do not disable	Do not disable if Desktop Experience is installed.
+UsoSvc	Manual	Do not disable	Service description was missing in v1607; Windows Update, including Windows Server Update Services (WSUS), depends on this service.
+upnphost	Manual	OK to disable	None
+UALSVC	Automatic	No guidance	None
+UserDataSvc	Manual	OK to disable	User service template
+UnistoreSvc	Manual	OK to disable	User service template
+UevAgentService	Disabled	Already disabled	None
+UserManager	Automatic	No guidance	None
+ProfSvc	Automatic	No guidance	None
+vds	Manual	No guidance	None
+VSS	Manual	No guidance	None
+WalletService	Manual	OK to disable	None
+Audiosrv	Manual	OK to disable	None
+AudioEndpointBuilder	Manual	OK to disable	None
+WbioSrvc	Manual	No guidance	None
+FrameServer	Manual	OK to disable	None
+Wcmsvc	Automatic	No guidance	None
+WdNisSvc	Manual	No guidance	None
+WinDefend	Automatic	No guidance	None
+wudfsvc	Manual	No guidance	None
+WEPHOSTSVC	Manual	No guidance	None
+WerSvc	Manual	Do not disable	Collects and sends data when a program crashes or stops responding, which both Microsoft and third-party Independent Software Vendors (ISVs) or Independent Network Vendors (INVs) can use to diagnose crash-inducing bugs and security bugs. Also needed for Corporate Error Reporting.
+Wecsvc	Manual	Do not disable	Collects ETW events, including security events, for manageability and diagnostics. Lots of features and third-party tools rely on it, including security audit tools.
+EventLog	Automatic	No guidance	None
+MpsSvc	Automatic	No guidance	None
+FontCache	Automatic	No guidance	None
+stisvc	Manual	OK to disable	None
+wisvc	Manual	OK to disable	Server doesn't support flighting, so it's a no-op on Server. You can also disable the feature using Group Policy.
+msiserver	Manual	No guidance	None
+LicenseManager	Manual	No guidance	None
+Winmgmt	Automatic	No guidance	None
+icssvc	Manual	OK to disable	None
+TrustedInstaller	Manual	No guidance	None
+WpnService	Automatic	OK to disable	Needed for live tiles and other features
+WpnUserService	Manual	OK to disable	User service template
+WinRM	Automatic	Do not disable	Needed for remote management
+WSearch	Disabled	Already disabled	None
+W32Time	Automatic	No guidance	None
+wuauserv	Manual	No guidance	None
+WinHttpAutoProxySvc	Manual	Do not disable	Anything that uses the network stack can have a functional dependency on this service. Many organizations rely on this to configure their internal networks' HTTP proxy routing. Without it, internally-originating HTTP connections to the Internet will all fail.
+dot3svc	Manual	No guidance	None
+wmiApSrv	Manual	No guidance	None
+LanmanWorkstation	Automatic	No guidance	None
+XblAuthManager	Manual	Should be disabled	None
+XblGameSave	Manual	Should be disabled	This service syncs save data for Xbox Live save enabled games. If you stop this service, game save data will not upload to or download from Xbox Live.

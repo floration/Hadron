@@ -53,7 +53,7 @@ jobs:
       - name: Package
         run: |
           mkdir dist
-          cp build/Hadron.exe build/HadronBios.exe build/HadronDiskMap.exe build/HadronRunAs.exe dist/
+          cp build/Hadron.exe build/HadronBios.exe build/HadronDiskMap.exe build/HadronRunAs.exe build/HadronServices.exe dist/
           (cd dist && sha256sum *.exe > SHA256SUMS && cat SHA256SUMS)
       - name: Publish
         env:

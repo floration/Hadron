@@ -12,11 +12,28 @@
 | `core/fs` header + design note | not started | lead | - | - |
 | `runas` module | merged; owner's-PC launch checks pending | module-builder | module/runas | #2 |
 | In-app layout/theme switch, settings.ini merge-on-save | merged | lead | claude/project-thread-7nnuw6 | #6 |
-| Auto-update from GitHub releases, Reading Room theme, anti-aliased shapes | in review; owner's call on moving the old exe pending | lead | claude/project-thread-7nnuw6 | #7 |
+| Auto-update from GitHub releases, Reading Room theme, anti-aliased shapes | merged; owner approved moving the old exe | lead | claude/project-thread-7nnuw6 | #7 |
 | Core follow-ups from svcdrv (PR #8, docs/pipeline/svcdrv/7-finalize.md): TrustedInstaller helper into core, `--size`/`--dpi` fixture-render flag, ListView and theme APIs, shared F-key bar, opt-in per-list font | backlog, after the owner's current asks | lead | - | - |
+| `services` module (pipeline `svcdrv`, full run) | merged; read-only owner's-PC checks pending | pipeline | module/services-svcdrv | #8 |
+| `services` KB follow-ups (svcdrv-kb: stock table, Fax, drivers, OEM) | merged | Small fixes | fix/svcdrv-kb | #9 |
+| `services` custom presets + Measure (svcdrv-presets) | merged | Small fixes | fix/svcdrv-presets | #10 |
+| `services` Windows-stock from WinSxS + tables (svcdrv-stock) | merged | Small fixes | fix/svcdrv-stock | #11 |
+| `services` Signer, event 7040, interface evidence, registry fallback (svcdrv-evidence) | in Push | Small fixes | fix/svcdrv-evidence | (PR) |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)
+
+### 2026-11-11 (Push thread) — svcdrv
+- `services` module (idea `svcdrv`) reached Push after all eight stages; every category 1-4 finding closed
+  (Review R1-R25 and the Finalize mini passes). Main (e085b61, #6) merged into the branch; the one conflict
+  (`core/host/cmdline.h`) kept both new fields. MinGW release build of the merge passes.
+- Docs: `docs/modules/services.md` (new), README and MODULES rows, an ARCHITECTURE fix (`hx::ui::Confirm()` never
+  existed), and six DECISIONS rows from Finalize.
+- First windows-latest run is the first MSVC compile, `--live-test`, real-cmd `restore-dryrun.cmd` and real
+  folder-owner check for this module.
+- Still wanted on the owner's PC, read-only and never applying a preset: class filters, boot path, VBS, DPI, high
+  contrast, keyboard, the minimum-size clamp at 1366x768 125% (list in docs/pipeline/svcdrv/7-finalize.md).
+- Ten follow-up ideas from Finalize sent to the Ideas thread.
 
 ### 2026-11-11 (lead, Opus) — update 5
 - Owner chose guarded BIOS writes; hard rule 2 rewritten, CI allows the write API only in `modules/bios/fwwrite.cpp`.

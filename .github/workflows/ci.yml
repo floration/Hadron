@@ -22,6 +22,14 @@ jobs:
             echo "::error::firmware-write API outside modules/bios/fwwrite.cpp (hard rule 2)"; exit 1
           fi
           echo "ok: firmware writes only in modules/bios/fwwrite.cpp"
+      # The Services page writes service start types only. It never creates or deletes a service or a
+      # registry key (docs/design/services.md); this keeps it that way.
+      - name: No service create/delete or key-delete APIs in modules/services
+        run: |
+          if grep -rnE 'DeleteService|CreateService|RegDeleteKey|RegDeleteTree|SetFirmwareEnvironmentVariable|NtSetSystemEnvironmentValue' modules/services; then
+            echo "::error::banned API under modules/services"; exit 1
+          fi
+          echo "ok: modules/services has no banned APIs"
 
   linux-mingw:
     runs-on: ubuntu-latest
@@ -88,6 +96,17 @@ jobs:
         run: |
           export WINEPREFIX="$PWD/.wine"
           bash tests/tools/bios_check.sh build shots
+      # Hard rule 7 gate (genkb selftest + byte-for-byte services.db), the fixture cmp, both selftests,
+      # the 10 golden plans plus the delayedlinger plan, and the screenshots. Fixture mode only: nothing is applied to any service.
+      # Wine can't set a folder owner or make a reparse point, so this runs a separate test build with the Store
+      # selftest hooks (HADRON_SERVICES_TEST_HOOKS); the build above, like every release build, has none.
+      - name: Services KB, selftests, golden plans and screenshots (Wine + Xvfb)
+        run: |
+          export WINEPREFIX="$PWD/.wine"
+          cmake -S . -B build-svctest -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DHADRON_SERVICES_TEST_HOOKS=ON
+          cmake --build build-svctest --target HadronServices Hadron
+          bash tests/tools/services_check.sh build-svctest shots
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-linux
@@ -113,6 +132,9 @@ jobs:
           }
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
+          # --live-test exists only in a test-hooks build (R25): a release build has no command-line write path.
+          cmake -S . -B build-svctest -G Ninja -DCMAKE_BUILD_TYPE=Release -DHADRON_SERVICES_TEST_HOOKS=ON
+          cmake --build build-svctest --target HadronServices
       - name: Selftests
         shell: pwsh
         run: |
@@ -128,6 +150,86 @@ jobs:
           python tests\fixtures\make_bios_snapshot.py modules\bios\data\settings.db biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronBios.exe --selftest --fixture biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\Hadron.exe --solo bios --selftest --snapshot biosfix\snap; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronServices.exe --selftest --fixture tests\fixtures\services; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\Hadron.exe --solo services --selftest --fixture tests\fixtures\services; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Services golden plans
+        shell: pwsh
+        run: |
+          mkdir svcplans | Out-Null
+          foreach ($tab in 'services','drivers') {
+            foreach ($lvl in 'default','bloat','stripped','minimum','stock') {
+              $out = "svcplans\plan-$tab-$lvl.txt"
+              $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow `
+                -ArgumentList '--dump-plan',$lvl,'--tab',$tab,'--fixture','tests\fixtures\services','--out',$out
+              if ($p.ExitCode) { throw "dump-plan $tab $lvl exited $($p.ExitCode)" }
+              if ((Get-FileHash $out).Hash -ne (Get-FileHash "tests\golden\services\plan-$tab-$lvl.txt").Hash) {
+                throw "plan-$tab-$lvl.txt differs from tests\golden\services"
+              }
+            }
+          }
+          # A7 regression: a lingering DelayedAutostart=1 under Manual, restored to plain Auto.
+          $out = "svcplans\plan-delayedlinger.txt"
+          $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow `
+            -ArgumentList '--dump-plan','default','--tab','services','--fixture','tests\fixtures\services\delayedlinger','--out',$out
+          if ($p.ExitCode) { throw "dump-plan delayedlinger exited $($p.ExitCode)" }
+          if ((Get-FileHash $out).Hash -ne (Get-FileHash "tests\golden\services\plan-services-default-delayedlinger.txt").Hash) {
+            throw "plan-services-default-delayedlinger.txt differs from tests\golden\services"
+          }
+          "ok: 10 plans and the delayedlinger plan match tests/golden/services"
+      # Wine's cmd tolerates what real cmd.exe rejects (a ")" in a name closing an IF block), so the generated
+      # restore.cmd runs here on the real one. restore-dryrun.cmd is the golden script with every reg call echoed
+      # (call :dry), Select\Current read as 1, every Start read as 3, an extra "Intel(R) Dry Run (x86)" row fed to
+      # :put, and a "Dry Boot Now" row whose Start reads as 0 (must be skipped): nothing touches the registry. It must
+      # reach "Done:" with every other row restored and no syntax error.
+      - name: Services restore.cmd on real cmd.exe (echo only)
+        shell: pwsh
+        run: |
+          $lines = & cmd.exe /d /c "tests\golden\services\restore-dryrun.cmd C: 2>&1"
+          $code = $LASTEXITCODE
+          $lines | ForEach-Object { $_ }
+          $text = $lines -join "`n"
+          if ($text -match 'was unexpected at this time') { throw "cmd.exe reported a syntax error in restore.cmd" }
+          if ($code) { throw "restore-dryrun.cmd exited $code" }
+          if ($text -notmatch 'restored "Intel\(R\) Dry Run \(x86\)" Start=3') { throw "the (R) row did not get through :put" }
+          if ($text -notmatch 'skip "Dry Boot Now": Start is now 0x0') { throw "a key that is Boot start now was not skipped" }
+          if ($text -match 'DRYRUN reg add "[^"]*\\Dry Boot Now"') { throw "a key that is Boot start now was written" }
+          if ($text -notmatch 'Done: 5 restored, 0 not on this Windows, 1 now Boot or System start \(left as they are\), 0 failed\.') { throw "restore-dryrun.cmd did not reach the end" }
+          if ($text -notmatch 'DRYRUN reg unload HKLM\\HXOFF') { throw "the unload line was not reached" }
+          "ok: the generated restore.cmd runs to the end on real cmd.exe"
+      # The one test that writes a real service: a throwaway HadronTestSvc this step creates and deletes.
+      # Hadron sets its start type, verifies, undoes and verifies (--live-test refuses any other name). The data
+      # folder goes under %ProgramData%, the parent of Hadron's default data folder: every folder above it must be one
+      # only administrators can rename (store.cpp RenameAccessProblem). RUNNER_TEMP belongs to the runner account,
+      # and the hosted image gives BUILTIN\Users full control of %SystemRoot%\Temp, so both are refused.
+      - name: Services live test (dummy service)
+        shell: pwsh
+        run: |
+          sc.exe create HadronTestSvc binPath= "C:\Windows\System32\cmd.exe /c exit 0" start= demand
+          if ($LASTEXITCODE) { throw "sc.exe create failed" }
+          try {
+            $p = Start-Process build-svctest\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live.txt `
+              -ArgumentList '--live-test','HadronTestSvc','--data-dir',"$env:ProgramData\HadronCI\live-$env:GITHUB_RUN_ID\services"
+            Get-Content live.txt
+            if ($p.ExitCode) { throw "live test exited $($p.ExitCode)" }
+          } finally {
+            sc.exe delete HadronTestSvc
+          }
+      # The same round trip written while impersonating TrustedInstaller. Informational: the hosted
+      # runner's session layout (winlogon, TI start rights) may not match a desktop PC.
+      - name: Services live test, TrustedInstaller (informational)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          sc.exe create HadronTestSvc binPath= "C:\Windows\System32\cmd.exe /c exit 0" start= demand
+          if ($LASTEXITCODE) { throw "sc.exe create failed" }
+          try {
+            $p = Start-Process build-svctest\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live-ti.txt `
+              -ArgumentList '--live-test','HadronTestSvc','--ti','--data-dir',"$env:ProgramData\HadronCI\live-ti-$env:GITHUB_RUN_ID\services"
+            Get-Content live-ti.txt
+            if ($p.ExitCode) { throw "TI live test exited $($p.ExitCode)" }
+          } finally {
+            sc.exe delete HadronTestSvc
+          }
       # A real de-elevated launch, reading back the child's integrity. Informational: the hosted
       # runner has no interactive Explorer shell and may run with UAC off (no linked medium token),
       # so a failure here can be the runner, not the code. The owner's PC is the real check.
@@ -167,6 +269,17 @@ jobs:
             }
           }
           build\Hadron.exe --module bios --snapshot biosfix\snap --screenshot "shots\bios-suite-baseline.png"
+          $sf = 'tests\fixtures\services'
+          build\HadronServices.exe --fixture $sf --screenshot "shots\services-list.png"
+          build\HadronServices.exe --fixture $sf --tab drivers --screenshot "shots\services-drivers.png"
+          build\HadronServices.exe --fixture $sf --select DiagTrack --screenshot "shots\services-detail-kb.png"
+          build\HadronServices.exe --fixture $sf --select RpcSs --screenshot "shots\services-detail-protected.png"
+          build\HadronServices.exe --fixture $sf --plan stripped --screenshot "shots\services-plan-stripped.png"
+          build\HadronServices.exe --fixture "$sf\interrupted" --screenshot "shots\services-interrupted.png"
+          build\HadronServices.exe --fixture "$sf\forged" --plan undo-last --screenshot "shots\services-forged-undo.png"
+          build\HadronServices.exe --fixture "$sf\multi" --screenshot "shots\services-multi.png"
+          build\HadronServices.exe --fixture $sf --ti on --plan stripped --select dmwappushservice --screenshot "shots\services-ti-on.png"
+          build\Hadron.exe --module services --fixture $sf --screenshot "shots\services-suite.png"
           # Guarded writes: the plan overlay and value editor over a MockBackend built from the fixture.
           build\HadronBios.exe --fixture biosfix\snap --write-demo plan --screenshot "shots\bios-write-plan.png"
           build\HadronBios.exe --fixture biosfix\snap --write-demo edit --screenshot "shots\bios-write-edit-dark.png"

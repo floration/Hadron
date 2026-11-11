@@ -1,0 +1,36 @@
+Plan: Custom: Gaming rig (Services)
+Source: custom:services:Gaming rig
+Rows: 3 ticked, 3 unticked, 1 kept, protected or not applied; already set: 1
+Note: 1 row(s) need TrustedInstaller (Windows refuses the write to administrators): left out while the TrustedInstaller toggle is off.
+Note: Your custom preset "Gaming rig": nothing is changed until you press Apply, and the apply is snapshotted and undoable like every plan.
+Note: Dropped 3 item(s) that every preset leaves alone: Fax (Hadron's KB keeps it out of every preset), WinDefend (launch-protected (Antimalware light (protected process light)): only a protected process can change it), RpcSs (core Windows service: boot, sign-in, RPC, audio, network or Hadron itself needs it).
+Note: 1 item(s) in the preset are not on this PC: HxNotOnThisPc.
+Note: 1 item(s) are not on the Services tab, so this preset leaves them: nvlddmkm.
+Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
+[x] MapsBroker  Auto (delayed) -> Manual  (2/1 -> 3/1)
+    why: your custom preset "Gaming rig"
+    basis: user -- your own list, saved 2026-11-11 09:00 UTC
+[x] SysMain  Auto -> Disabled  (2/- -> 4/-)
+    why: your custom preset "Gaming rig"
+    basis: user -- your own list, saved 2026-11-11 09:00 UTC
+[x] WSearch  Manual -> Auto (delayed)  (3/- -> 2/1)
+    why: your custom preset "Gaming rig"
+    basis: user -- your own list, saved 2026-11-11 09:00 UTC
+[ ] dmwappushservice  Manual -> Disabled  (3/- -> 4/-)
+    why: your custom preset "Gaming rig"
+    basis: user -- your own list, saved 2026-11-11 09:00 UTC
+    warning: needs TrustedInstaller: Windows refuses this write to administrators, and the toggle is off
+    needs TrustedInstaller
+[ ] FrameServer  Manual -> Disabled  (3/- -> 4/-)
+    why: your custom preset "Gaming rig"
+    basis: user -- your own list, saved 2026-11-11 09:00 UTC
+    evidence: no devnode for class Camera ever seen, but it is a hot-plug class: left unticked
+[ ] Spooler  Auto -> Manual  (2/- -> 3/-)
+    why: your custom preset "Gaming rig"
+    basis: user -- your own list, saved 2026-11-11 09:00 UTC
+    evidence: no devnode for class Printer ever seen, but it is a hot-plug class: left unticked
+[-] bthserv  Manual -> Disabled  (3/- -> 4/-)
+    Kept: hardware in use or seen before. present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth, last arrived 2026-11-09)
+    why: your custom preset "Gaming rig"
+    basis: user -- your own list, saved 2026-11-11 09:00 UTC
+    evidence: present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth, last arrived 2026-11-09)

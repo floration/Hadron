@@ -1,0 +1,7 @@
+HXPRESET	1
+hadron	0.1.0
+build	19041
+tab	drivers
+name	Quiet drivers
+Beep	disabled
+nvlddmkm	manual

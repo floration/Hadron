@@ -94,8 +94,9 @@ COLORREF Mix(COLORREF a, COLORREF b, double t) {
     return RGB((int)(GetRValue(a) * (1 - t) + GetRValue(b) * t), (int)(GetGValue(a) * (1 - t) + GetGValue(b) * t),
                (int)(GetBValue(a) * (1 - t) + GetBValue(b) * t));
 }
-int Lum(COLORREF c) { return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000; }
-COLORREF OnColor(COLORREF fill) { return Lum(fill) > 140 ? RGB(10, 20, 30) : RGB(245, 247, 250); }
+// Text on a fill by WCAG contrast (core/ui OnFill), in BIOS's own near-white and near-black inks. Rec. 601
+// brightness picked near-white on a bright green accent (about 2.3:1).
+COLORREF OnColor(COLORREF fill) { return ui::OnFill(fill, RGB(245, 247, 250), RGB(10, 20, 30)); }
 
 // Palette over the theme (legacy §5 tokens), with the high-contrast fallback to system colours.
 struct Pal {

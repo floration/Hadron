@@ -9,6 +9,7 @@ std::vector<std::unique_ptr<Module>> MakeAllModules() {
     v.push_back(MakeDiskMapModule());
     v.push_back(MakeRunAsModule());
     v.push_back(MakeBiosModule());
+    v.push_back(MakeServicesModule());
     return v;
 }
 

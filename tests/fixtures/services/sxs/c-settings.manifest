@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Hand-written fixture in the shape of a decompressed WinSxS component manifest (not Microsoft's file).
+     DPS: only configuration-setting defaults (Start 2, DelayedAutostart 1): low confidence; the KB's tables say
+     Automatic without the delay, so it is shown, not applied. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
+  <assemblyIdentity name="Microsoft-Windows-Fixture-DPS" version="10.0.19041.1" processorArchitecture="amd64" />
+  <configuration xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+    <configurationSchema>
+      <xsd:schema>
+        <xsd:element name="Start" default="2" wcm:handler="regkey('HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\DPS')" wcm:legacyName="Start" />
+        <xsd:element name="DelayedAutoStart" default="1" wcm:handler="regkey('HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\DPS')" wcm:legacyName="DelayedAutostart" />
+      </xsd:schema>
+    </configurationSchema>
+  </configuration>
+</assembly>

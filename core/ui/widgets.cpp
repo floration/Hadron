@@ -2,6 +2,7 @@
 #include "core/ui/widgets.h"
 #include "core/ui/draw.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cwctype>
 
@@ -26,13 +27,13 @@ struct Pal {
     COLORREF text3()  const { return Pick(t.text3,  COLOR_GRAYTEXT); }
     COLORREF accent() const { return Pick(t.accent, COLOR_HIGHLIGHT); }
     COLORREF selBg()  const { return Pick(t.accent, COLOR_HIGHLIGHT); }
-    // Readable text on the selection fill: system colour in high contrast, else black or white by
-    // the fill's luminance (Rec. 601), so a saturated accent of any theme stays legible.
+    // Readable text on the selection fill: system colour in high contrast, else black or white (below),
+    // so the accent of any theme, or any Windows accent, stays legible.
     COLORREF selText()const {
         if (t.highContrast) return GetSysColor(COLOR_HIGHLIGHTTEXT);
-        COLORREF c = t.accent;
-        int lum = (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000;
-        return lum > 140 ? RGB(16, 18, 22) : RGB(245, 247, 250);
+        // White while it reaches 4.5:1 (the Windows convention; 4.50:1 on the default blue 0078D7), else black:
+        // ui::OnFill, the one text-on-fill rule every module uses.
+        return OnFill(t.accent);
     }
 };
 }  // namespace
@@ -156,12 +157,19 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
         int w = S(cols_[i].width, c.dpi);
         RECT cell{x + pad, hdr.top, x + w - pad, hdr.bottom};
         bool sorted = (i == sortCol_);
+        // The sort triangle gets its own space at the inner edge: the title ellipsises before it instead of
+        // running under it on a narrow column.
+        const int arrowW = S(8, c.dpi) + S(6, c.dpi);
+        if (sorted) {
+            if (cols_[i].rightAlign) cell.left = std::min(cell.right, cell.left + arrowW);
+            else                     cell.right = std::max(cell.left, cell.right - arrowW);
+        }
         COLORREF hc = (i == hotHeader_ || sorted) ? p.text1() : p.text2();
         if (cols_[i].rightAlign) TextRight(dc, cols_[i].title, cell, c.fonts.semi, hc);
         else                     TextLeft(dc, cols_[i].title, cell, c.fonts.semi, hc);
         if (sorted) {
             // Sort triangle at the inner edge.
-            int ax = cols_[i].rightAlign ? x + pad + S(4, c.dpi) : x + w - pad - S(9, c.dpi);
+            int ax = cols_[i].rightAlign ? x + pad : x + w - pad - S(8, c.dpi);
             int ay = hdr.top + (headerH - S(6, c.dpi)) / 2;
             int s = S(8, c.dpi), h = S(5, c.dpi);
             POINT tri[3];
@@ -203,8 +211,12 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
             cx += w;
         }
         if (selected && focused) {
-            RECT fr{row.left + S(2, c.dpi), row.top, row.right - S(2, c.dpi), row.bottom};
-            FocusRectC(dc, fr, p.accent());
+            // The focus row is always the selected row, which is filled with the accent: an accent outline
+            // there is invisible. Draw it in the selection text colour (the best of black/white on the
+            // fill, or the system highlight text in high contrast), inset inside the rounded fill.
+            const int in = S(3, c.dpi);
+            RECT fr{row.left + S(2, c.dpi) + in, row.top + in, row.right - S(2, c.dpi) - in, row.bottom - in};
+            FocusRectC(dc, fr, p.selText());
         }
     }
     RestoreDC(dc, savedClip);

@@ -1,0 +1,5 @@
+Plan: Default: as first seen (Drivers)
+Source: default-first:drivers
+Rows: 0 ticked, 0 unticked, 0 kept, protected or not applied; already set: 42
+Note: Start types as Hadron first saw this PC on 2026-11-01. This is not Windows' default.
+Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.

@@ -1,0 +1,33 @@
+Plan: Minimum (Drivers)
+Source: preset:minimum:drivers
+Rows: 6 ticked, 0 unticked, 1 kept, protected or not applied; already set: 0
+Note: 7 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
+Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
+[x] hyperkbd  Manual -> Disabled  (3/- -> 4/-)
+    why: Hyper-V guest keyboard; kept when this Windows is a VM guest
+    basis: reasoning -- Hardware-absent: physical hardware has no Hyper-V synthetic keyboard.
+    evidence: not a virtual machine (firmware vendor strings): guest integration is unused
+[x] HyperVideo  Manual -> Disabled  (3/- -> 4/-)
+    why: Hyper-V guest display; kept when this Windows is a VM guest
+    basis: reasoning -- Hardware-absent: physical hardware has no Hyper-V synthetic display.
+    evidence: not a virtual machine (firmware vendor strings): guest integration is unused
+[x] igfxn  Manual -> Disabled  (3/- -> 4/-)
+    why: no Intel integrated graphics device was ever seen
+    basis: reasoning -- Hardware-absent: no devnode for this driver was ever recorded on this PC.
+    evidence: no devnode for service igfxn ever seen
+[x] IntcDAud  Manual -> Disabled  (3/- -> 4/-)
+    why: no Intel display audio device was ever seen
+    basis: reasoning -- Hardware-absent: no devnode for this driver was ever recorded on this PC.
+    evidence: no devnode for service IntcDAud ever seen
+[x] luafv  Auto -> Disabled  (2/- -> 4/-)
+    why: only old programs without a manifest need it; test it
+    basis: reasoning -- Not named in the Microsoft sources Hadron checked. Programs with a UAC manifest, 64-bit programs and programs run as administrator are never virtualized.
+[x] Serial  Manual -> Disabled  (3/- -> 4/-)
+    why: no built-in serial port was ever seen
+    basis: reasoning -- Hardware-absent: no devnode for this driver was ever recorded on this PC.
+    evidence: no devnode for service Serial ever seen
+[-] BTHUSB  Manual -> Disabled  (3/- -> 4/-)
+    Kept: hardware in use or seen before. present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth, last arrived 2026-11-09)
+    why: no Bluetooth device was ever seen
+    basis: reasoning -- Hardware-absent only; Bluetooth is a hot-plug class, so the row is unticked even then.
+    evidence: present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth, last arrived 2026-11-09)
