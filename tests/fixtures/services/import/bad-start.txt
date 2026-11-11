@@ -1,0 +1,8 @@
+HXPRESET	1
+hadron	0.1.0
+build	19045
+tab	services
+name	From a forum post
+DiagTrack	disabled
+dmwappushservice	disabled
+SysMain	off

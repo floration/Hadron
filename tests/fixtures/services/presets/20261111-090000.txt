@@ -1,0 +1,16 @@
+HXPRESET	1
+hadron	0.1.0
+build	19045
+tab	services
+name	Gaming rig
+DiagTrack	disabled
+dmwappushservice	disabled
+MapsBroker	manual
+SysMain	disabled
+Spooler	manual
+Fax	disabled
+WSearch	auto-delayed
+WinDefend	disabled
+RpcSs	disabled
+HxNotOnThisPc	manual
+nvlddmkm	disabled
