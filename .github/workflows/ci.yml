@@ -38,6 +38,10 @@ jobs:
           wineboot -i || true
           wine build/HadronHello.exe --selftest
           wine build/HadronUikit.exe --selftest
+          python3 tests/fixtures/make_diskmap_tree.py dmfix
+          wine build/HadronDiskMap.exe --selftest
+          wine build/HadronDiskMap.exe --selftest --fixture dmfix/tree
+          wine build/Hadron.exe --solo diskmap --selftest --fixture dmfix/tree
       - name: Screenshots (Wine + Xvfb)
         run: |
           export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
@@ -49,6 +53,16 @@ jobs:
             for ly in baseline console; do
               shot build/HadronUikit.exe --theme $th --layout $ly --screenshot shots/uikit-$ly-$th.png
             done
+          done
+          for th in dark light; do
+            for ly in baseline console; do
+              shot build/HadronDiskMap.exe --fixture dmfix/tree --theme $th --layout $ly --screenshot shots/diskmap-$ly-$th.png
+            done
+          done
+          # Non-solo suite shot: the module drawn under the host's content offset (catches clip bugs
+          # that standalone and --solo hide).
+          for ly in baseline console; do
+            shot build/Hadron.exe --module diskmap --fixture dmfix/tree --layout $ly --screenshot shots/diskmap-suite-$ly.png
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -80,6 +94,10 @@ jobs:
         run: |
           build\HadronHello.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronUikit.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tests\fixtures\make_diskmap_tree.py dmfix; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronDiskMap.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronDiskMap.exe --selftest --fixture dmfix\tree; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\Hadron.exe --solo diskmap --selftest --fixture dmfix\tree; if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Screenshots
         shell: pwsh
         run: |
@@ -90,6 +108,14 @@ jobs:
             foreach ($ly in 'baseline','console') {
               build\HadronUikit.exe --theme $th --layout $ly --screenshot "shots\uikit-$ly-$th.png"
             }
+          }
+          foreach ($th in 'dark','light') {
+            foreach ($ly in 'baseline','console') {
+              build\HadronDiskMap.exe --fixture dmfix\tree --theme $th --layout $ly --screenshot "shots\diskmap-$ly-$th.png"
+            }
+          }
+          foreach ($ly in 'baseline','console') {
+            build\Hadron.exe --module diskmap --fixture dmfix\tree --layout $ly --screenshot "shots\diskmap-suite-$ly.png"
           }
       - uses: actions/upload-artifact@v4
         with:
