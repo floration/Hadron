@@ -717,11 +717,50 @@ int RunSelftest(const std::vector<std::wstring>& args) {
             check(br && !br->blocked.empty() && br->blocked.find(L"sysok") != std::wstring::npos,
                   L"Restore first snapshot: a live System-start driver without sysok is blocked (logic M6)");
         }
-        Plan pc = BuildControl(*ItemOf(w.items, L"igfxn"), 1, w.fx.backend, w.items);
+        Plan pc = BuildControl(*ItemOf(w.items, L"igfxn"), 1, w.fx.backend, w.items, w.ctx);
         check(!pc.rows.empty() && !pc.rows[0].blocked.empty(), L"guard: drivers are never loaded or unloaded live");
-        Plan pr = BuildControl(*ItemOf(w.items, L"Audiosrv"), 2, w.fx.backend, w.items);
-        check(pr.rows.size() >= 2 && pr.rows.front().ctl == Op::Stop && pr.rows.back().ctl == Op::Start,
+        Plan pr = BuildControl(*ItemOf(w.items, L"Spooler"), 2, w.fx.backend, w.items, w.ctx);
+        check(pr.rows.size() >= 2 && pr.rows.front().ctl == Op::Stop && pr.rows.back().ctl == Op::Start && pr.Blocked() == 0,
               L"control: restart stops (dependents first), then starts");
+        // R5: never-touch items are not started, stopped or restarted (BFE would take the firewall down).
+        bool allBlocked = true;
+        for (const wchar_t* n : {L"BFE", L"Audiosrv", L"EventLog", L"Dhcp", L"RpcSs"}) {
+            const SvcItem* it = ItemOf(w.items, n);
+            for (int what = 0; what < 3 && it; what++) {
+                Plan pb = BuildControl(*it, what, w.fx.backend, w.items, w.ctx);
+                if (pb.rows.empty()) allBlocked = false;
+                for (auto& r : pb.rows) if (r.blocked.find(L"Protected") != 0) allBlocked = false;
+            }
+            if (!it) allBlocked = false;
+        }
+        check(allBlocked, L"R5: Start, Stop and Restart of never-touch items (BFE, Audiosrv, EventLog, Dhcp, RpcSs) are refused, every row blocked");
+        FakeBackend fb;
+        SvcItem base = Mk(L"HxBase", 2, {}), dep = Mk(L"Dhcp", 2, {L"HxBase"});
+        base.state = dep.state = SERVICE_RUNNING;
+        fb.SetItems({base, dep});
+        std::vector<SvcItem> two{base, dep};
+        Plan pdp = BuildControl(base, 1, fb, two, w.ctx);
+        check(pdp.Included() == 0 && pdp.Blocked() == (int)pdp.rows.size() && !pdp.rows.empty() &&
+                  pdp.rows[0].blocked.find(L"would also stop Dhcp") != std::wstring::npos,
+              L"R5: stopping a service whose running dependent is never-touch (Dhcp) is refused");
+        // R13: a failed stop starts again what the run already stopped.
+        FakeBackend fr;
+        SvcItem x = Mk(L"HxX", 2, {}), d1 = Mk(L"HxD1", 2, {L"HxX"}), d2 = Mk(L"HxD2", 2, {L"HxX"});
+        x.state = d1.state = d2.state = SERVICE_RUNNING;
+        x.controls = d1.controls = d2.controls = SERVICE_ACCEPT_STOP;
+        fr.SetItems({x, d1, d2});
+        std::vector<SvcItem> three{x, d1, d2};
+        Plan rs = BuildControl(x, 2, fr, three, w.ctx);
+        fr.faults.stopFail.insert(L"hxx");
+        Store cs(NewTempDir(L"control"));
+        ApplyEnv ce = EnvFor(&fr, &cs);
+        ApplyResult cr;
+        bool cok = RunControl(rs, ce, &cr);
+        bool allUp = true;
+        for (auto& i : fr.Items()) if (i.state != SERVICE_RUNNING) allUp = false;
+        int again = 0;
+        for (auto& l : cr.lines) if (l.find(L"started again after the failed stop") != std::wstring::npos) again++;
+        check(!cok && allUp && again == 2, L"R13: Restart whose stop of the service fails starts the 2 dependents it stopped again");
     }
 
     // ---- plans on the fixture ------------------------------------------------------------------------------

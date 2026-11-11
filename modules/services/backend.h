@@ -64,6 +64,7 @@ struct FakeFaults {
     std::set<std::wstring> changeOnQuery; // the next Query first flips the item's start type (changed since plan)
     std::set<std::wstring> verifyMismatch;// SetStart "succeeds" but Windows keeps the old value
     std::set<std::wstring> startRace;     // a start request finds it already running (someone else started it first)
+    std::set<std::wstring> stopFail;      // a stop request fails (the service keeps running)
     std::map<std::wstring, int> stopPendingQueries;   // a STOP_PENDING item reads STOPPED after this many more Queries
     int setStartCalls = 0;
 };

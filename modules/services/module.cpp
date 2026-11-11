@@ -1014,7 +1014,7 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
             if (it) p = BuildSingle(*it, r.target, j.items, c);
             break;
         case PlanReq::Control:
-            if (it && b) p = BuildControl(*it, r.what, *b, j.items);
+            if (it && b) p = BuildControl(*it, r.what, *b, j.items, c);
             break;
         case PlanReq::Undo:
             if (b && r.logIndex >= 0 && r.logIndex < (int)j.logs.size()) p = BuildUndo(j.logs[r.logIndex], *b, j.items, c);
@@ -2169,7 +2169,7 @@ void ServicesModule::PaintListMode(HDC dc, const RECT& rc, int y) {
         bx += Sc(74);
         bool running = s->state == SERVICE_RUNNING;
         bool stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
-        bool cen = can && s->kind != Kind::UserTemplate;
+        bool cen = can && s->kind != Kind::UserTemplate && !g.neverTouch;   // R5: never-touch: no start/stop either
         bx += ButtonL(dc, bx, ay2, L"Start", ID_CTL + 0, false, cen && !running && s->cfg.start != 4) + Sc(6);
         bx += ButtonL(dc, bx, ay2, L"Stop", ID_CTL + 1, false, cen && stoppable) + Sc(6);
         bx += ButtonL(dc, bx, ay2, L"Restart", ID_CTL + 2, false, cen && stoppable) + Sc(6);
@@ -2412,7 +2412,7 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
         if (s) {
             Guard g = CheckGuard(*s, ctx_);
             en = can && !g.neverTouch && s->kind != Kind::UserInstance && s->cfg.start >= 2;
-            cen = can && s->kind != Kind::UserTemplate;
+            cen = can && s->kind != Kind::UserTemplate && !g.neverTouch;   // R5
             running = s->state == SERVICE_RUNNING;
             stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
         }
@@ -2875,7 +2875,7 @@ void ServicesModule::PaintConsoleDetail(HDC dc, const RECT& det, const std::wstr
         if (!drv) {
             bool running = s->state == SERVICE_RUNNING;
             bool stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
-            bool cen = can && s->kind != Kind::UserTemplate;
+            bool cen = can && s->kind != Kind::UserTemplate && !g.neverTouch;   // R5: never-touch: no start/stop either
             lr = RECT{ax, ay, ax + Sc(100), ay + Sc(18)};
             TextLeft(dc, L"now", lr, f.mono, p.mute);
             ax += TextW(dc, L"now ", f.mono);

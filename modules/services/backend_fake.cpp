@@ -108,6 +108,11 @@ bool FakeBackend::Control(const std::wstring& name, Op op, const std::atomic<boo
         i->state = SERVICE_RUNNING;
         controlLog.push_back(race ? L"start " + name + L" (already running)" : L"start " + name);
     } else {
+        if (faults.stopFail.count(Lower(name))) {
+            controlLog.push_back(L"stop " + name + L" (failed)");
+            *err = L"timed out waiting; last state Running";
+            return false;
+        }
         i->state = SERVICE_STOPPED;
         controlLog.push_back(L"stop " + name);
     }

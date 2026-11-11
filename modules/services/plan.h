@@ -70,6 +70,7 @@ struct Plan {
     int alreadySet = 0, unknown = 0;
     std::vector<std::wstring> notes;
     bool restartNeeded = true;         // start-type changes act at the next restart
+    int what = -1;                     // control plans: 0 start, 1 stop, 2 restart
     int Included() const;
     int Optional() const;
     int Blocked() const;
@@ -79,7 +80,9 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
 Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const Ctx& c);
 Plan BuildSingle(const SvcItem& item, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c);
 // Stop / Start / Restart a service (spec §5.2): dependents that will stop are listed first.
-Plan BuildControl(const SvcItem& item, int what /*0 start, 1 stop, 2 restart*/, Backend& b, const std::vector<SvcItem>& items);
+// Never-touch items (and anything whose stop would stop one as a dependent) come back with every row blocked (R5).
+Plan BuildControl(const SvcItem& item, int what /*0 start, 1 stop, 2 restart*/, Backend& b, const std::vector<SvcItem>& items,
+                  const Ctx& c);
 // Undo and Resume refuse a log whose machine GUID or build differs from the PC's (empty plan, the reason as a
 // note), and run every row through the same guards as a plan (CheckGuard on the live item, no Boot start, no
 // Boot/System on a service, System-start drivers only with sysok): a log has a CRC, not an author.
@@ -140,7 +143,8 @@ struct ApplyResult {
 };
 
 bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r);
-// Live start/stop/restart (control plans): confirm + log line, no undo entry (spec §5.2).
+// Live start/stop/restart (control plans): confirm + log line, no undo entry (spec §5.2). A failed stop starts again,
+// newest first, what this run already stopped (R13).
 bool RunControl(const Plan& p, const ApplyEnv& env, ApplyResult* r);
 
 // ---- logs, interrupted applies, drift ------------------------------------------------------------------

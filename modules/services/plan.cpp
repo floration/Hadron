@@ -415,11 +415,11 @@ Plan BuildSingle(const SvcItem& s, StartCfg target, const std::vector<SvcItem>& 
     return p;
 }
 
-Plan BuildControl(const SvcItem& s, int what, Backend& b, const std::vector<SvcItem>& items) {
-    (void)items;
+Plan BuildControl(const SvcItem& s, int what, Backend& b, const std::vector<SvcItem>& items, const Ctx& c) {
     Plan p;
     p.kind = PlanKind::Control;
     p.tab = TAB_SERVICES;
+    p.what = what;
     p.restartNeeded = false;
     static const wchar_t* const kWhat[] = {L"Start", L"Stop", L"Restart"};
     p.title = std::wstring(kWhat[what]) + L" " + s.name;
@@ -450,6 +450,23 @@ Plan BuildControl(const SvcItem& s, int what, Backend& b, const std::vector<SvcI
     }
     if (what != 0 && !deps.empty())
         p.notes.push_back(std::to_wstring(deps.size()) + L" running service(s) depend on it and stop first.");
+    // R5: never-touch items (the floor: RPC, event log, networking, BFE and the firewall, audio, WMI, crypto ...) are not
+    // started, stopped or restarted either (spec §6: no single-item change), and neither is anything whose stop would
+    // stop one of them as a dependent. Every row is blocked, so nothing runs.
+    std::wstring refuse;
+    Guard g = CheckGuard(s, c);
+    if (g.neverTouch) refuse = L"Protected: Hadron never starts or stops this. " + g.reason;
+    for (auto& d : deps) {
+        if (!refuse.empty()) break;
+        const SvcItem* di = nullptr;
+        for (auto& i : items) if (IEq(i.name, d)) di = &i;
+        if (di && CheckGuard(*di, c).neverTouch)
+            refuse = L"Protected: stopping it would also stop " + d + L", which Hadron never stops. " + CheckGuard(*di, c).reason;
+    }
+    if (!refuse.empty())
+        for (auto& r : p.rows) { r.blocked = refuse; r.include = false; }
+    if (what != 0 && !deps.empty() && refuse.empty())
+        p.notes.push_back(L"If a stop fails, the services this plan already stopped are started again.");
     p.notes.push_back(L"Live control: logged, no undo entry. The start type is not changed.");
     return p;
 }
@@ -954,19 +971,40 @@ bool RunControl(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     std::wstring err;
     if (!lock.Acquire(env.lockName, &err)) { r->aborted = true; r->error = err; return false; }
     size_t k = 0;
+    // The services this run stopped, in order, while it is still stopping (R13): a failed stop starts them again, so a
+    // Restart or a Stop that can't stop its target doesn't leave the dependents it already stopped down.
+    std::vector<std::wstring> stopped;
+    bool stopPhase = true;
     for (auto& row : p.rows) {
         if (!row.blocked.empty()) continue;
-        if (env.cancel && env.cancel->load()) { r->cancelled = true; break; }
+        if (env.cancel && env.cancel->load()) {
+            r->cancelled = true;
+            if (stopPhase && !stopped.empty())
+                r->lines.push_back(L"cancelled: left stopped: " + Join(stopped, L", ") + L" (start them again from the list)");
+            break;
+        }
         if (env.progress) env.progress->store(k++);
+        if (row.ctl == Op::Start) stopPhase = false;
         std::wstring e;
         bool ok = env.backend->Control(row.name, row.ctl, env.cancel, &e);
         std::wstring what = row.ctl == Op::Stop ? L"stop " : L"start ";
         r->lines.push_back((ok ? L"ok " : L"fail ") + what + row.name + (ok ? L"" : L": " + e));
-        if (ok) r->ok++;
-        else {
-            r->failed++;
-            if (row.ctl == Op::Stop) break;   // never start things again after a failed stop
+        if (ok) {
+            r->ok++;
+            if (row.ctl == Op::Stop) stopped.push_back(row.name);
+            continue;
         }
+        r->failed++;
+        if (row.ctl != Op::Stop) continue;
+        // Never go on to start the target after a failed stop; put back what this run stopped, newest first.
+        for (auto it = stopped.rbegin(); it != stopped.rend(); ++it) {
+            std::wstring e2;
+            bool back = env.backend->Control(*it, Op::Start, env.cancel, &e2);   // the request is sent even when cancelled
+            r->lines.push_back(back ? L"ok start " + *it + L" (started again after the failed stop)"
+                                    : L"fail start " + *it + L": " + e2 + L" (left stopped)");
+            if (!back) r->failed++;
+        }
+        break;
     }
     return r->failed == 0;
 }
