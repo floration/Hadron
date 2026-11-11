@@ -136,9 +136,17 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   - `EnsureRoot` runs at every load and every apply, whoever made the folder. No component below the volume or
     share root may be a reparse point. The root is opened with `FILE_FLAG_OPEN_REPARSE_POINT |
     FILE_FLAG_BACKUP_SEMANTICS` and checked again, its owner must be Administrators or SYSTEM (a standard user can
-    create folders under ProgramData), and the protected DACL is applied again. If any of that fails, nothing is
-    read from or written to the folder: no first.txt, no undo logs, changes off, and a banner gives the reason.
-  - Missing parents are created up to the volume or share root (UNC and `\\?\` roots included).
+    create folders under ProgramData), and the protected DACL is applied again. The folder that holds the root
+    (`%ProgramData%\Hadron`; not checked when it is a volume or share root) must be owned by Administrators,
+    SYSTEM or TrustedInstaller, checked before the root is created: its owner could rename the root aside and put
+    their own in its place. If any of that fails, nothing is read from or written to the folder: no first.txt, no
+    undo logs, changes off, and a banner gives the reason.
+  - Missing parents are created up to the volume or share root (UNC and `\\?\` roots included); the holding
+    folder is created with owner Administrators, the root with the protected descriptor.
+  - Test hooks: Wine can't set a folder owner or make a reparse point, so `Store::AcceptTokenUserAsOwner()` and
+    `Store::InjectedReparsePoint()` exist only in a build configured with `-DHADRON_SERVICES_TEST_HOOKS=ON`
+    (`HX_SERVICES_TEST_HOOKS`). Release builds, and the CI builds that are not the Wine services run, have no
+    such code; the Windows CI selftest runs the owner and reparse checks for real.
   - Every file is `CREATE_NEW` and flushed. Nothing is overwritten.
   - A corrupt `first.txt` is renamed aside.
   - `--data-dir` overrides the location; it is kept as a full path without the `\\?\` prefix (README shows it).
@@ -147,9 +155,11 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   - Rows the SCM refuses to an administrator (`CanWrite` reports access denied) are marked. While the toggle is
     off they are left out.
   - With the toggle on, the apply thread:
-    1. starts TI only if it is STOPPED (through the Backend). Only a start that succeeded from STOPPED counts as
-       "Hadron started it"; START_PENDING is someone else's start, waited for and never claimed. The claim is
-       reset at every Acquire and Release, so a later apply never stops a TI that Windows started;
+    1. starts TI only if it is STOPPED (through the Backend; STOP_PENDING is waited out first). It counts as
+       "Hadron started it" only when `Control` reports that Hadron's own start request started it, not
+       `ERROR_SERVICE_ALREADY_RUNNING` (Windows won a race); START_PENDING is someone else's start, waited for and
+       never claimed. The claim is reset at every Acquire and Release, so a later apply never stops a TI that
+       Windows started;
     2. enables SeDebugPrivilege on the thread only (checking `ERROR_NOT_ALL_ASSIGNED`);
     3. impersonates winlogon's SYSTEM token from the same session;
     4. duplicates TI's token;
@@ -161,9 +171,13 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
     never searches other drives.
   - It loads the offline hive, reads `Select\Current`, and writes `Start`/`DelayedAutostart` only for keys that
     exist. Every `reg add` and the `reg unload` are checked; a failed load also names a still-loaded HXOFF.
+  - `:put` reads the key's current `Start` first and skips a key that is Boot or System start now (0 or 1),
+    counting it in the Done line: what a script restores was judged at an earlier state, and a storage driver that
+    became the boot path since must keep its value.
   - `:put` has no `( )` block: the name goes into `N` on a plain line and every branch is a `goto` (real cmd.exe
     parses a whole block first, so a `)` in a name ended it). CI runs an echo-only variant
-    (`tests/golden/services/restore-dryrun.cmd`) on real cmd.exe with an extra `Intel(R) ... (x86)` row.
+    (`tests/golden/services/restore-dryrun.cmd`) on real cmd.exe with an extra `Intel(R) ... (x86)` row and a
+    row whose `Start` reads 0, which must be skipped.
   - `CmdSafeName` is an allow-list (ASCII letters, digits, space, `_ - . { } # $ @ +  ~`). Every other name,
     `Intel(R) ...` included, goes to `.reg` files (README section C).
   - README section E says rows that needed TrustedInstaller may print FAILED in WinRE and Safe Mode.
@@ -193,7 +207,20 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 - **Dependency check** (spec §5.3) works on the start every item ends with if the ticked rows are applied, in
   both directions (disabling X while an enabled item depends on it; raising X while something it needs stays
   Disabled), iterates to a fixed point, and runs again after every toggle. A row it unticked is ticked again when
-  the reason goes; a row the user toggled keeps the user's choice.
+  the reason goes; a row the user toggled keeps the user's choice, and a row the user ticks while it has a warning
+  stays ticked with the warning until the warning goes.
+  - Every plan source runs it: presets, Default, stock, Single, Resume and Undo, and `MarkTi` runs it again after
+    leaving rows out for TrustedInstaller (a row left out keeps its item at its current start). A TI toggle change
+    rebuilds the plan, so it runs again then too.
+  - Plans that both raise and lower can go round in a circle (raising Y needs X; another row disables X; each
+    warning exists only while the other row is ticked). When a state repeats, or at the round bound, it finishes
+    with untick-only rounds, which always settle, and adds a plan note ("The dependency check did not settle ...").
+    Rows left unticked that way say so.
+  - Invariant (selftest, including Analyze's fuzzer with its seed and a richer run with groups, user instances,
+    blocked rows and toggle sequences): no ticked row disables an item that an item enabled at the end depends on,
+    and no ticked row raises an item whose dependency ends Disabled, except a row the user ticked over its shown
+    warning.
+  - Dependents and group members are indexed once per run; a round costs rows x (dependents + dependencies).
 - **Auto (delayed)** is not offered for a service in a load-order group: Windows doesn't allow it (docs D1).
 - **`--ti on`** is honoured only for fixture renders (`--fixture`, `--screenshot`); live, the toggle is off at
   every launch (spec §5.6).
@@ -232,6 +259,6 @@ Regression fixtures from Analyze (written by `make_services_fixture.py`, compare
 
 CI runs it in the Wine job. The MSVC job runs:
 - the selftests, the golden plans and the screenshots;
-- `restore-dryrun.cmd C:` on real cmd.exe, which must reach `Done: 5 restored` with no syntax error;
+- `restore-dryrun.cmd C:` on real cmd.exe, which must reach `Done: 5 restored` with no syntax error and skip the injected row whose Start reads 0 (Boot);
 - `--live-test HadronTestSvc` on a service it creates and deletes with `sc.exe`;
 - the TI variant, with `continue-on-error`.
