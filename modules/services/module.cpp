@@ -354,7 +354,7 @@ private:
     void DoExport();
     void DoImport();
     void ImportDone(const CustomPreset* p, const std::wstring& path, const std::wstring& err);
-    void OpenCustomPlan(const CustomPreset& p);
+    bool OpenCustomPlan(const CustomPreset& p);   // false: no plan opened, presetErr_ says why
     void BackFromPage();            // Back/Esc on the manager or the measure page
     void StartMeasure(const std::wstring& phase, const std::wstring& forWhat);
     void RefreshPresetList();
@@ -1393,7 +1393,7 @@ void ServicesModule::OnPlanned() {
         plan_ = std::move(planJob_.out);
         if (replan_) {
             replan_ = false;
-            if (mode_ == Mode::Plan && planReq_.type != PlanReq::None) { OpenPlan(planReq_, replanRebuild_); return; }
+            if (planReq_.type != PlanReq::None) { OpenPlan(planReq_, replanRebuild_); return; }
         }
     }
     if (planReq_.type == PlanReq::None) return;   // closed while it was being built
@@ -1612,7 +1612,13 @@ void ServicesModule::OnClickId(int id) {
     if (id == ID_SAVE_CANCEL) { saving_ = false; if (fromPlan_ && planReq_.type != PlanReq::None) BackFromPage(); else focus_ = Focus::List; return; }
     if (id == ID_NAME) { focus_ = Focus::Name; return; }
     if (id == ID_PRE_ERR_HIDE) { presetErr_.clear(); return; }
-    if (id == ID_PRE_PLAN) { if (const CustomPreset* cp = SelectedPreset()) OpenCustomPlan(*cp); return; }
+    if (id == ID_PRE_PLAN) {
+        if (const CustomPreset* cp = SelectedPreset()) {
+            presetMsg_.clear();
+            if (!OpenCustomPlan(*cp)) presetErr_ = L"No plan opened: " + presetErr_;
+        }
+        return;
+    }
     if (id == ID_PRE_REMOVE) {
         const CustomPreset* cp = SelectedPreset();
         std::wstring why;
@@ -4380,10 +4386,12 @@ std::wstring SafeFileName(const std::wstring& n) {
 // Browse buttons, never drag-and-drop: an elevated window gets no drops from Explorer (UIPI, hard rule 4). The dialogs
 // open on the UI thread; the worker only writes or reads the file picked.
 void ServicesModule::DoExport() {
-    const CustomPreset* cp = SelectedPreset();
-    if (!cp || fileW_.Running()) return;
+    const CustomPreset* sel = SelectedPreset();
+    if (!sel || fileW_.Running()) return;
+    // A copy: the modal dialog below pumps messages, and a reload in that time may replace presets_.
+    const CustomPreset cp = *sel;
     std::vector<wchar_t> file(32768, 0);
-    std::wstring def = SafeFileName(cp->name) + L".txt";
+    std::wstring def = SafeFileName(cp.name) + L".txt";
     std::copy(def.begin(), def.end(), file.begin());
     std::wstring initDir = host_->Prefs().GetStr(L"presetDir");
     OPENFILENAMEW ofn{};
@@ -4408,7 +4416,7 @@ void ServicesModule::DoExport() {
     FileJob j;
     j.kind = FileJob::Export;
     j.path = path;
-    j.preset = *cp;
+    j.preset = cp;
     StartFileJob(std::move(j));
 }
 
@@ -4448,13 +4456,26 @@ void ServicesModule::ImportDone(const CustomPreset* p, const std::wstring& path,
     }
     presetErr_.clear();
     presetMsg_.clear();
-    OpenCustomPlan(*p);
+    if (!OpenCustomPlan(*p)) {
+        if (mode_ != Mode::Presets) OpenPresets();
+        presetErr_ = L"Imported \"" + p->name + L"\" from " + sys::ToShell(path) + L", but no plan opened: " + presetErr_;
+        Status(L"Services: " + presetErr_);
+        return;
+    }
     Status(L"Services: imported \"" + p->name + L"\" from " + sys::ToShell(path) +
            L". It only filled this plan: nothing changes until you press Apply. Save as preset keeps it.");
 }
 
-void ServicesModule::OpenCustomPlan(const CustomPreset& p) {
-    if (!loaded_ || applyW_.Running() || items_.empty()) return;
+bool ServicesModule::OpenCustomPlan(const CustomPreset& p) {
+    if (!loaded_ || items_.empty()) {
+        presetErr_ = !loaded_ ? L"the services and drivers are still being read. Open it again when the list has loaded."
+                              : L"no services or drivers were read, so there is nothing to plan against. Refresh and try again.";
+        return false;
+    }
+    if (applyW_.Running()) {
+        presetErr_ = L"an apply is running. Open it again when the apply has finished.";
+        return false;
+    }
     PlanReq r;
     r.type = PlanReq::Custom;
     r.tab = p.tab;
@@ -4462,6 +4483,7 @@ void ServicesModule::OpenCustomPlan(const CustomPreset& p) {
     saving_ = false;
     fromPlan_ = false;
     OpenPlan(r);
+    return true;
 }
 
 void ServicesModule::StartMeasure(const std::wstring& phase, const std::wstring& forWhat) {
@@ -4603,7 +4625,7 @@ std::vector<Para> ServicesModule::MeasureDoc() const {
     Pal p(host_->Theme());
     std::vector<Para> d;
     MeasurePair pr = LatestPair(measures_);
-    d.push_back({P_HEAD, L"", L"Basis: owner-measured", kNoColor, SIDE_LEFT});
+    d.push_back({P_HEAD, L"", L"Basis: owner-measured (measured on this PC by you)", kNoColor, SIDE_LEFT});
     d.push_back({P_TEXT, L"",
                  L"Measured on this PC by Hadron, one sample each, with the conditions below. Hadron never predicts what a "
                  L"change saves: these recorded values are the only numbers it shows about one.",
@@ -4626,8 +4648,16 @@ std::vector<Para> ServicesModule::MeasureDoc() const {
                          p.warnT});
         if (BuildNumber(b.build) != BuildNumber(a.build))
             d.push_back({P_TEXT, L"", L"Windows was updated between them (build " + b.build + L", then " + a.build + L"): the update changes the numbers too.", p.warnT});
+        // What Hadron changed between the two (its undo logs): a difference with no apply between them isn't Hadron's.
+        auto applied = AppliesBetween(b, a, logs_);
+        d.push_back({P_HEAD, L"", L"Between them", kNoColor});
+        if (applied.empty())
+            d.push_back({P_TEXT, L"", L"No Hadron apply was recorded between these two: the difference is not from a Hadron change.", p.warnT});
+        for (auto& ap : applied)
+            d.push_back({P_TEXT, L"", L"Applied between them: " + SourceLabel(ap.source) + L" at " + ap.when + L" UTC.", kNoColor});
         if (b.ramTotal != a.ramTotal)
-            d.push_back({P_TEXT, L"", L"The installed memory Windows reports differs between them.", p.warnT});
+            d.push_back({P_TEXT, L"", L"The usable physical memory Windows reports differs between them (memory was added or removed, "
+                                      L"or reserved differently).", p.warnT});
     }
     d.push_back({P_HEAD, L"", L"Test it: a fair comparison", kNoColor, SIDE_RIGHT});
     d.push_back({P_TEXT, L"",
@@ -4647,7 +4677,8 @@ std::vector<Para> ServicesModule::MeasureDoc() const {
                  L"with its own frame-time capture, before and after.",
                  kNoColor});
     d.push_back({P_HEAD, L"", L"What is measured", kNoColor});
-    d.push_back({P_KV, L"RAM in use", L"installed memory minus available memory (GlobalMemoryStatusEx)", kNoColor});
+    d.push_back({P_KV, L"RAM in use", L"physical memory Windows can use (a little less than installed) minus available memory "
+                                      L"(GlobalMemoryStatusEx)", kNoColor});
     d.push_back({P_KV, L"Committed", L"the commit charge: memory Windows has promised to processes, in RAM or the page file", kNoColor});
     d.push_back({P_KV, L"Processes", L"every process in a snapshot of the process list", kNoColor});
     d.push_back({P_KV, L"svchost.exe", L"processes named svchost.exe: the shared service hosts", kNoColor});
@@ -4909,7 +4940,7 @@ void ServicesModule::PaintMeasureMode(HDC dc, const RECT& rc, int y, int bottom)
     RECT tr{pad, y, right - Sc(10), y + btnH};
     TextLeft(dc, L"Measured before/after", tr, f.semi, p.text);
     y += btnH + Sc(6);
-    std::wstring lead = L"Basis: owner-measured. RAM, commit and process counts recorded on this PC, with when and how long after "
+    std::wstring lead = L"Basis: owner-measured (measured on this PC by you). RAM, commit and process counts recorded on this PC, with when and how long after "
                         L"boot. Use Measure after once the PC has restarted.";
     if (!canData && !fileW_.Running()) lead += L" Measuring is off. " + dw;
     y = PaintTextLines(dc, lead, pad, y, rc.right - pad, p.mute, 2) + Sc(6);
@@ -5488,6 +5519,39 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         }
     }
     h.Use(ui::Layout::Baseline, 96);
+    {   // Review R4: a rebuild queued while the plan was being built runs even when the user has left for the manager.
+        auto m = fresh(h, fixture);
+        m->OnClickId(ID_PRESET + 3);
+        m->OnClickId(ID_SAVE_START);
+        m->planBusy_ = true;            // as if the build were still running on its worker (never started: Join is a no-op)
+        m->planJob_.out = Plan{};       // its stale result
+        m->replan_ = true;
+        m->replanRebuild_ = true;
+        m->OnPlanned();
+        check(m->mode_ == Mode::Presets && m->saving_ && m->plan_.title == L"Stripped (Services)" && !m->plan_.rows.empty(),
+              L"ui R4: a queued rebuild runs outside the plan view (the stale result is replaced) and keeps the user on the manager");
+    }
+    {   // Review R5: no plan can open (nothing read yet): the page says why instead of reporting a success.
+        auto m = fresh(h, fixture);
+        m->OnClickId(ID_PRESETS);
+        m->loaded_ = false;
+        CustomPreset cp = m->presets_.empty() ? CustomPreset{} : m->presets_[0];
+        m->ImportDone(&cp, L"C:\\x.txt", L"");
+        bool imp = m->mode_ == Mode::Presets && m->presetErr_.find(L"but no plan opened: the services and drivers are still being read") != std::wstring::npos;
+        m->presetErr_.clear();
+        m->OnClickId(ID_PRE_PLAN);
+        check(imp && m->mode_ == Mode::Presets && m->presetErr_.find(L"No plan opened: ") == 0,
+              L"ui R5: an import or Open plan that can't open a plan says why (\"" + m->presetErr_ + L"\")");
+    }
+    {   // Review R6, R9: the measure page says whether Hadron changed anything between the two, and whose measurement it is.
+        auto m = fresh(h, fixture);
+        bool none = false, mine = false;
+        for (auto& para : m->MeasureDoc()) {
+            if (para.text == L"No Hadron apply was recorded between these two: the difference is not from a Hadron change.") none = true;
+            if (para.text == L"Basis: owner-measured (measured on this PC by you)") mine = true;
+        }
+        check(none && mine, L"ui R6/R9: the fixture pair (no undo log between them) says no Hadron apply was recorded; the basis says whose it is");
+    }
     {   // The pages' lists sort by a header click and keep their selection; Measure's own compare is labelled.
         auto m = fresh(h, fixture);
         m->OnClickId(ID_PRESETS);

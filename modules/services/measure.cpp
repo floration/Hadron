@@ -189,6 +189,21 @@ int PendingBefore(const std::vector<Measurement>& ms, const std::wstring& bootNo
     return b;
 }
 
+std::vector<AppliedBetween> AppliesBetween(const Measurement& before, const Measurement& after, const std::vector<UndoLog>& logs) {
+    std::vector<AppliedBetween> v;
+    for (auto& l : logs) {
+        // An apply stamp is yyyyMMdd-HHmmss in UTC (Store::NewStamp), possibly with a -N suffix.
+        const std::wstring& st = l.stamp;
+        if (!l.hasB || l.rows.empty() || st.size() < 15 || st[8] != L'-') continue;
+        if (!before.machine.empty() && !l.machine.empty() && l.machine != before.machine) continue;
+        std::wstring when = st.substr(0, 4) + L"-" + st.substr(4, 2) + L"-" + st.substr(6, 2) + L" " + st.substr(9, 2) + L":" +
+                            st.substr(11, 2) + L":" + st.substr(13, 2);
+        if (when > before.created && when < after.boot) v.push_back({l.source, when});
+    }
+    std::stable_sort(v.begin(), v.end(), [](const AppliedBetween& a, const AppliedBetween& b) { return a.when < b.when; });
+    return v;
+}
+
 std::wstring MiB(uint64_t bytes) {
     std::wstring d = std::to_wstring(bytes / (1024ull * 1024ull));
     for (int i = (int)d.size() - 3; i > 0; i -= 3) d.insert((size_t)i, L",");

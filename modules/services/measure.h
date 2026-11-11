@@ -55,4 +55,10 @@ int PendingBefore(const std::vector<Measurement>& ms, const std::wstring& bootNo
 
 std::wstring MiB(uint64_t bytes);   // "8,123 MiB"
 
+// The Hadron applies (undo logs with a B record and at least one row, of the before's machine) whose stamp falls
+// between the before's recording and the after's boot: what Hadron changed between the two, so the page can say
+// whether a difference could come from a Hadron change at all. Oldest first; when is "yyyy-MM-dd HH:mm:ss" UTC.
+struct AppliedBetween { std::wstring source, when; };
+std::vector<AppliedBetween> AppliesBetween(const Measurement& before, const Measurement& after, const std::vector<UndoLog>& logs);
+
 }  // namespace hx::services
