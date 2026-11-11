@@ -776,3 +776,310 @@ keep('intelppm', 'Intel processor power driver', 'Processor power management (id
 keep('pdc', 'Power Dependency Coordinator', 'Coordinates power states for apps and devices.',
      '@STARTMENU: it should not be disabled, or BrokerInfrastructure fails and the Start menu breaks.',
      note='@STARTMENU.', kind='drv')
+
+# =====================================================================================================
+# Explanation-only expansion (Finalize, proxy Q5, 2026-11-11). No preset level, so no preset changes: `never` keeps
+# them out of every preset exactly as "no KB entry" did before, and the guard result is the same kind (not in
+# presets). Each says what the item does and what the pages say; none of it recommends a change.
+#
+# Services: every service in docs/pipeline/svcdrv/research/ws2016-services.tsv that had no entry and that @IOT also
+# lists (Windows 10/11 IoT Enterprise, the same service set as client per r3 §2.1). Present on Server 2016 (the 1607
+# base) and on the current 10/11 page, so taken as present on 19045. Names on the Server list only (Browser, DcpSvc,
+# UI0Detect, KPSSVC, RSoPProv, sacsvr, tiledatamodelsvc, UALSVC, wudfsvc) are left out. @IOT ratings were read from
+# the page on 2026-11-11 (its labels: "Don't disable", "OK to disable", "No guidance", "Already disabled"); @WS16
+# ratings are from ws2016-services.tsv. Text after "@IOT says" follows the page's description of that service, and
+# text in double quotes is the page's own words; anything else is labelled (reasoning).
+
+_IOT_R = {'OK': 'OK to disable', 'DND': 'Don\'t disable', 'NG': 'No guidance', 'AD': 'Already disabled'}
+_WS_R = {'OK': 'OK to disable', 'DND': 'Do not disable', 'NG': 'No guidance', 'AD': 'Already disabled'}
+
+
+def info(name, title, expl, if_off='', iot_r='', ws_r='', basis='published', note='', kind='svc', test=''):
+    """An explanation-only entry. For a service, iot_r/ws_r give the two pages' ratings for the basis note."""
+    if iot_r:
+        note = ('@IOT describes it and rates it "%s" (Windows 10/11 IoT Enterprise); @WS16 rates it "%s" (Windows '
+                'Server 2016). Neither page is about a gaming desktop.' % (_IOT_R[iot_r], _WS_R[ws_r])
+                + (' ' + note if note else ''))
+    E(name, kind, title, expl, if_off=if_off, test=test, basis=basis, basis_note=note, never=True)
+
+
+info('AxInstSV', 'ActiveX Installer (AxInstSV)',
+     'Checks ActiveX controls downloaded from the internet under User Account Control and applies Group Policy to '
+     'their installation.',
+     '@IOT says that when it is disabled, ActiveX installation behaves according to the default browser settings.',
+     'OK', 'OK')
+info('AJRouter', 'AllJoyn Router Service',
+     'Routes AllJoyn messages (a device-to-device protocol) for local AllJoyn clients.',
+     '@IOT says AllJoyn clients without their own bundled router can\'t run.', 'OK', 'NG')
+info('AppReadiness', 'App Readiness', 'Gets apps ready the first time a user signs in and when new apps are added.',
+     '', 'DND', 'DND')
+info('AppIDSvc', 'Application Identity', 'Determines and verifies the identity of an application.',
+     '@IOT says disabling it prevents AppLocker from being enforced.', 'DND', 'NG')
+info('Appinfo', 'Application Information',
+     'Runs programs with administrator rights after a User Account Control prompt.',
+     '@IOT says users can\'t launch applications with the administrative privileges they need. Hadron itself always '
+     'runs as administrator, so it needs this to start (reasoning).', 'DND', 'NG',
+     note='@WS16 adds that it supports UAC same-desktop elevation.')
+info('ALG', 'Application Layer Gateway Service', 'Protocol plug-ins for Internet Connection Sharing.', '', 'OK', 'NG')
+info('AppMgmt', 'Application Management', 'Installs, removes and lists software deployed through Group Policy.',
+     '@IOT says software deployed through Group Policy can\'t be installed, removed or listed.', 'OK', 'NG')
+info('AppXSvc', 'AppX Deployment Service (AppXSVC)', 'Installs, updates and removes Microsoft Store (AppX) apps.',
+     '@IOT says Store applications can\'t be deployed and don\'t function properly.', 'OK', 'NG')
+info('tzautoupdate', 'Auto Time Zone Updater', 'Sets the time zone automatically.',
+     'Both pages list it as disabled by default. Windows\' "Set time zone automatically" setting uses it (reasoning).',
+     'AD', 'AD')
+info('BITS', 'Background Intelligent Transfer Service',
+     'Transfers files in the background using idle network bandwidth.',
+     '@IOT says "any applications that depend on BITS, such as Windows Update or MSN Explorer, can\'t automatically '
+     'download programs and other information."', 'OK', 'NG')
+info('BFE', 'Base Filtering Engine',
+     'Manages firewall and IPsec policies and user-mode filtering (the Windows Filtering Platform).',
+     '@IOT says stopping it reduces the security of the system, with unpredictable behaviour in IPsec management and '
+     'firewall applications.', 'DND', 'NG')
+info('CertPropSvc', 'Certificate Propagation',
+     'Copies certificates from smart cards into the user\'s certificate store and installs smart-card minidrivers.',
+     '@IOT says reconfiguring it isn\'t recommended.', 'DND', 'NG')
+info('ClipSVC', 'Client License Service (ClipSVC)', 'Licensing infrastructure for the Microsoft Store.',
+     '@IOT says applications bought through the Microsoft Store don\'t behave correctly without it.', 'OK', 'NG')
+info('KeyIso', 'CNG Key Isolation',
+     'Keeps private keys and their cryptographic operations isolated, hosted in the LSA process.', '', 'DND', 'NG')
+info('EventSystem', 'COM+ Event System',
+     'Delivers events to subscribing COM components; the System Event Notification Service (SENS) depends on it.',
+     '@IOT says SENS closes and can\'t provide logon and logoff notifications.', 'DND', 'NG')
+info('COMSysApp', 'COM+ System Application', 'Manages the configuration and tracking of COM+ components.',
+     '@IOT says most COM+ components don\'t function properly.', 'DND', 'NG')
+info('CoreMessagingRegistrar', 'CoreMessaging', 'Manages communication between system components.', '', 'DND', 'NG')
+info('VaultSvc', 'Credential Manager', 'Stores and returns saved credentials for users, apps and security packages.',
+     'Saved credentials in Credential Manager become unavailable (reasoning).', 'DND', 'NG')
+info('CryptSvc', 'Cryptographic Services',
+     'Checks file signatures, manages trusted root certificates and fetches root certificate updates from Windows '
+     'Update.',
+     '@IOT says reconfiguring it isn\'t recommended and that services depending on it fail to start.', 'DND', 'NG')
+info('DsSvc', 'Data Sharing Service', 'Brokers data between applications.', '', 'DND', 'NG')
+info('DcomLaunch', 'DCOM Server Process Launcher', 'Launches COM and DCOM servers when programs ask for their objects.',
+     '@IOT says programs that use COM or DCOM stop working properly and that reconfiguring it isn\'t recommended.',
+     'DND', 'NG')
+info('DeviceAssociationService', 'Device Association Service', 'Pairs the PC with wired and wireless devices.',
+     'Pairing new devices can fail (reasoning).', 'OK', 'NG')
+info('DeviceInstall', 'Device Install Service', 'Lets Windows recognise and adapt to hardware changes.',
+     '@IOT says stopping or disabling it results in system instability.', 'DND', 'NG')
+info('DmEnrollmentSvc', 'Device Management Enrollment Service',
+     'Enrols the PC in device management (work or school).', '', 'NG', 'NG')
+info('DsmSvc', 'Device Setup Manager', 'Detects, downloads and installs device-related software.',
+     '@IOT says devices are left with outdated software.', 'DND', 'NG')
+info('DevQueryBroker', 'DevQuery Background Discovery Broker', 'Lets apps discover devices with a background task.',
+     '', 'DND', 'NG')
+info('Dhcp', 'DHCP Client', 'Gets and renews this PC\'s IP address and registers its DNS records.',
+     '@IOT says the PC stops receiving dynamic IP addresses and DNS updates. Most home routers hand out addresses this '
+     'way (reasoning).', 'DND', 'NG')
+info('TrkWks', 'Distributed Link Tracking Client',
+     'Keeps links between NTFS files (such as shortcuts) working when the target moves, on this PC or across a '
+     'network.', '', 'OK', 'NG')
+info('MSDTC', 'Distributed Transaction Coordinator',
+     'Coordinates transactions that span databases, message queues and file systems.',
+     '@IOT says those transactions fail.', 'OK', 'NG')
+info('Dnscache', 'DNS Client', 'Caches DNS lookups and registers this computer\'s name.',
+     '@IOT says names still resolve, but results aren\'t cached and the computer\'s name isn\'t registered.',
+     'DND', 'NG')
+info('embeddedmode', 'Embedded Mode', 'Enables Background Applications, a Windows IoT feature.',
+     '@IOT says Background Applications can\'t be activated.', 'DND', 'NG')
+info('EFS', 'Encrypting File System (EFS)', 'Encrypts files on NTFS volumes.',
+     '@IOT says applications can\'t access encrypted files.', 'DND', 'NG')
+info('EntAppSvc', 'Enterprise App Management Service', 'Enterprise application management.', '', 'OK', 'NG')
+info('EapHost', 'Extensible Authentication Protocol',
+     'Network authentication (EAP) for wired and Wi-Fi port authentication and for VPNs.',
+     '@IOT says the PC can\'t reach networks that require EAP authentication. Wi-Fi that only asks for a password '
+     '(Personal mode) does not use EAP (reasoning).', 'OK', 'NG')
+info('fdPHost', 'Function Discovery Provider Host',
+     'Hosts the network discovery providers for SSDP and WS-Discovery.',
+     '@IOT says network services that rely on these protocols can\'t find network devices or resources.', 'OK', 'NG')
+info('FDResPub', 'Function Discovery Resource Publication',
+     'Publishes this PC and its shared resources so others can find them on the network.',
+     '@IOT says other computers can\'t discover this one.', 'OK', 'NG')
+info('gpsvc', 'Group Policy Client', 'Applies Group Policy settings for the computer and its users.',
+     '@IOT says the PC can\'t be managed through Group Policy and components that depend on it stop working.',
+     'DND', 'NG')
+info('hidserv', 'Human Interface Device Service',
+     'Hot buttons on keyboards, remote controls and other multimedia devices.',
+     '@IOT says reconfiguring it isn\'t recommended.', 'DND', 'NG')
+info('IKEEXT', 'IKE and AuthIP IPsec Keying Modules', 'Key exchange (IKE and AuthIP) for IPsec.',
+     '@IOT says IPsec key exchange with other computers stops, and that reconfiguring it compromises security.',
+     'DND', 'NG')
+info('iphlpsvc', 'IP Helper',
+     'IPv6 transition tunnels (6to4, ISATAP, Teredo), IP-HTTPS and port proxy.',
+     '@IOT says the PC loses the connectivity these technologies give. Some Xbox Live multiplayer features use Teredo '
+     '(reasoning).', 'OK', 'NG')
+info('PolicyAgent', 'IPsec Policy Agent', 'Enforces IPsec policies.',
+     '@IOT says connections that require IPsec fail and remote management of Windows Firewall stops.', 'DND', 'NG')
+info('KtmRm', 'KtmRm for Distributed Transaction Coordinator',
+     'Coordinates transactions between the Distributed Transaction Coordinator and the Kernel Transaction Manager.',
+     '@IOT says both start it when needed, and that while it is disabled their transactions with a kernel resource '
+     'manager fail.', 'DND', 'NG')
+info('LSM', 'Local Session Manager', 'Manages local user sessions.',
+     '@IOT says reconfiguring it causes system instability.', 'DND', 'NG')
+info('diagnosticshub.standardcollector.service', 'Microsoft Diagnostics Hub Standard Collector Service',
+     'Collects real-time ETW events for diagnostics tools.', '@IOT says reconfiguring it isn\'t recommended.',
+     'DND', 'NG')
+info('AppVClient', 'Microsoft App-V Client', 'Runs App-V virtualized applications, an enterprise feature.',
+     'Both pages list it as disabled by default.', 'AD', 'AD')
+info('MSiSCSI', 'Microsoft iSCSI Initiator Service', 'Connects to iSCSI storage over the network.',
+     '@IOT says the PC can\'t log in to or access iSCSI targets.', 'OK', 'DND',
+     note='@WS16\'s comment: "Our diagnostic data indicates the system uses this service on both client and server, so '
+          'there\'s no benefit to disabling it."')
+info('NgcCtnrSvc', 'Microsoft Passport Container',
+     'Manages the local identity keys behind Windows Hello and TPM virtual smart cards.',
+     '@IOT says those keys and TPM virtual smart cards aren\'t accessible, and that reconfiguring it isn\'t '
+     'recommended.', 'OK', 'OK')
+info('swprv', 'Microsoft Software Shadow Copy Provider',
+     'Manages software-based shadow copies taken by Volume Shadow Copy, which System Restore uses (reasoning).',
+     '@IOT says software-based shadow copies can\'t be managed.', 'OK', 'NG')
+info('smphost', 'Microsoft Storage Spaces SMP', 'The management provider for Storage Spaces.',
+     '@IOT says Storage Spaces can\'t be managed; @WS16 says storage management APIs fail.', 'OK', 'DND')
+info('NetTcpPortSharing', 'Net.Tcp Port Sharing Service', 'Lets programs share TCP ports over the net.tcp protocol.',
+     'Both pages list it as disabled by default.', 'AD', 'AD')
+info('Netlogon', 'Netlogon', 'Keeps a secure channel to a domain controller, for PCs joined to a domain.',
+     '@IOT says the computer can\'t authenticate users and services. A PC that is not joined to a domain doesn\'t use '
+     'it (reasoning).', 'OK', 'NG')
+info('Netman', 'Network Connections',
+     'Manages the Network Connections folder: network adapters and dial-up connections.', '', 'DND', 'NG')
+info('NcaSvc', 'Network Connectivity Assistant',
+     'DirectAccess status notifications, an enterprise remote-access feature.', '', 'OK', 'NG')
+info('netprofm', 'Network List Service',
+     'Identifies the networks the PC connects to and tells apps when their properties change.', '', 'NG', 'NG')
+info('NlaSvc', 'Network Location Awareness',
+     'Collects network configuration and tells programs when it changes.',
+     '@IOT says configuration information might be unavailable. The network status in the taskbar uses it '
+     '(reasoning).', 'OK', 'NG')
+info('NetSetupSvc', 'Network Setup Service', 'Installs network drivers and applies low-level network settings.',
+     '@IOT says network driver installations in progress fail.', 'DND', 'NG')
+info('nsi', 'Network Store Interface Service',
+     'Delivers network notifications (interfaces added or removed) to programs.',
+     '@IOT says "Stopping this service causes loss of network connectivity."', 'NG', 'NG')
+info('CscService', 'Offline Files', 'Keeps copies of network files available offline.', '', 'OK', 'AD')
+info('PerfHost', 'Performance Counter DLL Host',
+     'Lets remote users and 64-bit programs read performance counters from 32-bit DLLs.', '', 'DND', 'NG')
+info('pla', 'Performance Logs & Alerts',
+     'Collects performance data on a schedule and writes it to a log or raises an alert.',
+     '@IOT says performance information isn\'t collected.', 'DND', 'NG')
+info('PlugPlay', 'Plug and Play', 'Lets Windows recognise and adapt to hardware changes.',
+     '@IOT says stopping or disabling it results in system instability.', 'NG', 'NG')
+info('WPDBusEnum', 'Portable Device Enumerator Service',
+     'Applies Group Policy to removable storage and lets apps sync content with portable devices.', '', 'OK', 'NG')
+info('Power', 'Power', 'Manages power policy and delivers power notifications.', '', 'DND', 'NG')
+info('wercplsupport', 'Problem Reports Control Panel Support',
+     'Lets the Problem Reports control panel view, send and delete system problem reports.', '', 'NG', 'NG')
+info('RasMan', 'Remote Access Connection Manager', 'Manages dial-up and VPN connections.',
+     'The built-in Windows VPN and dial-up connections stop (reasoning); @IOT says services that depend on it fail to '
+     'start.', 'OK', 'NG')
+info('SessionEnv', 'Remote Desktop Configuration', 'Configuration and session upkeep for Remote Desktop.', '',
+     'DND', 'DND')
+info('TermService', 'Remote Desktop Services', 'Lets users connect to this PC with Remote Desktop.',
+     '@IOT says that to prevent remote use, clear the boxes on the Remote tab of System Properties instead.',
+     'DND', 'DND')
+info('UmRdpService', 'Remote Desktop Services UserMode Port Redirector',
+     'Redirects printers, drives and ports in Remote Desktop sessions.', '', 'DND', 'DND')
+info('RpcSs', 'Remote Procedure Call (RPC)',
+     'The service control manager for COM and DCOM servers: object activation and related RPC work.',
+     '@IOT says programs that use COM or DCOM don\'t function properly. Windows can\'t run normally without it '
+     '(reasoning).', 'DND', 'NG')
+info('RpcLocator', 'Remote Procedure Call (RPC) Locator', 'Kept for old programs that used the RPC name service.',
+     '@IOT says "In Windows Vista and later versions of Windows, this service doesn\'t provide any functionality and '
+     'is present for application compatibility."', 'OK', 'NG')
+info('RemoteRegistry', 'Remote Registry', 'Lets remote users change registry settings on this PC, when allowed.',
+     '@IOT says disabling it restricts registry updating to local users.', 'DND', 'DND')
+info('RpcEptMapper', 'RPC Endpoint Mapper', 'Maps RPC interface identifiers to network endpoints.',
+     '@IOT says programs that use RPC don\'t function properly.', 'DND', 'NG')
+info('seclogon', 'Secondary Logon', 'Starts programs under other credentials ("Run as different user").',
+     '@IOT says that kind of logon is unavailable.', 'DND', 'NG')
+info('SstpSvc', 'Secure Socket Tunneling Protocol Service', 'SSTP VPN connections.',
+     '@IOT says SSTP can\'t be used to reach remote servers; @WS16 says disabling it breaks Routing and Remote '
+     'Access.', 'OK', 'DND')
+info('SamSs', 'Security Accounts Manager', 'Tells other services when the Security Accounts Manager is ready.',
+     '@IOT says other services then fail to start correctly, and that it shouldn\'t be disabled.', 'DND', 'DND')
+info('LanmanServer', 'Server', 'File, printer and named-pipe sharing from this PC over the network (SMB).',
+     '@IOT says "If this service is stopped, these functions are unavailable." @WS16 says it is needed for remote '
+     'management, IPC$ and SMB file sharing.', 'OK', 'DND')
+info('SNMPTRAP', 'SNMP Trap', 'Receives SNMP trap messages for SNMP management programs on this PC.', '', 'OK', 'NG')
+info('sppsvc', 'Software Protection', 'Downloads, installs and enforces digital licences for Windows and apps.',
+     '@IOT says Windows and licensed applications then run in a notification mode.', 'DND', 'NG')
+info('svsvc', 'Spot Verifier', 'Checks reported file-system corruption.', '', 'DND', 'NG')
+info('StateRepository', 'State Repository Service',
+     'Infrastructure for the app model (Store apps and the Start menu).', '', 'DND', 'NG')
+info('StorSvc', 'Storage Service', 'Storage settings and external storage expansion.', '', 'NG', 'NG')
+info('TieringEngineService', 'Storage Tiers Management', 'Places data across storage tiers on tiered Storage Spaces.',
+     '', 'NG', 'NG')
+info('SENS', 'System Event Notification Service', 'Tells COM+ Event System subscribers about system events.', '',
+     'NG', 'NG')
+info('SystemEventsBroker', 'System Events Broker', 'Coordinates background work for Store (WinRT) apps.',
+     '@WS16 says it is "also needed for task scheduler, broker infrastructure service, and other internal '
+     'components."', 'DND', 'DND')
+info('Schedule', 'Task Scheduler', 'Runs scheduled tasks, including many system-critical Windows tasks.',
+     '@IOT says those tasks don\'t run at their scheduled times.', 'DND', 'NG')
+info('lmhosts', 'TCP/IP NetBIOS Helper',
+     'NetBIOS name resolution over TCP/IP, used by older file and printer sharing.',
+     '@IOT says sharing files and printers and logging on to the network through NetBIOS stop.', 'OK', 'NG')
+info('TapiSrv', 'Telephony', 'The Telephony API (TAPI) for programs that control telephony devices.',
+     '@IOT and @WS16 say disabling it breaks Routing and Remote Access (RRAS).', 'OK', 'DND')
+info('Themes', 'Themes', 'Visual theme management for the desktop.',
+     '@IOT and @WS16 say accessibility themes can\'t be set while it is disabled.', 'OK', 'DND')
+info('TimeBrokerSvc', 'Time Broker', 'Coordinates background work for Store (WinRT) apps.',
+     '@WS16 says it is "needed for task scheduler, broker infrastructure service, and other internal components."',
+     'DND', 'DND')
+info('UevAgentService', 'User Experience Virtualization Service',
+     'Roams application and Windows settings (UE-V), an enterprise feature.',
+     'Both pages list it as disabled by default.', 'AD', 'AD')
+info('UserManager', 'User Manager', 'Runtime components for multi-user interaction.',
+     '@IOT says applications might not operate correctly.', 'DND', 'NG')
+info('ProfSvc', 'User Profile Service', 'Loads and unloads user profiles.',
+     '@IOT says users can\'t sign in or out and apps can have trouble reaching user data.', 'DND', 'NG')
+info('vds', 'Virtual Disk', 'Management services for disks, volumes, file systems and storage arrays.', '',
+     'NG', 'NG')
+info('Audiosrv', 'Windows Audio', 'Manages audio for Windows programs.',
+     '@IOT says "If this service is stopped, audio devices and effects don\'t function properly." Both pages are '
+     'written for machines that may have no sound (devices, servers); a gaming PC needs it, so Hadron\'s floor keeps '
+     'it (reasoning).', 'OK', 'OK')
+info('AudioEndpointBuilder', 'Windows Audio Endpoint Builder', 'Manages audio devices for the Windows Audio service.',
+     '@IOT says audio devices and effects don\'t function properly. Hadron\'s floor keeps it, as it keeps Windows '
+     'Audio (reasoning).', 'OK', 'OK')
+info('WbioSrvc', 'Windows Biometric Service',
+     'Lets apps capture, compare and store biometric data without direct access to the hardware.',
+     'Windows Hello fingerprint and face sign-in stop (reasoning).', 'OK', 'NG')
+info('Wcmsvc', 'Windows Connection Manager',
+     'Decides when to connect and disconnect networks from what is available, and applies network Group Policy.',
+     '', 'OK', 'NG')
+info('WdNisSvc', 'Microsoft Defender Antivirus Network Inspection Service',
+     'Network inspection for Microsoft Defender Antivirus.',
+     '@DEFCOMPAT says not to disable, stop or modify the services Defender Antivirus uses; that this one is part of '
+     'that stack is reasoning.', 'DND', 'NG')
+info('WEPHOSTSVC', 'Windows Encryption Provider Host Service',
+     'Brokers encryption functions from non-Microsoft encryption providers for Exchange ActiveSync policy checks.',
+     '@IOT says the policy checks set by connected mail accounts are compromised.', 'OK', 'NG')
+info('Wecsvc', 'Windows Event Collector', 'Manages subscriptions to events forwarded from other computers.',
+     '@WS16 says "Lots of features and third-party tools rely on it, including security audit tools."', 'DND', 'DND')
+info('EventLog', 'Windows Event Log', 'Records, stores and serves Windows events and event logs.',
+     '@IOT says stopping it might compromise the security and reliability of the system.', 'DND', 'NG')
+info('mpssvc', 'Windows Defender Firewall', 'The Windows firewall.', '', 'DND', 'NG')
+info('FontCache', 'Windows Font Cache Service', 'Caches commonly used font data for apps.',
+     '@IOT says application performance might degrade.', 'DND', 'NG')
+info('msiserver', 'Windows Installer', 'Installs, changes and removes Windows Installer (.msi and .msp) packages.',
+     'Installers that use Windows Installer fail (reasoning).', 'DND', 'NG')
+info('Winmgmt', 'Windows Management Instrumentation',
+     'WMI: management information about Windows, devices, apps and services.',
+     '@IOT says most Windows-based software doesn\'t function properly.', 'DND', 'NG')
+info('WpnUserService', 'Windows Push Notifications User Service (per-user template)',
+     'Per-user host for local and push notifications. A per-user service: Hadron would change the template.',
+     'Notifications stop (reasoning).', 'DND', 'OK',
+     note='@WS16 rates it for Windows Server; @IOT\'s rating is the client-side one.')
+info('WinRM', 'Windows Remote Management (WS-Management)', 'Remote management over WS-Management.', '', 'DND', 'DND')
+info('W32Time', 'Windows Time', 'Keeps the clock synchronised over the network.',
+     '@IOT says date and time synchronisation stops.', 'DND', 'NG')
+info('WinHttpAutoProxySvc', 'WinHTTP Web Proxy Auto-Discovery Service',
+     'Finds proxy settings automatically (WPAD) for the WinHTTP network stack.',
+     '@WS16 says "Anything that uses the network stack can have a functional dependency on this service."',
+     'DND', 'DND')
+info('wmiApSrv', 'WMI Performance Adapter',
+     'Serves WMI performance data to clients on the network, while Performance Data Helper is active.', '',
+     'DND', 'NG')
+info('LanmanWorkstation', 'Workstation',
+     'The SMB client: connections to shared folders and printers on other computers.',
+     '@IOT says those connections are unavailable.', 'DND', 'NG')
