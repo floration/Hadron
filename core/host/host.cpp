@@ -164,10 +164,17 @@ private:
 
     // Build fonts for the active layout and resolve the palette. deterministic => use the theme's own
     // accent (stable goldens for --screenshot/--selftest); otherwise follow the live Windows accent.
+    // accentOverride_ (--accent, screenshots only) stands in for the Windows accent, with the same
+    // achromatic fallback the live path uses, so design review can show accent-following deterministically.
     void BuildTheme(bool deterministic) {
         fonts_.Build(dpi_, layout_);
-        theme_ = deterministic ? Resolve(themeId_, FallbackAccent(themeId_)) : ResolveLive(themeId_);
+        if (deterministic && hasAccentOverride_)
+            theme_ = Resolve(themeId_, ui::IsAchromatic(accentOverride_) ? FallbackAccent(themeId_) : accentOverride_);
+        else
+            theme_ = deterministic ? Resolve(themeId_, FallbackAccent(themeId_)) : ResolveLive(themeId_);
     }
+    bool     hasAccentOverride_ = false;
+    COLORREF accentOverride_ = 0;
 };
 
 const wchar_t* kFrameClass = L"Hadron.Frame";
@@ -311,6 +318,8 @@ int Host::Screenshot(const CommandLine& cl) {
     dpi_ = 96;
     themeId_ = cl.theme;
     layout_  = cl.layout;
+    hasAccentOverride_ = cl.hasAccent;
+    accentOverride_    = cl.accent;
     BuildTheme(/*deterministic=*/true);
     RECT want{0, 0, W, H};
     DWORD style = WS_OVERLAPPEDWINDOW;

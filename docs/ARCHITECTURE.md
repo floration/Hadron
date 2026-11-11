@@ -151,7 +151,7 @@ and their output is committed so a C++-only build works. Copyrighted inputs (ven
   base hue rotated +90/+180/+270 (`RotateHue`, own HSL maths) — a square/tetradic split. When the Windows accent is
   achromatic (grey/black/white, `IsAchromatic`), the theme's own `FallbackAccent()` is used. `ResolveLive(id)` does
   this; `Resolve(id, accent)` is the deterministic form used by `--screenshot`/`--selftest` so goldens are stable.
-- **Host owns theme + layout**, chosen by `--theme light|dark|fun|boring` and `--layout baseline|console`. Modules
+- **Host owns theme + layout**, chosen by `--theme light|dark|fun|boring` and `--layout baseline|console`. `--accent RRGGBB` (screenshot only) stands in for the Windows accent so design review can show accent-following deterministically; an achromatic value takes the theme fallback, as live. Modules
   read them through `IHost::Theme()`, `IHost::Fonts()`, `IHost::Layout()`; the suite chrome themes too. High contrast
   (`Theme::highContrast`) makes widgets fall back to the system colours.
 - **Widgets** (`core/ui/widgets.h`) are plain objects, not HWNDs: the module owns them, paints them from

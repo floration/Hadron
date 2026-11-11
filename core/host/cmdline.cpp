@@ -2,6 +2,7 @@
 #include "core/sys/sys.h"
 #include <shellapi.h>
 #include <vector>
+#include <cwchar>
 
 namespace hx {
 
@@ -31,6 +32,14 @@ CommandLine CommandLine::Parse(const wchar_t* raw) {
         } else if (a == L"--layout") {
             std::wstring v = next(i);
             cl.layout = (v == L"console") ? ui::Layout::Console : ui::Layout::Baseline;
+        } else if (a == L"--accent") {
+            std::wstring v = next(i);
+            wchar_t* end = nullptr;
+            unsigned long rgb = wcstoul(v.c_str(), &end, 16);
+            if (v.size() == 6 && end && *end == 0) {
+                cl.hasAccent = true;
+                cl.accent = RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+            }
         } else                         cl.rest.push_back(a);
     }
     LocalFree(argv);
