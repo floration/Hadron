@@ -51,6 +51,7 @@ namespace { std::wstring StartCellText(const SvcItem& s, bool drift, bool consol
 constexpr UINT WM_SVC_LOADED = WM_MODULE_BASE + 1;    // load worker -> view
 constexpr UINT WM_SVC_APPLIED = WM_MODULE_BASE + 2;   // apply worker -> view
 constexpr UINT WM_SVC_PLANNED = WM_MODULE_BASE + 3;   // plan worker -> view
+constexpr UINT WM_SVC_COMPANY = WM_MODULE_BASE + 4;   // company worker -> view
 constexpr UINT_PTR kProgressTimer = 1;
 const wchar_t* const kViewClass = L"Hadron.services.View";
 const wchar_t* const kAppTitle = L"Services and drivers";
@@ -188,6 +189,15 @@ struct LoadOut {
     std::vector<std::wstring> logProblems;
 };
 
+// The second load pass (2-research: Company in a second Worker pass): each image's VERSIONINFO CompanyName, read after
+// the list is shown, from copies of the items, so the worker never reads what the UI thread may replace. `done` is set
+// last: a done message from a pass that a newer one replaced finds it false and is ignored.
+struct CompanyJob {
+    std::vector<SvcItem> in;                                   // name, type and image only
+    std::vector<std::pair<std::wstring, std::wstring>> out;    // lower-case name, company
+    std::atomic<bool> done{false};
+};
+
 // Everything a plan is built from, copied, so the plan worker never reads what the UI thread may replace.
 struct PlanJob {
     PlanReq req;
@@ -241,8 +251,8 @@ public:
     }
     void Shutdown() override {
         cancelApply_.store(true);
-        loadW_.Cancel(); applyW_.Cancel(); planW_.Cancel();
-        loadW_.Join(); applyW_.Join(); planW_.Join();
+        loadW_.Cancel(); applyW_.Cancel(); planW_.Cancel(); companyW_.Cancel();
+        loadW_.Join(); applyW_.Join(); planW_.Join(); companyW_.Join();
         if (hwnd_) KillTimer(hwnd_, kProgressTimer);
     }
     int RunCli(int argc, wchar_t** argv) override;
@@ -271,6 +281,8 @@ private:
     // data
     void StartLoad();
     void OnLoaded();
+    void StartCompany();
+    void OnCompany();
     void TakeData(std::vector<SvcItem> items, const HwInfo& hw, std::wstring build, std::wstring machine);
     void PrepareCtx();
     void Refilter();
@@ -455,7 +467,9 @@ private:
     size_t nameItems_ = 0;
 
     // workers
-    sys::Worker loadW_, applyW_, planW_;
+    sys::Worker loadW_, applyW_, planW_, companyW_;
+    std::shared_ptr<CompanyJob> companyJob_;   // the current Company pass (null: none since the last load)
+    bool companyPending_ = false;              // the Company pass is still reading: the detail says so
     PlanJob planJob_;
     LoadOut loadOut_;
     Job job_;
@@ -534,6 +548,7 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SVC_LOADED: OnLoaded(); return 0;
     case WM_SVC_APPLIED: OnApplied(); return 0;
     case WM_SVC_PLANNED: OnPlanned(); return 0;
+    case WM_SVC_COMPANY: OnCompany(); return 0;
     case WM_RBUTTONDOWN: SetFocus(h); return 0;
     case WM_SYSKEYDOWN:   // F10 arrives as a system key; in Console it is an F-key, not the menu key
         if (w == VK_F10 && Console()) { if (OnInput(WM_KEYDOWN, w, l)) Invalidate(); return 0; }
@@ -687,10 +702,7 @@ void ServicesModule::StartLoad() {
         std::wstring err;
         auto cancelled = [&]() { if (w->Cancelled()) { out->err = L"Loading was cancelled."; return true; } return false; };
         if (!b->Enumerate(&out->items, &err)) { out->err = L"Could not read the services: " + err; return; }
-        for (auto& i : out->items) {
-            if (cancelled()) return;
-            i.company = FileCompany(i);
-        }
+        // Company is read in a second pass once the list is shown (StartCompany), not here.
         b->ReadHw(&out->hw);
         out->build = b->Build();
         out->machine = b->MachineGuid();
@@ -783,8 +795,55 @@ void ServicesModule::OnLoaded() {
     auto keep = std::move(writeAccess_);
     TakeData(std::move(o.items), o.hw, o.build, o.machine);
     writeAccess_ = std::move(keep);
+    StartCompany();
     if (planReq_.type != PlanReq::None && !applyW_.Running()) OpenPlan(planReq_, true);
     if (!dismissStamp_.empty() && !applyW_.Running()) StartLoad();   // a Dismiss pressed during this load (A2)
+}
+
+// The second load pass: each live item's file company, read on companyW_ after the list is shown, so a slow disk or
+// many files never hold the list back. A fake backend's companies are its own (fixture data); nothing is read.
+void ServicesModule::StartCompany() {
+    companyW_.Cancel();
+    companyW_.Join();
+    companyPending_ = false;
+    if (!backend_ || !backend_->IsLive() || items_.empty()) return;
+    auto job = std::make_shared<CompanyJob>();
+    job->in.reserve(items_.size());
+    for (auto& s : items_) {
+        SvcItem c;
+        c.name = s.name;
+        c.type = s.type;
+        c.image = s.image;
+        job->in.push_back(std::move(c));
+    }
+    companyJob_ = job;
+    sys::Worker* w = &companyW_;
+    companyPending_ = companyW_.Start(hwnd_, WM_SVC_COMPANY, [job, w]() {
+        for (auto& i : job->in) {
+            if (w->Cancelled()) break;
+            job->out.push_back({Lower(i.name), FileCompany(i)});
+        }
+        job->done.store(true);
+    });
+    if (!companyPending_) {
+        companyJob_.reset();
+        Status(L"Services: could not start the worker that reads each file's company: " + sys::ErrorText(GetLastError()));
+    }
+}
+
+void ServicesModule::OnCompany() {
+    std::shared_ptr<CompanyJob> job = companyJob_;
+    if (!job || !job->done.load()) return;   // a replaced pass: the current one posts its own
+    companyW_.Join();
+    companyJob_.reset();
+    companyPending_ = false;
+    std::map<std::wstring, std::wstring> by(job->out.begin(), job->out.end());
+    for (auto& s : items_) {
+        auto it = by.find(Lower(s.name));
+        if (it != by.end()) s.company = it->second;
+    }
+    Refilter();
+    Invalidate();
 }
 
 void ServicesModule::TakeData(std::vector<SvcItem> items, const HwInfo& hw, std::wstring build, std::wstring machine) {
@@ -1993,7 +2052,7 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
     else if (!IsStorageDriver(s.name))   // the chip's and F8's words (mini-design 12)
         kv(L"Windows stock", StockKnown() ? L"no data for this item yet" : L"no data for this build yet", p.mute);
     if (s.trigger) kv(L"Triggers", s.triggers.empty() ? L"yes" : s.triggers);
-    kv(L"Company (file claim)", s.company);
+    kv(L"Company (file claim)", s.company.empty() && companyPending_ ? L"still being read" : s.company);
     ImageInfo im = NormalizeImage(s.image, WindowsDir(), s.name, IsDriverType(s.type));
     kv(L"Image", im.path + (im.args.empty() ? L"" : L"  " + im.args));
     if (!im.svchostGroup.empty()) kv(L"svchost group", im.svchostGroup);
@@ -4070,6 +4129,45 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         m->loadW_.Join();
         check(had && started && kept && handed,
               L"ui mini-analyze A2: a Dismiss pressed during a load is kept, and the next load (started when this one ends) takes it");
+    }
+
+    {   // mini-finalize 17: Company is read in a second Worker pass, after the list is shown
+        auto m = fresh(h, fixture);
+        m->fixture_ = false;
+        m->store_ = Store{};   // no data folder: the load reads the fake and writes nothing
+        std::vector<SvcItem> its = m->items_;
+        for (auto& s : its) s.company = L"Fake Co";
+        auto fb = std::make_unique<FakeBackend>();
+        fb->SetItems(its);
+        m->backend_ = std::move(fb);
+        m->StartLoad();
+        m->loadW_.Join();
+        m->OnLoaded();
+        bool kept = !m->items_.empty();
+        for (auto& s : m->items_) if (s.company != L"Fake Co") kept = false;
+        check(kept && !m->companyPending_ && !m->companyW_.Running(),
+              L"ui mini-finalize 17: the load pass no longer reads file companies (a fake backend's own stay; no second pass for it)");
+        // The second pass's result: a done message from a replaced pass is ignored; the current one fills the list.
+        const std::wstring nm = m->items_.front().name;
+        auto job = std::make_shared<CompanyJob>();
+        job->out.push_back({Lower(nm), L"Read Co"});
+        m->companyJob_ = job;
+        m->companyPending_ = true;
+        bool pendingShown = false;
+        for (auto& para : m->ItemDoc(SvcItem{m->items_.front()}))
+            if (para.label == L"Company (file claim)") pendingShown = para.text == L"Fake Co";
+        SvcItem blank = m->items_.front();
+        blank.company.clear();
+        bool readingShown = false;
+        for (auto& para : m->ItemDoc(blank))
+            if (para.label == L"Company (file claim)") readingShown = para.text == L"still being read";
+        m->OnCompany();   // not done: a replaced pass's message
+        bool ignored = m->items_.front().company == L"Fake Co" && m->companyPending_;
+        job->done.store(true);
+        m->OnCompany();
+        check(pendingShown && readingShown && ignored && m->items_.front().company == L"Read Co" && !m->companyPending_ && !m->companyJob_,
+              L"ui mini-finalize 17: the second pass fills Company when it is done (the detail says \"still being read\" until then); "
+              L"a replaced pass's message changes nothing");
     }
 
     {   // A8: an unreadable start type is never shown as fact
