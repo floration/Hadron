@@ -16,3 +16,5 @@ __pycache__/
 **/uefidump/
 **/UEFI_Dump_*/
 .claude/worktrees/
+# generated test fixture (tests/fixtures/make_diskmap_tree.py), as CI does
+dmfix/

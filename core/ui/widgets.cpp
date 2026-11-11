@@ -175,10 +175,7 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
             POINT tri[3];
             if (sortAsc_) { tri[0] = {ax, ay + h}; tri[1] = {ax + s, ay + h}; tri[2] = {ax + s / 2, ay}; }
             else          { tri[0] = {ax, ay};     tri[1] = {ax + s, ay};     tri[2] = {ax + s / 2, ay + h}; }
-            HBRUSH b = CreateSolidBrush(p.accent()); HBRUSH ob = (HBRUSH)SelectObject(dc, b);
-            HPEN pen = (HPEN)GetStockObject(NULL_PEN); HPEN op = (HPEN)SelectObject(dc, pen);
-            Polygon(dc, tri, 3);
-            SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b);
+            AaPolygon(dc, tri, 3, p.accent());
         }
         if (i > 0) VLine(dc, x, hdr.top + S(6, c.dpi), hdr.bottom - S(6, c.dpi), p.border());
         x += w;

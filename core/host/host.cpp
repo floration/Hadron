@@ -10,10 +10,14 @@
 #include "core/sys/settings.h"
 #include "core/sys/log.h"
 #include "core/sys/png.h"
+#include "core/sys/update.h"
+#include "core/sys/worker.h"
 #include "core/ui/theme.h"
+#include "core/ui/aa.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <objbase.h>   // CoInitializeEx/CoUninitialize: WIN32_LEAN_AND_MEAN excludes OLE on MSVC
+#include <ctime>
 #include <set>
 #include <string>
 #include <vector>
@@ -174,6 +178,19 @@ private:
     RECT chipLayout_{}, chipTheme_{};   // status-bar switch hit areas (interactive runs only)
     bool interactive_ = false;
 
+    // Self-update (core/sys/update.h). [update] auto = on | off; missing => ask once in the status bar.
+    enum class UpdMode { Ask, On, Off };
+    UpdMode updMode_ = UpdMode::Ask;
+    bool updReady_ = false;              // a new exe is in place; the chip offers a restart
+    bool updPending_ = false;            // turned back On while a cancelled check was still winding down
+    sys::Worker updWorker_;
+    sys::update::Result updResult_;
+    RECT chipUpd_{}, chipYes_{}, chipNo_{};
+    void SetUpdateMode(UpdMode m);
+    void StartUpdateCheck(bool install);
+    void OnUpdateDone();
+    void RestartForUpdate();
+
     // Build fonts for the active layout and resolve the palette. deterministic => use the theme's own
     // accent (stable goldens for --screenshot/--selftest); otherwise follow the live Windows accent.
     // accentOverride_ (--accent, screenshots only) stands in for the Windows accent, with the same
@@ -190,6 +207,7 @@ private:
 };
 
 const wchar_t* kFrameClass = L"Hadron.Frame";
+constexpr UINT WM_HX_UPDATE_DONE = WM_APP + 1;   // host range (WM_APP+0..0xFF)
 
 int Host::PickInitial(const CommandLine& cl) const {
     const std::wstring& want = !cl.solo.empty() ? cl.solo : cl.module;
@@ -262,10 +280,7 @@ void Host::PaintChrome(HDC dc, const RECT& cl) {
             SelectObject(dc, o);
             int w = sz.cx + S(20, dpi_);
             RECT r{right - w, st.top + S(4, dpi_), right, st.bottom - S(4, dpi_)};
-            { HBRUSH b = CreateSolidBrush(t.panel2); HPEN pn = CreatePen(PS_SOLID, 1, t.border);
-              HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pn);
-              RoundRect(dc, r.left, r.top, r.right, r.bottom, S(8, dpi_), S(8, dpi_));
-              SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b); DeleteObject(pn); }
+            ui::AaRoundRect(dc, r, S(8, dpi_) / 2.0, t.panel2, t.border);
             RECT tr = r;
             SelectObject(dc, fonts_.caption); SetTextColor(dc, t.text1); SetBkMode(dc, TRANSPARENT);
             DrawTextW(dc, label.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
@@ -274,7 +289,25 @@ void Host::PaintChrome(HDC dc, const RECT& cl) {
         };
         int right = st.right - S(10, dpi_);
         right = chip(std::wstring(L"Theme: ") + ui::ThemeName(themeId_), right, &chipTheme_) - S(6, dpi_);
-        right = chip(std::wstring(L"Layout: ") + ui::LayoutName(layout_), right, &chipLayout_);
+        right = chip(std::wstring(L"Layout: ") + ui::LayoutName(layout_), right, &chipLayout_) - S(6, dpi_);
+        chipUpd_ = chipYes_ = chipNo_ = RECT{};
+        if (updMode_ == UpdMode::Ask) {
+            // First run: ask once, in place. Nothing is checked until the user answers.
+            right = chip(L"No", right, &chipNo_) - S(6, dpi_);
+            right = chip(L"Yes", right, &chipYes_) - S(8, dpi_);
+            const wchar_t* q = L"Update Hadron automatically from GitHub releases?";
+            SIZE qs{}; SelectObject(dc, fonts_.caption);
+            GetTextExtentPoint32W(dc, q, (int)wcslen(q), &qs);
+            RECT qr{right - qs.cx - S(4, dpi_), st.top, right, st.bottom};
+            SetTextColor(dc, t.accent); SetBkMode(dc, TRANSPARENT);
+            DrawTextW(dc, q, -1, &qr, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+            right = qr.left;
+        } else {
+            std::wstring u = updReady_ ? L"Restart to update"
+                           : updWorker_.Running() ? L"Updates: checking…"
+                           : updMode_ == UpdMode::On ? L"Updates: On" : L"Updates: Off";
+            right = chip(u, right, &chipUpd_);
+        }
         chipsLeft = right - S(10, dpi_);
     }
     sr.right = chipsLeft;
@@ -323,6 +356,74 @@ void Host::SetLook(ui::Layout l, ui::ThemeId t) {
     LayoutContent();
     if (frame_) RedrawWindow(frame_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
     sys::Write(LogLevel::Info, std::wstring(L"look: ") + ui::LayoutName(l) + L" / " + ui::ThemeName(t));
+}
+
+void Host::SetUpdateMode(UpdMode m) {
+    updMode_ = m;
+    store_.Section(L"update").SetStr(L"auto", m == UpdMode::On ? L"on" : L"off");
+    DWORD serr = 0;
+    if (!store_.Save(&serr)) SetStatus((L"Update setting not saved: " + sys::ErrorText(serr)).c_str());
+    sys::Write(LogLevel::Info, m == UpdMode::On ? L"update: automatic updates on" : L"update: automatic updates off");
+    if (m == UpdMode::On) StartUpdateCheck(/*install=*/true);
+    else { updPending_ = false; updWorker_.Cancel(); sys::update::AbortNetwork(); }   // opt-out stops a download;
+                                                                                       // a swap in progress still finishes
+    InvalidateChrome();
+}
+
+void Host::StartUpdateCheck(bool install) {
+    if (updReady_) return;
+    if (updWorker_.Running()) {   // e.g. Off then On quickly: start again once the cancelled run ends
+        if (updWorker_.Cancelled()) updPending_ = true;
+        return;
+    }
+    if (!updWorker_.Start(frame_, WM_HX_UPDATE_DONE, [this, install] {
+            updResult_ = sys::update::CheckAndInstall(install, updWorker_.CancelFlag());
+        })) {
+        SetStatus((L"Update check couldn't start: " + sys::ErrorText(GetLastError())).c_str());
+        return;
+    }
+    InvalidateChrome();
+}
+
+void Host::OnUpdateDone() {
+    updWorker_.Join();   // the result is complete once the thread has exited
+    using sys::update::Outcome;
+    const auto& r = updResult_;
+    if (r.outcome != Outcome::Failed && r.outcome != Outcome::Cancelled) {
+        store_.Section(L"update").SetStr(L"last", std::to_wstring(_time64(nullptr)));
+        DWORD serr = 0;
+        if (!store_.Save(&serr)) sys::Write(LogLevel::Warn, L"update: last-check time not saved: " + sys::ErrorText(serr));
+    }
+    if (r.outcome == Outcome::Installed) updReady_ = true;
+    if (updPending_) {
+        updPending_ = false;
+        if (updMode_ == UpdMode::On && r.outcome == Outcome::Cancelled) { StartUpdateCheck(/*install=*/true); return; }
+    }
+    sys::Write(r.outcome == Outcome::Failed ? LogLevel::Warn : LogLevel::Info, L"update: " + r.message);
+    SetStatus(r.message.c_str());
+}
+
+void Host::RestartForUpdate() {
+    for (auto& mod : modules_)
+        if (!mod->CanClose()) { SetStatus(L"Finish the running operation first, then restart to update"); return; }
+    std::wstring exe = sys::ModulePath();
+    // Same arguments as this run, plus our PID: the new process waits for this one to exit before it
+    // loads settings, so the two never overlap (an older --wait-pid from a previous restart is harmless).
+    std::wstring cmd = GetCommandLineW();
+    for (size_t p; (p = cmd.find(L" --wait-pid=")) != std::wstring::npos;) {   // only this process's PID, never stale ones
+        size_t e = cmd.find(L' ', p + 1);
+        cmd.erase(p, e == std::wstring::npos ? std::wstring::npos : e - p);
+    }
+    cmd += L" --wait-pid=" + std::to_wstring(GetCurrentProcessId());
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        SetStatus((L"Restart failed: " + sys::ErrorText(GetLastError()) + L". Close and reopen Hadron").c_str());
+        return;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    DestroyWindow(frame_);
 }
 
 LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -375,13 +476,24 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_RBUTTONDOWN: {
         POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
         if (interactive_ && PtInRect(&chipTheme_, p)) NextTheme(-1);
+        if (interactive_ && PtInRect(&chipUpd_, p) && !updReady_) StartUpdateCheck(/*install=*/true);   // check now
         return 0;
     }
+    case WM_HX_UPDATE_DONE:
+        OnUpdateDone();
+        return 0;
     case WM_LBUTTONDOWN:
         if (interactive_) {
             POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
             if (PtInRect(&chipLayout_, p)) { ToggleLayout(); return 0; }
             if (PtInRect(&chipTheme_, p))  { NextTheme(+1); return 0; }
+            if (PtInRect(&chipYes_, p))    { SetUpdateMode(UpdMode::On); return 0; }
+            if (PtInRect(&chipNo_, p))     { SetUpdateMode(UpdMode::Off); return 0; }
+            if (PtInRect(&chipUpd_, p)) {
+                if (updReady_) RestartForUpdate();
+                else SetUpdateMode(updMode_ == UpdMode::On ? UpdMode::Off : UpdMode::On);
+                return 0;
+            }
         }
         if (suite_) {
             POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
@@ -397,6 +509,9 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         DestroyWindow(h);
         return 0;
     case WM_DESTROY:
+        updWorker_.Cancel();
+        sys::update::AbortNetwork();                  // fail the blocking WinHTTP call now
+        updWorker_.Join();                            // cancel is polled per read; each fetch has a 3-minute budget
         for (auto& mod : modules_) mod->Shutdown();   // joins workers before HWNDs die
         PostQuitMessage(0);                           // only the host does this (ARCHITECTURE.md)
         return 0;
@@ -479,7 +594,14 @@ int Host::Run(const CommandLine& cl) {
     for (auto& a : cl.rest) if (a == L"--snapshot") snapshotArg = true;
     if (cl.selftest || !cl.screenshot.empty() || !cl.fixture.empty() || snapshotArg) sys::SetNoFirmwareWrites();
     elevated_ = sys::IsElevated();
+    for (auto& a : cl.rest)   // restart after an update: wait (up to 30 s) for the old process to finish exiting
+        if (a.rfind(L"--wait-pid=", 0) == 0) {
+            DWORD pid = (DWORD)wcstoul(a.c_str() + 11, nullptr, 10);
+            if (HANDLE p = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr) { WaitForSingleObject(p, 30000); CloseHandle(p); }
+        }
 
+    for (auto& a : cl.rest)   // core self-update logic, no network (CI runs it on one exe)
+        if (a == L"--selftest-update") return sys::update::SelfTest();
     if (cl.selftest) {
         // A GUI-subsystem exe has no console, so wprintf output vanishes when it's started from
         // cmd on Windows (Wine and CI pass real handles, so leave those alone). Attach to the
@@ -556,6 +678,10 @@ int Host::Run(const CommandLine& cl) {
         }
     }
     interactive_ = true;
+    {
+        std::wstring a = store_.Section(L"update").GetStr(L"auto");
+        updMode_ = a == L"on" ? UpdMode::On : a == L"off" ? UpdMode::Off : UpdMode::Ask;
+    }
     BuildTheme(/*deterministic=*/false);
     int cw = S(1200, dpi_), ch = S(800, dpi_);
     RECT wa{0, 0, 0, 0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
@@ -568,6 +694,10 @@ int Host::Run(const CommandLine& cl) {
     Activate(PickInitial(cl));
     ShowWindow(frame_, SW_SHOW);
     UpdateWindow(frame_);
+    if (updMode_ == UpdMode::On && cl.fixture.empty() && !snapshotArg) {   // never in test/fixture runs; at most every 20 h
+        long long last = _wtoi64(store_.Section(L"update").GetStr(L"last", L"0").c_str());
+        if (_time64(nullptr) - last > 20 * 3600) StartUpdateCheck(/*install=*/true);
+    }
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

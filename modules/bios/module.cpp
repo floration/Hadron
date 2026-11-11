@@ -1895,11 +1895,8 @@ void BiosModule::PaintList(HDC dc) {
         int curX = ColX(C_CUR);
         if (db_.IsKey(s)) {
             int d = Sc(7);
-            HBRUSH br = CreateSolidBrush(p.acc);
-            HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, GetStockObject(NULL_PEN));
             int dy = ry + (pitch - d) / 2;
-            Ellipse(dc, nameX, dy, nameX + d + 1, dy + d + 1);
-            SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(br);
+            AaEllipse(dc, RECT{nameX, dy, nameX + d, dy + d}, p.acc);
         }
         HFONT body = con ? f.mono : f.ui;
         RECT nr{nameX + Sc(12), ry, curX - Sc(10), ry + pitch};

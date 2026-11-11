@@ -4,6 +4,7 @@
 #include "core/host/registry.h"
 #include "core/sys/settings.h"
 #include "core/ui/theme.h"
+#include "core/ui/aa.h"
 #include <cstdio>
 #include <string>
 
@@ -40,11 +41,7 @@ public:
         int cw = S(520, dpi), chh = S(260, dpi);
         RECT card{rc.left + (rc.right - rc.left - cw) / 2, rc.top + (rc.bottom - rc.top - chh) / 2, 0, 0};
         card.right = card.left + cw; card.bottom = card.top + chh;
-        HBRUSH b = CreateSolidBrush(t.panel2);
-        HPEN pen = CreatePen(PS_SOLID, 1, t.border), oldPen = (HPEN)SelectObject(dc, pen);
-        HBRUSH oldB = (HBRUSH)SelectObject(dc, b);
-        RoundRect(dc, card.left, card.top, card.right, card.bottom, S(14, dpi), S(14, dpi));
-        SelectObject(dc, oldPen); SelectObject(dc, oldB); DeleteObject(pen); DeleteObject(b);
+        ui::AaRoundRect(dc, card, S(14, dpi) / 2.0, t.panel2, t.border);
 
         auto line = [&](const std::wstring& s, HFONT f, COLORREF c, int y, UINT fmt) {
             RECT r{card.left + S(28, dpi), card.top + S(y, dpi), card.right - S(28, dpi), card.top + S(y + 40, dpi)};

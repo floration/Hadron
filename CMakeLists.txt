@@ -1,5 +1,26 @@
 cmake_minimum_required(VERSION 3.20)
-project(Hadron VERSION 0.1.0 LANGUAGES CXX RC)
+# Release builds pass -DHADRON_VERSION=x.y.z (the release workflow takes it from the vX.Y.Z tag). Without
+# it this is a dev build: version 0.1.0 in VERSIONINFO, and the updater never replaces a dev exe.
+set(HADRON_VERSION "" CACHE STRING "Release version x.y.z; empty = dev build")
+if(HADRON_VERSION)
+  if(NOT HADRON_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR "HADRON_VERSION must be x.y.z, got '${HADRON_VERSION}'")
+  endif()
+  string(REPLACE "." ";" _hx_parts "${HADRON_VERSION}")
+  foreach(_p IN LISTS _hx_parts)
+    if(_p GREATER 65535)
+      message(FATAL_ERROR "HADRON_VERSION fields must be <= 65535 (VERSIONINFO is 16-bit)")
+    endif()
+  endforeach()
+  set(_hx_ver "${HADRON_VERSION}")
+  set(_hx_dev 0)
+else()
+  set(_hx_ver "0.1.0")
+  set(_hx_dev 1)
+endif()
+# Don't let a release version stick in this build dir's cache: every configure must pass it again.
+unset(HADRON_VERSION CACHE)
+project(Hadron VERSION ${_hx_ver} LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,11 +49,18 @@ add_library(hadron_core STATIC
   core/sys/log.cpp
   core/sys/png.cpp
   core/ui/theme.cpp
+  core/ui/aa.cpp
   core/ui/widgets.cpp
   core/host/cmdline.cpp
+  core/sys/update.cpp
   core/host/host.cpp)
+# winhttp, bcrypt and version are for the self-updater (core/sys/update.cpp); msimg32 (AlphaBlend) for the
+# anti-aliased shapes in core/ui/aa.cpp. All Windows SDK.
 target_link_libraries(hadron_core PUBLIC
-  dwmapi dbghelp shell32 ole32 gdi32 user32 comdlg32 comctl32)
+  dwmapi dbghelp shell32 ole32 gdi32 user32 comdlg32 comctl32 winhttp bcrypt version msimg32)
+target_compile_definitions(hadron_core PRIVATE
+  HADRON_VERSION_MAJOR=${PROJECT_VERSION_MAJOR} HADRON_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+  HADRON_VERSION_PATCH=${PROJECT_VERSION_PATCH} HADRON_DEV_BUILD=${_hx_dev})
 
 include(cmake/HadronModule.cmake)
 
