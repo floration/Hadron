@@ -136,7 +136,11 @@ public:
     bool PreTranslateMessage(MSG& m) override;
     bool OnInput(UINT msg, WPARAM w, LPARAM l) override;
     void Shutdown() override { worker_.Cancel(); worker_.Join(); }   // a write stops before its next variable
-    bool CanClose() override { return job_ != Job::Write; }
+    bool CanClose() override {
+        if (job_ != Job::Write) return true;
+        if (host_) host_->SetStatus(L"A BIOS write is running; it stops after the current variable");
+        return false;
+    }
     int  RunCli(int argc, wchar_t** argv) override;
     void LoadFixture(const wchar_t* dir) override;
     void Paint(HDC dc, const RECT& rc) override;
@@ -178,6 +182,7 @@ private:
     // writes (docs/design/bios-write.md)
     std::wstring WriteBlock() const;          // why writes can't happen now ("" = they can, switch aside)
     bool WritesPossible() const { return writeSwitch_ && WriteBlock().empty(); }
+    bool Idle() const { return job_ == Job::None && !worker_.Running(); }   // no job of any kind running
     PlanGate Gate() const;
     void ToggleWriteSwitch();
     void SyncEditor();                        // reset the "New value" editor when the selection changes
@@ -873,7 +878,15 @@ void BiosModule::OnClickId(int id) {
     else if (id == ID_STAGE_REC) StageRecommended();
     else if (id == ID_STAGE) StageSelected();
     else if (id == ID_UNSTAGE) { if (sel_ >= 0) staged_.erase(sel_); editFor_ = -1; Refilter(); }
-    else if (id == ID_UNSTAGE_ALL) { staged_.clear(); editFor_ = -1; Refilter(); SetNotice(L"Nothing staged.", 0); }
+    else if (id == ID_UNSTAGE_ALL) {
+        if (job_ == Job::Write) return;
+        size_t n = staged_.size();
+        staged_.clear();
+        editFor_ = -1;
+        Refilter();
+        SetNotice(L"Nothing staged.", 0);
+        host_->Log(LogLevel::Info, (L"bios: unstaged all (" + std::to_wstring(n) + L" staged change" + (n == 1 ? L")" : L"s)")).c_str());
+    }
     else if (id == ID_OPEN_BACKUP) OpenBackupFolder();
     else if (id == ID_NUMEDIT) focus_ = Focus::Edit;
     else if (id == ID_INCOMPLETE_RESTORE) {
@@ -1176,7 +1189,8 @@ void BiosModule::StageSelected() {
 }
 
 void BiosModule::StageRecommended() {
-    if (!WritesPossible()) return;
+    if (!WritesPossible()) { SetNotice(L"Writes are blocked: " + WriteBlock(), 1); return; }
+    if (!Idle()) { SetNotice(L"Still busy with the previous job; try again in a moment.", 1); return; }
     if (goal_ < 0) { SetNotice(L"Pick a goal first; \"Stage recommended\" stages that goal's exact values.", 1); return; }
     int n = 0, skipped = 0;
     for (int i = 0; i < (int)db_.S.size(); i++) {
@@ -1202,6 +1216,7 @@ void BiosModule::StageRecommended() {
 
 void BiosModule::ReviewPlan() {
     if (!WritesPossible()) { SetNotice(L"Writes are blocked: " + WriteBlock(), 1); return; }
+    if (!Idle()) { SetNotice(L"Still busy with the previous job; try again in a moment.", 1); return; }
     std::vector<StagedChange> st;
     for (auto& s : staged_) st.push_back({s.first, s.second});
     std::wstring err;
@@ -1212,7 +1227,11 @@ void BiosModule::ReviewPlan() {
 }
 
 void BiosModule::StartWrite() {
-    if (!planOpen_ || plan_.vars.empty() || job_ != Job::None || worker_.Running()) return;
+    if (!planOpen_ || plan_.vars.empty()) { SetNotice(L"There is no plan to write. Nothing was written.", 1); return; }
+    if (!Idle()) {
+        SetNotice(job_ == Job::Write ? L"A BIOS write is already running." : L"Still busy with the previous job; press Write again in a moment. Nothing was written.", 1);
+        return;
+    }
     // The gate again, right before starting (the plan was built under it; nothing may have changed).
     if (!WritesPossible()) { SetNotice(L"Writes are blocked: " + WriteBlock(), 2); planOpen_ = false; return; }
     auto plan = std::make_shared<Plan>(plan_);   // the worker's own copy
@@ -1714,7 +1733,7 @@ int BiosModule::PaintWriteBar(HDC dc, const RECT& rc, int y) {
     RECT lr{pad, y, pad + labelW, y + h};
     TextLeft(dc, L"Write", lr, f.caption, p.mute);
     int x = pad + labelW;
-    const bool can = WritesPossible() && !worker_.Running();
+    const bool can = WritesPossible() && Idle();   // disabled while any job runs
     const int n = (int)staged_.size();
     auto btn = [&](const std::wstring& label, int id, bool primary, bool enabled) {
         int w = TextW(dc, label, f.caption) + Sc(26);
@@ -2361,7 +2380,7 @@ void BiosModule::PaintPlan(HDC dc, const RECT& rc) {
     if (running)
         go = L"Writing " + std::to_wstring(std::min(execDone_ + 1, std::max(1, execTotal_))) + L" of " + std::to_wstring(execTotal_) + L"…";
     int right = x1;
-    right -= button(right, go, ID_PLAN_WRITE, p.bad, OnColor(p.bad), !running && WritesPossible()) + Sc(10);
+    right -= button(right, go, ID_PLAN_WRITE, p.bad, OnColor(p.bad), Idle() && WritesPossible()) + Sc(10);
     bool cancelling = running && worker_.Cancelled();
     button(right, running ? (cancelling ? L"Stopping…" : L"Stop after this variable") : L"Cancel", ID_PLAN_CANCEL, p.chip, p.text,
            !cancelling);
@@ -3049,6 +3068,16 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         m.OnInput(WM_KEYDOWN, VK_TAB, 0);
         bool skip = m.focus_ == Focus::List;
         check(toEdit && wrap && skip, L"keyboard: Tab goes Detail -> value field -> List, skipping the field when it isn't shown");
+
+        // Nits: no silent early return from StartWrite; a refused close says why.
+        m.planOpen_ = false;
+        m.notice_.clear();
+        m.StartWrite();
+        bool told = m.job_ == Job::None && !m.notice_.empty() && kmp->writes == 0;
+        m.job_ = Job::Write;
+        bool refusedClose = !m.CanClose() && th.status == L"A BIOS write is running; it stops after the current variable";
+        m.job_ = Job::None;
+        check(told && refusedClose && m.CanClose(), L"StartWrite without a plan shows a notice; a close during a write is refused with a status");
     }
 }
 
