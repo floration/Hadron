@@ -46,6 +46,12 @@ void PutSub(std::string& o) {
     L(o, "set \"N=%~1\"");
     L(o, "reg query \"%K%\\%N%\" >nul 2>&1");
     L(o, "if errorlevel 1 goto :miss");
+    // Never write over a key that is Boot or System start now: the exclusions were judged at an earlier state, and a
+    // storage driver that became the boot path since (an AHCI/RAID switch) must keep its value (Analyze r2).
+    L(o, "set \"CUR=\"");
+    L(o, "for /f \"tokens=1,3\" %%A in ('reg query \"%K%\\%N%\" /v Start 2^>nul') do if /i \"%%A\"==\"Start\" set \"CUR=%%B\"");
+    L(o, "if \"%CUR%\"==\"0x0\" goto :sysnow");
+    L(o, "if \"%CUR%\"==\"0x1\" goto :sysnow");
     L(o, "reg add \"%K%\\%N%\" /v Start /t REG_DWORD /d %~2 /f >nul");
     L(o, "if errorlevel 1 goto :bad");
     L(o, "if \"%~3\"==\"-\" goto :putok");
@@ -58,6 +64,10 @@ void PutSub(std::string& o) {
     L(o, ":miss");
     L(o, "echo skip \"%N%\": no such key");
     L(o, "set /a MISS+=1");
+    L(o, "exit /b 0");
+    L(o, ":sysnow");
+    L(o, "echo skip \"%N%\": Start is now %CUR%, Boot or System start: left as it is");
+    L(o, "set /a SYS+=1");
     L(o, "exit /b 0");
     L(o, ":bad");
     L(o, "echo FAILED \"%N%\": Start was not written");
@@ -76,7 +86,8 @@ std::string RestoreCmd(const std::wstring& stamp, const std::wstring& title, con
     L(o, "rem Hadron services offline recovery, " + Rem(stamp) + ": " + Rem(title));
     L(o, "rem Run from WinRE > Troubleshoot > Advanced options > Command Prompt. See README.txt.");
     L(o, "rem It writes only Start (and DelayedAutostart where noted) for service keys that already exist.");
-    L(o, "rem It never creates or deletes a key and never searches other drives.");
+    L(o, "rem It never creates or deletes a key, never changes a key that is Boot or System start now,");
+    L(o, "rem and never searches other drives.");
     L(o, "setlocal EnableExtensions");
     L(o, "set \"T=%~1\"");
     L(o, "if \"%T%\"==\"\" set \"T=%~d0\"");
@@ -92,6 +103,7 @@ std::string RestoreCmd(const std::wstring& stamp, const std::wstring& title, con
     L(o, "echo Control set: ControlSet%CSN:~-3%");
     L(o, "set /a OK=0");
     L(o, "set /a MISS=0");
+    L(o, "set /a SYS=0");
     L(o, "set /a BAD=0");
     int skipped = 0;
     for (auto& r : rows) {
@@ -104,7 +116,7 @@ std::string RestoreCmd(const std::wstring& stamp, const std::wstring& title, con
         L(o, "echo " + std::to_string(skipped) + " names can't be typed in this script: see README.txt, section C.");
     L(o, "reg unload HKLM\\HXOFF");
     L(o, "if errorlevel 1 echo WARNING: reg unload HKLM\\HXOFF failed. Close regedit, then run: reg unload HKLM\\HXOFF");
-    L(o, "echo Done: %OK% restored, %MISS% not on this Windows, %BAD% failed.");
+    L(o, "echo Done: %OK% restored, %MISS% not on this Windows, %SYS% now Boot or System start (left as they are), %BAD% failed.");
     L(o, "if not \"%BAD%\"==\"0\" echo Failed rows: see README.txt, section E.");
     L(o, "echo Close this window and choose Continue to start Windows.");
     L(o, "exit /b 0");
@@ -137,13 +149,14 @@ std::string RestoreOnlineCmd(const std::wstring& stamp, const std::vector<Restor
     L(o, "set \"K=HKLM\\SYSTEM\\CurrentControlSet\\Services\"");
     L(o, "set /a OK=0");
     L(o, "set /a MISS=0");
+    L(o, "set /a SYS=0");
     L(o, "set /a BAD=0");
     for (auto& r : rows) {
         if (!CmdSafeName(r.name)) continue;
         std::string d = r.writeDelayed ? std::to_string(r.cfg.delayed < 0 ? 0 : r.cfg.delayed) : "-";
         L(o, "call :put \"" + A(r.name) + "\" " + std::to_string(r.cfg.start) + " " + d);
     }
-    L(o, "echo Done: %OK% restored, %MISS% not found, %BAD% failed. Restart Windows normally.");
+    L(o, "echo Done: %OK% restored, %MISS% not found, %SYS% now Boot or System start (left as they are), %BAD% failed. Restart Windows normally.");
     L(o, "if not \"%BAD%\"==\"0\" echo Failed rows: see README.txt, section E.");
     L(o, "exit /b 0");
     L(o, "");

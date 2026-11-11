@@ -81,6 +81,13 @@ set_property(SOURCE "${HADRON_ROOT}/modules/services/resources/services.rc" APPE
 # Windows SDK libraries only (hard rule 3): advapi32 (SCM, registry, tokens), version (VERSIONINFO company),
 # shell32/ole32 (known folders), cfgmgr32/setupapi (devnodes and the boot disk).
 target_link_libraries(mod_services PUBLIC advapi32 version shell32 ole32 cfgmgr32 setupapi)
+# Two selftest hooks in Store (owner check and reparse injection) for Wine, which can't set an owner or make a
+# reparse point. OFF by default: a release build has no such code at all. CI turns it on for the Wine run only, in
+# a separate build folder.
+option(HADRON_SERVICES_TEST_HOOKS "Services: Wine-only selftest hooks in Store (never in a release build)" OFF)
+if(HADRON_SERVICES_TEST_HOOKS)
+  target_compile_definitions(mod_services PRIVATE HX_SERVICES_TEST_HOOKS=1)
+endif()
 
 # --- suite --------------------------------------------------------------------------------------
 # registry.cpp is compiled into the suite exe (not core) so the module factories resolve without a

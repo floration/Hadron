@@ -94,19 +94,23 @@ public:
     static std::wstring DefaultRoot(std::wstring* err);    // %ProgramData%\Hadron\services
     // Creates the root (and missing parents, up to the volume or share root). secure: the root gets a protected
     // DACL, Administrators + SYSTEM full control, inherited. On every call (the folder may have been made by
-    // someone else): the root and each parent must not be a reparse point; with secure, the root's owner must be
-    // Administrators or SYSTEM and the protected DACL is (re)applied. Any failure: false, with the reason, and
-    // the caller writes nothing there.
+    // someone else): the root and each parent must not be a reparse point; with secure, the folder that holds the
+    // root (unless that is a volume or share root) must be owned by Administrators, SYSTEM or TrustedInstaller
+    // (checked before the root is created), the root's owner must be Administrators or SYSTEM, and the protected
+    // DACL is (re)applied. Any failure: false, with the reason, and the caller writes nothing there.
     bool EnsureRoot(bool secure, std::wstring* err);
     // The path without a \\?\ prefix (\\?\UNC\x -> \\x), for display and for the README.
     static std::wstring Plain(const std::wstring& path);
-    // Selftest under Wine only: Wine ignores the owner in a security descriptor (every file is owned by the
-    // user running Wine), so there the selftest lets this process's own user pass the owner check. The module
-    // never sets it; on Windows the selftest runs the strict check.
+#ifdef HX_SERVICES_TEST_HOOKS
+    // Test builds only (CMake -DHADRON_SERVICES_TEST_HOOKS=ON, which CI uses for the Wine run alone): these two do
+    // not exist in a release build, so nothing there can relax EnsureRoot.
+    // Wine ignores the owner in a security descriptor (every file is owned by the user running Wine), so there the
+    // selftest lets this process's own user pass the owner checks. On Windows the selftest runs them strictly.
     static bool& AcceptTokenUserAsOwner();
-    // Selftest only, where the system can't make a reparse point (Wine): EnsureRoot treats this exact path (no
-    // \\?\ prefix) as one. Empty, the default, injects nothing.
+    // Where the system can't make a reparse point (Wine): EnsureRoot treats this exact path (no \\?\ prefix) as
+    // one. Empty, the default, injects nothing.
     static std::wstring& InjectedReparsePoint();
+#endif
     std::wstring Path(const std::wstring& rel) const;
     bool Exists(const std::wstring& rel) const;
     bool MakeDir(const std::wstring& rel, std::wstring* err);

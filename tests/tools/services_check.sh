@@ -6,6 +6,8 @@
 # 3. --selftest standalone and in the suite (fake backend, temp data dirs; the live part only enumerates).
 # 4. --dump-plan for every tab x level must equal tests/golden/services/plan-<tab>-<level>.txt.
 # 5. Screenshots, one xvfb-run each. Nothing here touches a real service: fixture mode never applies.
+# Under Wine <build-dir> must be configured with -DHADRON_SERVICES_TEST_HOOKS=ON (Wine can't set folder owners or
+# make reparse points); release builds never are.
 set -euo pipefail
 BUILD="${1:?build dir}"; OUT="${2:?output dir}"
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"

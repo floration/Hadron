@@ -83,11 +83,6 @@ void SortRows(Plan* p) {
     });
 }
 
-const SvcItem* FindItem(const std::vector<SvcItem>& items, const std::wstring& name) {
-    for (auto& i : items) if (IEq(i.name, name)) return &i;
-    return nullptr;
-}
-
 std::wstring TabName(int tab) { return tab == TAB_DRIVERS ? L"Drivers" : L"Services"; }
 
 // A7: restores compare and write the raw DelayedAutostart value, as BuildSingle does. Delayed() is false for any
@@ -446,7 +441,7 @@ Plan BuildControl(const SvcItem& s, int what, Backend& b, const std::vector<SvcI
     return p;
 }
 
-Plan BuildUndo(const UndoLog& log, Backend& b, const Ctx& c) {
+Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items, const Ctx& c) {
     Plan p;
     p.kind = PlanKind::Undo;
     p.source = L"undo:" + log.stamp;
@@ -484,6 +479,9 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const Ctx& c) {
         if (std::wstring g = TargetGuard(live, u.before, c); !g.empty()) { r.blocked = g; r.include = false; r.canToggle = false; }
         p.rows.push_back(r);
     }
+    // Undo raises rows back; a row blocked or unticked for drift can leave a raised dependent without its
+    // dependency, and a lowering row can sit under something enabled since.
+    DependencyCheck(&p, items);
     SortRows(&p);
     p.notes.push_back(L"Undo restores only the start values Hadron changed, from the values recorded before the change.");
     return p;
@@ -528,7 +526,7 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
     return p;
 }
 
-void MarkTi(Plan* p, Backend& b, bool tiOn) {
+void MarkTi(Plan* p, Backend& b, bool tiOn, const std::vector<SvcItem>& items) {
     int needTi = 0;
     for (auto& r : p->rows) {
         if (!r.blocked.empty() || p->kind == PlanKind::Control) continue;
@@ -555,27 +553,58 @@ void MarkTi(Plan* p, Backend& b, bool tiOn) {
         p->notes.insert(p->notes.begin(), c + (tiOn ? L"written while impersonating it; Hadron starts it if needed and stops it after."
                                                     : L"left out while the TrustedInstaller toggle is off."));
     }
+    // A row left out here (or the TrustedInstaller row blocked) keeps its item at its current start, which can
+    // leave a ticked row disabling something that now stays enabled: check again (Analyze A8).
+    DependencyCheck(p, items);
     SortRows(p);
 }
 
 namespace {
+// Who depends on what, built once per DependencyCheck so a round costs rows x (dependents + deps), not
+// rows x items x deps.
+struct DepIndex {
+    const std::vector<SvcItem>& items;
+    std::map<std::wstring, int> byName;                          // lower(name) -> item index
+    std::map<std::wstring, std::vector<int>> dependents;         // lower(name) -> items naming it in DependOnService
+    std::map<std::wstring, std::vector<int>> groupDependents;    // lower(group) -> items depending on +group
+    std::map<std::wstring, std::vector<int>> members;            // lower(group) -> items in the group
+    explicit DepIndex(const std::vector<SvcItem>& it) : items(it) {
+        for (int i = 0; i < (int)items.size(); i++) {
+            const SvcItem& s = items[i];
+            byName.emplace(Lower(s.name), i);
+            if (!s.group.empty()) members[Lower(s.group)].push_back(i);
+            if (s.kind == Kind::UserInstance) continue;   // never counted as a dependent
+            for (auto& d : s.deps) {
+                if (d.size() > 1 && d[0] == L'+') groupDependents[Lower(d.substr(1))].push_back(i);
+                else dependents[Lower(d)].push_back(i);
+            }
+        }
+    }
+    const SvcItem* Find(const std::wstring& name) const {
+        auto it = byName.find(Lower(name));
+        return it == byName.end() ? nullptr : &items[it->second];
+    }
+};
+
 // One row's dependency warning against the start every item ends with if the ticked rows are applied.
-std::wstring DepWarning(const PlanRow& r, const std::vector<SvcItem>& items, const std::map<std::wstring, int>& fin) {
+std::wstring DepWarning(const PlanRow& r, const DepIndex& ix, const std::map<std::wstring, int>& fin) {
     auto end = [&](const std::wstring& name) { auto it = fin.find(Lower(name)); return it == fin.end() ? -1 : it->second; };
     std::wstring out;
-    const SvcItem* self = FindItem(items, r.name);
+    const SvcItem* self = ix.Find(r.name);
     if (r.after.start == 4) {   // disabling: does anything that stays enabled depend on it?
+        std::vector<int> dep;
+        if (auto it = ix.dependents.find(Lower(r.name)); it != ix.dependents.end()) dep = it->second;
         std::wstring group = self ? Lower(self->group) : L"";
+        if (!group.empty())
+            if (auto it = ix.groupDependents.find(group); it != ix.groupDependents.end()) dep.insert(dep.end(), it->second.begin(), it->second.end());
+        std::sort(dep.begin(), dep.end());   // item order, as the list shows them
+        dep.erase(std::unique(dep.begin(), dep.end()), dep.end());
         std::vector<std::wstring> who;
-        for (auto& s : items) {
-            if (s.kind == Kind::UserInstance || IEq(s.name, r.name)) continue;
-            bool dep = false;
-            for (auto& d : s.deps) {
-                if (IEq(d, r.name)) dep = true;
-                else if (!group.empty() && d.size() > 1 && d[0] == L'+' && Lower(d.substr(1)) == group) dep = true;
-            }
+        for (int i : dep) {
+            const SvcItem& s = ix.items[i];
+            if (IEq(s.name, r.name)) continue;
             int e = end(s.name);
-            if (dep && e != 4) who.push_back(s.name + L" (" + StartName(e) + L")");
+            if (e != 4) who.push_back(s.name + L" (" + StartName(e) + L")");
         }
         if (!who.empty())
             out = Join(who, L", ") + (who.size() == 1 ? L" depends on it and stays enabled" : L" depend on it and stay enabled") +
@@ -585,10 +614,9 @@ std::wstring DepWarning(const PlanRow& r, const std::vector<SvcItem>& items, con
         const std::vector<std::wstring>& deps = self ? self->deps : r.deps;
         for (auto& d : deps) {
             if (d.size() > 1 && d[0] == L'+') {
-                std::wstring g = Lower(d.substr(1));
                 int members = 0, off = 0;
-                for (auto& s : items)
-                    if (Lower(s.group) == g) { members++; if (end(s.name) == 4) off++; }
+                if (auto it = ix.members.find(Lower(d.substr(1))); it != ix.members.end())
+                    for (int i : it->second) { members++; if (end(ix.items[i].name) == 4) off++; }
                 if (members && members == off) need.push_back(L"group " + d.substr(1));
             } else if (end(d) == 4) {
                 need.push_back(d);
@@ -602,34 +630,73 @@ std::wstring DepWarning(const PlanRow& r, const std::vector<SvcItem>& items, con
 }
 }  // namespace
 
+const wchar_t* const kDepNotSettled = L"The dependency check did not settle";
+
 void DependencyCheck(Plan* p, const std::vector<SvcItem>& items, int toggled) {
     if (p->kind == PlanKind::Control) return;
-    if (toggled >= 0 && toggled < (int)p->rows.size()) p->rows[toggled].depUnticked = false;   // the user's choice now
-    // Iterate to a fixed point: unticking one row can leave a dependency of it with an enabled dependent (aaa <- bbb
-    // <- ccc), and ticking one can clear another's warning. Rows the check unticked come back when the reason goes.
-    for (size_t round = 0; round <= 2 * p->rows.size() + 2; round++) {
-        std::map<std::wstring, int> fin;
-        for (auto& s : items) fin[Lower(s.name)] = s.cfg.start;
-        for (auto& r : p->rows) if (r.blocked.empty() && r.include) fin[Lower(r.name)] = r.after.start;
+    std::vector<PlanRow>& rows = p->rows;
+    const std::wstring tag = kDepNotSettled;
+    p->notes.erase(std::remove_if(p->notes.begin(), p->notes.end(),
+                                  [&](const std::wstring& n) { return n.compare(0, tag.size(), tag) == 0; }),
+                   p->notes.end());
+    const bool hasToggled = toggled >= 0 && toggled < (int)rows.size();
+    if (hasToggled) { rows[toggled].depUnticked = false; rows[toggled].depKept = false; }   // the user's choice now
+    const DepIndex ix(items);
+    std::map<std::wstring, int> base;
+    for (auto& s : items) base[Lower(s.name)] = s.cfg.start;
+    auto kept = [&](size_t k) { return (int)k == toggled || rows[k].depKept; };
+    // One round against the end state of the ticked rows. untickOnly never ticks a row again, so the ticked set
+    // only shrinks and repeated rounds always settle.
+    auto round = [&](bool untickOnly) {
+        std::map<std::wstring, int> fin = base;
+        for (auto& r : rows) if (r.blocked.empty() && r.include) fin[Lower(r.name)] = r.after.start;
         bool changed = false;
-        for (size_t k = 0; k < p->rows.size(); k++) {
-            PlanRow& r = p->rows[k];
-            std::wstring w = r.blocked.empty() ? DepWarning(r, items, fin) : L"";
-            bool fresh = r.depWarning.empty() && !w.empty();
-            if (w.empty() && r.depUnticked && r.blocked.empty() && r.canToggle) {
+        for (size_t k = 0; k < rows.size(); k++) {
+            PlanRow& r = rows[k];
+            std::wstring w = r.blocked.empty() ? DepWarning(r, ix, fin) : L"";
+            if (!untickOnly && w.empty() && r.depUnticked && r.blocked.empty() && r.canToggle) {
                 r.include = true;
                 r.depUnticked = false;
                 changed = true;
             }
-            r.depWarning = w;
-            if (fresh && r.include && (int)k != toggled) {
+            if (!w.empty() && r.include && r.blocked.empty() && !kept(k)) {
                 r.include = false;
                 r.depUnticked = true;
                 changed = true;
             }
+            r.depWarning = w;
         }
-        if (!changed) break;
+        return changed;
+    };
+    // Iterate to a fixed point: unticking one row can leave a dependency of it with an enabled dependent (aaa <- bbb
+    // <- ccc), and ticking one can clear another's warning. Rows the check unticked come back when the reason goes.
+    // A state seen before means it would go round forever (Analyze A9): stop there.
+    std::vector<std::vector<char>> seen;
+    bool settled = false;
+    for (size_t n = 0; n <= 2 * rows.size() + 2; n++) {
+        std::vector<char> st;
+        st.reserve(rows.size() * 2);
+        for (auto& r : rows) { st.push_back(r.include); st.push_back(r.depUnticked); }
+        if (std::find(seen.begin(), seen.end(), st) != seen.end()) break;
+        seen.push_back(std::move(st));
+        if (!round(false)) { settled = true; break; }
     }
+    if (!settled) {
+        int before = 0, after = 0;
+        for (auto& r : rows) before += r.include && r.blocked.empty();
+        while (round(true)) {}
+        for (auto& r : rows) after += r.include && r.blocked.empty();
+        // A row unticked in the circle may have no warning against the final state (its partner is unticked too).
+        for (auto& r : rows)
+            if (r.depUnticked && !r.include && r.blocked.empty() && r.depWarning.empty())
+                r.depWarning = L"left unticked: its dependencies conflict with another row's in a circle (see the note at the top)";
+        p->notes.insert(p->notes.begin(),
+                        tag + L": some rows' dependency warnings depend on each other (raising one needs another that a "
+                        L"second row disables), so every row with a dependency problem was left unticked (" +
+                        std::to_wstring(before - after) + L" more than usual). Read their warnings before ticking any.");
+    }
+    if (hasToggled) rows[toggled].depKept = rows[toggled].include && !rows[toggled].depWarning.empty();
+    for (auto& r : rows) if (r.depWarning.empty()) r.depKept = false;
 }
 
 std::vector<size_t> ApplyOrder(const Plan& p) {

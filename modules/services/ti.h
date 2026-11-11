@@ -15,8 +15,9 @@ namespace hx::services {
 extern const wchar_t kTiSid[];
 
 // The TrustedInstaller *service* half of the live provider, through the Backend only (testable on the fake).
-// Ensure starts the service only when it is STOPPED, and claims it ("Hadron started it") only when that start
-// succeeded; START_PENDING is someone else's start: waited for, never claimed. StopIfStarted stops it only when
+// Ensure starts the service only when it is STOPPED (STOP_PENDING is waited out first), and claims it ("Hadron
+// started it") only when Control reports that its own request started it (not ERROR_SERVICE_ALREADY_RUNNING);
+// START_PENDING is someone else's start: waited for, never claimed. StopIfStarted stops it only when
 // claimed. Both drop the claim, so one apply's start is never carried into the next apply.
 class TiService {
 public:

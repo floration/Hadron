@@ -793,14 +793,14 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
             if (it && b) p = BuildControl(*it, r.what, *b, j.items);
             break;
         case PlanReq::Undo:
-            if (b && r.logIndex >= 0 && r.logIndex < (int)j.logs.size()) p = BuildUndo(j.logs[r.logIndex], *b, c);
+            if (b && r.logIndex >= 0 && r.logIndex < (int)j.logs.size()) p = BuildUndo(j.logs[r.logIndex], *b, j.items, c);
             break;
         case PlanReq::Resume:
             if (b && r.logIndex >= 0 && r.logIndex < (int)j.logs.size()) p = BuildResume(j.logs[r.logIndex], *b, j.items, c);
             break;
         case PlanReq::None: break;
     }
-    if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, j.tiOn);
+    if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, j.tiOn, j.items);   // re-runs the dependency check
     return p;
 }
 

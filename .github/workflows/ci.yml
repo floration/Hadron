@@ -93,10 +93,15 @@ jobs:
           bash tests/tools/bios_check.sh build shots
       # Hard rule 7 gate (genkb selftest + byte-for-byte services.db), the fixture cmp, both selftests,
       # the 8 golden plans and the screenshots. Fixture mode only: nothing is applied to any service.
+      # Wine can't set a folder owner or make a reparse point, so this runs a separate test build with the Store
+      # selftest hooks (HADRON_SERVICES_TEST_HOOKS); the build above, like every release build, has none.
       - name: Services KB, selftests, golden plans and screenshots (Wine + Xvfb)
         run: |
           export WINEPREFIX="$PWD/.wine"
-          bash tests/tools/services_check.sh build shots
+          cmake -S . -B build-svctest -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DHADRON_SERVICES_TEST_HOOKS=ON
+          cmake --build build-svctest --target HadronServices Hadron
+          bash tests/tools/services_check.sh build-svctest shots
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-linux
@@ -164,8 +169,9 @@ jobs:
           "ok: 8 plans and the delayedlinger plan match tests/golden/services"
       # Wine's cmd tolerates what real cmd.exe rejects (a ")" in a name closing an IF block), so the generated
       # restore.cmd runs here on the real one. restore-dryrun.cmd is the golden script with every reg call echoed
-      # (call :dry), Select\Current read as 1 and an extra "Intel(R) Dry Run (x86)" row fed to :put: nothing
-      # touches the registry. It must reach "Done:" with every row restored and no syntax error.
+      # (call :dry), Select\Current read as 1, every Start read as 3, an extra "Intel(R) Dry Run (x86)" row fed to
+      # :put, and a "Dry Boot Now" row whose Start reads as 0 (must be skipped): nothing touches the registry. It must
+      # reach "Done:" with every other row restored and no syntax error.
       - name: Services restore.cmd on real cmd.exe (echo only)
         shell: pwsh
         run: |
@@ -176,11 +182,14 @@ jobs:
           if ($text -match 'was unexpected at this time') { throw "cmd.exe reported a syntax error in restore.cmd" }
           if ($code) { throw "restore-dryrun.cmd exited $code" }
           if ($text -notmatch 'restored "Intel\(R\) Dry Run \(x86\)" Start=3') { throw "the (R) row did not get through :put" }
-          if ($text -notmatch 'Done: 5 restored, 0 not on this Windows, 0 failed\.') { throw "restore-dryrun.cmd did not reach the end" }
+          if ($text -notmatch 'skip "Dry Boot Now": Start is now 0x0') { throw "a key that is Boot start now was not skipped" }
+          if ($text -match 'DRYRUN reg add "[^"]*\\Dry Boot Now"') { throw "a key that is Boot start now was written" }
+          if ($text -notmatch 'Done: 5 restored, 0 not on this Windows, 1 now Boot or System start \(left as they are\), 0 failed\.') { throw "restore-dryrun.cmd did not reach the end" }
           if ($text -notmatch 'DRYRUN reg unload HKLM\\HXOFF') { throw "the unload line was not reached" }
           "ok: the generated restore.cmd runs to the end on real cmd.exe"
       # The one test that writes a real service: a throwaway HadronTestSvc this step creates and deletes.
-      # Hadron sets its start type, verifies, undoes and verifies (--live-test refuses any other name).
+      # Hadron sets its start type, verifies, undoes and verifies (--live-test refuses any other name). The data
+      # folder sits in a folder Hadron creates (owner Administrators), as the parent-owner check requires.
       - name: Services live test (dummy service)
         shell: pwsh
         run: |
@@ -188,7 +197,7 @@ jobs:
           if ($LASTEXITCODE) { throw "sc.exe create failed" }
           try {
             $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live.txt `
-              -ArgumentList '--live-test','HadronTestSvc','--data-dir',"$env:RUNNER_TEMP\svc-live"
+              -ArgumentList '--live-test','HadronTestSvc','--data-dir',"$env:RUNNER_TEMP\hadron-live\services"
             Get-Content live.txt
             if ($p.ExitCode) { throw "live test exited $($p.ExitCode)" }
           } finally {
@@ -204,7 +213,7 @@ jobs:
           if ($LASTEXITCODE) { throw "sc.exe create failed" }
           try {
             $p = Start-Process build\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live-ti.txt `
-              -ArgumentList '--live-test','HadronTestSvc','--ti','--data-dir',"$env:RUNNER_TEMP\svc-live-ti"
+              -ArgumentList '--live-test','HadronTestSvc','--ti','--data-dir',"$env:RUNNER_TEMP\hadron-live-ti\services"
             Get-Content live-ti.txt
             if ($p.ExitCode) { throw "TI live test exited $($p.ExitCode)" }
           } finally {

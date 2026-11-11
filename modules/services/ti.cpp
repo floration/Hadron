@@ -115,9 +115,18 @@ bool TiService::Ensure(SvcItem* ti, std::wstring* err) {
     started_ = false;
     std::wstring e;
     if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read the TrustedInstaller service: " + e; return false; }
+    // Stopping (Windows Update finishing, or its idle timeout): wait for STOPPED, then start it like a stopped one.
+    DWORD s0 = GetTickCount();
+    while (ti->state == SERVICE_STOP_PENDING && GetTickCount() - s0 < waitMs) {
+        Sleep(pollMs);
+        if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read the TrustedInstaller service: " + e; return false; }
+    }
     if (ti->state == SERVICE_STOPPED) {
-        if (!b_->Control(L"TrustedInstaller", Op::Start, nullptr, &e)) { *err = L"could not start TrustedInstaller: " + e; return false; }
-        started_ = true;   // our StartService succeeded from STOPPED: only then is it Hadron's to stop
+        bool own = false;
+        if (!b_->Control(L"TrustedInstaller", Op::Start, nullptr, &e, &own)) { *err = L"could not start TrustedInstaller: " + e; return false; }
+        // Claimed only when our own start request started it. ERROR_SERVICE_ALREADY_RUNNING means Windows started it
+        // between the Query and the start: it stays Windows's.
+        started_ = own;
         if (!b_->Query(L"TrustedInstaller", ti, &e)) { *err = L"could not read TrustedInstaller after starting it: " + e; return false; }
     }
     // Someone else is starting it: wait for RUNNING, but it stays theirs.

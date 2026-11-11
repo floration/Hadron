@@ -45,6 +45,9 @@ bool FakeBackend::Enumerate(std::vector<SvcItem>* out, std::wstring* err) {
 bool FakeBackend::Query(const std::wstring& name, SvcItem* out, std::wstring* err) {
     SvcItem* i = Find(name);
     if (!i || faults.vanish.count(Lower(name))) { *err = L"The specified service does not exist as an installed service."; return false; }
+    if (auto sp = faults.stopPendingQueries.find(Lower(name)); sp != faults.stopPendingQueries.end() && i->state == SERVICE_STOP_PENDING) {
+        if (sp->second-- <= 0) { i->state = SERVICE_STOPPED; faults.stopPendingQueries.erase(sp); }
+    }
     if (faults.changeOnQuery.count(Lower(name))) {
         faults.changeOnQuery.erase(Lower(name));
         i->cfg.start = i->cfg.start == 3 ? 2 : 3;   // something else changed it
@@ -92,15 +95,18 @@ bool FakeBackend::SetStart(const std::wstring& name, const WriteOp& w, Identity 
     return true;
 }
 
-bool FakeBackend::Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err) {
+bool FakeBackend::Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err, bool* ownStart) {
     (void)cancel;
+    if (ownStart) *ownStart = false;
     SvcItem* i = Find(name);
     if (!i) { *err = L"The specified service does not exist as an installed service."; return false; }
     if (IsDriverType(i->type)) { *err = L"Drivers are never loaded or unloaded live."; return false; }
     if (op == Op::Start) {
         if (i->cfg.start == 4) { *err = L"The service cannot be started, either because it is disabled or because it has no enabled devices associated with it."; return false; }
+        bool race = faults.startRace.erase(Lower(name)) > 0;   // Windows started it between the caller's Query and this
+        if (ownStart) *ownStart = i->state == SERVICE_STOPPED && !race;
         i->state = SERVICE_RUNNING;
-        controlLog.push_back(L"start " + name);
+        controlLog.push_back(race ? L"start " + name + L" (already running)" : L"start " + name);
     } else {
         i->state = SERVICE_STOPPED;
         controlLog.push_back(L"stop " + name);

@@ -10,6 +10,7 @@
 #include "modules/services/hw.h"
 #include "modules/services/model.h"
 #include <atomic>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -37,7 +38,10 @@ public:
     // *denied = true on ERROR_ACCESS_DENIED (the plan marks the row "needs TrustedInstaller").
     virtual bool CanWrite(const std::wstring& name, bool* denied, std::wstring* err) = 0;
     virtual bool SetStart(const std::wstring& name, const WriteOp& w, Identity id, std::wstring* err) = 0;
-    virtual bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err) = 0;
+    // *ownStart (optional) is true only when this call's own start request took the service out of STOPPED;
+    // false when it was already running (ERROR_SERVICE_ALREADY_RUNNING: someone else started it first).
+    virtual bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err,
+                         bool* ownStart = nullptr) = 0;
     virtual bool ReadHw(HwInfo* out) = 0;
     virtual std::wstring Build() = 0;         // "19045"
     virtual std::wstring MachineGuid() = 0;
@@ -55,6 +59,8 @@ struct FakeFaults {
     std::set<std::wstring> vanish;        // Query fails (item gone) from the next call on
     std::set<std::wstring> changeOnQuery; // the next Query first flips the item's start type (changed since plan)
     std::set<std::wstring> verifyMismatch;// SetStart "succeeds" but Windows keeps the old value
+    std::set<std::wstring> startRace;     // a start request finds it already running (someone else started it first)
+    std::map<std::wstring, int> stopPendingQueries;   // a STOP_PENDING item reads STOPPED after this many more Queries
     int setStartCalls = 0;
 };
 
@@ -76,7 +82,8 @@ public:
     bool Dependents(const std::wstring& name, std::vector<std::wstring>* active, std::wstring* err) override;
     bool CanWrite(const std::wstring& name, bool* denied, std::wstring* err) override;
     bool SetStart(const std::wstring& name, const WriteOp& w, Identity id, std::wstring* err) override;
-    bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err) override;
+    bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err,
+                 bool* ownStart = nullptr) override;
     bool ReadHw(HwInfo* out) override { *out = hw_; return hw_.ok; }
     std::wstring Build() override { return build_; }
     std::wstring MachineGuid() override { return machine_; }

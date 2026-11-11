@@ -2,7 +2,8 @@
 rem Hadron services offline recovery, first: start types as recorded when Hadron first ran
 rem Run from WinRE > Troubleshoot > Advanced options > Command Prompt. See README.txt.
 rem It writes only Start (and DelayedAutostart where noted) for service keys that already exist.
-rem It never creates or deletes a key and never searches other drives.
+rem It never creates or deletes a key, never changes a key that is Boot or System start now,
+rem and never searches other drives.
 setlocal EnableExtensions
 set "T=%~1"
 if "%T%"=="" set "T=%~d0"
@@ -18,6 +19,7 @@ set "K=HKLM\HXOFF\ControlSet%CSN:~-3%\Services"
 echo Control set: ControlSet%CSN:~-3%
 set /a OK=0
 set /a MISS=0
+set /a SYS=0
 set /a BAD=0
 call :put "DiagTrack" 2 -   & rem Auto
 call :put "dmwappushservice" 3 -   & rem Manual
@@ -117,7 +119,7 @@ call :put "xboxgip" 3 -   & rem Manual
 call :put "hvservice" 3 -   & rem Manual
 reg unload HKLM\HXOFF
 if errorlevel 1 echo WARNING: reg unload HKLM\HXOFF failed. Close regedit, then run: reg unload HKLM\HXOFF
-echo Done: %OK% restored, %MISS% not on this Windows, %BAD% failed.
+echo Done: %OK% restored, %MISS% not on this Windows, %SYS% now Boot or System start (left as they are), %BAD% failed.
 if not "%BAD%"=="0" echo Failed rows: see README.txt, section E.
 echo Close this window and choose Continue to start Windows.
 exit /b 0
@@ -126,6 +128,10 @@ exit /b 0
 set "N=%~1"
 reg query "%K%\%N%" >nul 2>&1
 if errorlevel 1 goto :miss
+set "CUR="
+for /f "tokens=1,3" %%A in ('reg query "%K%\%N%" /v Start 2^>nul') do if /i "%%A"=="Start" set "CUR=%%B"
+if "%CUR%"=="0x0" goto :sysnow
+if "%CUR%"=="0x1" goto :sysnow
 reg add "%K%\%N%" /v Start /t REG_DWORD /d %~2 /f >nul
 if errorlevel 1 goto :bad
 if "%~3"=="-" goto :putok
@@ -138,6 +144,10 @@ exit /b 0
 :miss
 echo skip "%N%": no such key
 set /a MISS+=1
+exit /b 0
+:sysnow
+echo skip "%N%": Start is now %CUR%, Boot or System start: left as it is
+set /a SYS+=1
 exit /b 0
 :bad
 echo FAILED "%N%": Start was not written

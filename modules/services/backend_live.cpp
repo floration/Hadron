@@ -315,7 +315,8 @@ public:
         return true;
     }
 
-    bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err) override {
+    bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err, bool* ownStart) override {
+        if (ownStart) *ownStart = false;
         if (!armed_) { *err = kNotArmed; return false; }
         Sc scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
         if (!scm) { *err = L"OpenSCManager: " + sys::ErrorText(GetLastError()); return false; }
@@ -325,7 +326,9 @@ public:
         if (!ReadOne(scm.h, name, nullptr, &cur, err)) return false;
         if (IsDriverType(cur.type)) { *err = L"Drivers are never loaded or unloaded live."; return false; }
         if (op == Op::Start) {
-            if (!StartServiceW(s.h, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+            if (StartServiceW(s.h, 0, nullptr)) {
+                if (ownStart) *ownStart = true;   // this request started it
+            } else if (GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
                 *err = L"StartService: " + sys::ErrorText(GetLastError());
                 return false;
             }

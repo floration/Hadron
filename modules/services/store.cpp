@@ -266,6 +266,7 @@ bool Store::Exists(const std::wstring& rel) const {
 
 std::wstring Store::Plain(const std::wstring& path) { return sys::ToShell(path); }
 
+#ifdef HX_SERVICES_TEST_HOOKS
 bool& Store::AcceptTokenUserAsOwner() {
     static bool accept = false;
     return accept;
@@ -275,6 +276,7 @@ std::wstring& Store::InjectedReparsePoint() {
     static std::wstring path;
     return path;
 }
+#endif
 
 namespace {
 // Length of the volume or share root of a full path without a \\?\ prefix: "C:\" -> 3, "\\srv\share\" -> its
@@ -293,6 +295,7 @@ size_t VolumeRootLen(const std::wstring& p) {
 // Owner Administrators, protected DACL: Administrators and SYSTEM full control, inherited by files and subfolders.
 const wchar_t kRootSddl[] = L"O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
 
+#ifdef HX_SERVICES_TEST_HOOKS
 bool IsTokenUser(PSID sid) {
     HANDLE tok = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
@@ -304,6 +307,40 @@ bool IsTokenUser(PSID sid) {
         same = EqualSid(reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, sid) != FALSE;
     CloseHandle(tok);
     return same;
+}
+bool HookOwner(PSID sid) { return Store::AcceptTokenUserAsOwner() && IsTokenUser(sid); }
+bool HookReparse(const std::wstring& path) { return !Store::InjectedReparsePoint().empty() && IEq(path, Store::InjectedReparsePoint()); }
+#else
+// Release builds: no hooks, nothing relaxes a check.
+constexpr bool HookOwner(PSID) { return false; }
+bool HookReparse(const std::wstring&) { return false; }
+#endif
+
+bool IsTiSid(PSID sid) {   // NT SERVICE\TrustedInstaller
+    PSID ti = nullptr;
+    if (!ConvertStringSidToSidW(L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", &ti)) return false;
+    bool same = EqualSid(ti, sid) != FALSE;
+    LocalFree(ti);
+    return same;
+}
+
+std::wstring SidText(PSID sid);
+
+// "" when the folder open in h is owned by Administrators or SYSTEM (or TrustedInstaller, when allowTi), else why
+// not. *owner gets the owner's name when one was read.
+std::wstring OwnerProblem(HANDLE h, const std::wstring& path, bool allowTi, std::wstring* owner) {
+    PSID sid = nullptr;
+    PSECURITY_DESCRIPTOR osd = nullptr;
+    std::wstring fail;
+    DWORD e = GetSecurityInfo(h, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &sid, nullptr, nullptr, nullptr, &osd);
+    if (e != ERROR_SUCCESS || !sid) fail = L"Could not read the owner of " + path + L": " + sys::ErrorText(e);
+    else if (!IsWellKnownSid(sid, WinBuiltinAdministratorsSid) && !IsWellKnownSid(sid, WinLocalSystemSid) &&
+             !(allowTi && IsTiSid(sid)) && !HookOwner(sid)) {
+        *owner = SidText(sid);
+        fail = L"owned";
+    }
+    if (osd) LocalFree(osd);
+    return fail;
 }
 
 std::wstring SidText(PSID sid) {
@@ -335,6 +372,25 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
     }
     for (size_t i = 0; i < chain.size(); i++) {
         const bool last = i + 1 == chain.size();
+        // The folder that holds the root (%ProgramData%\Hadron by default; never a volume or share root): its owner
+        // could rename the root aside and put their own in its place, so it must be Administrators, SYSTEM or
+        // TrustedInstaller too. Checked before the root is created or opened (Analyze r2).
+        if (last && secure && i > 0) {
+            HANDLE ph = CreateFileW(sys::ToExtended(chain[i - 1]).c_str(), READ_CONTROL | FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (ph == INVALID_HANDLE_VALUE) {
+                *err = L"Could not open " + chain[i - 1] + L" to check its owner: " + sys::ErrorText(GetLastError());
+                return false;
+            }
+            std::wstring who, why = OwnerProblem(ph, chain[i - 1], true, &who);
+            CloseHandle(ph);
+            if (why == L"owned")
+                why = chain[i - 1] + L", the folder that holds Hadron's data folder, is owned by " + who +
+                      L", not by Administrators, SYSTEM or TrustedInstaller. Its owner could swap the data folder for "
+                      L"their own, so changes are off. Rename it aside as an administrator and restart Hadron, or give it another --data-dir.";
+            if (!why.empty()) { *err = why; return false; }
+        }
         const std::wstring ext = sys::ToExtended(chain[i]);
         DWORD a = GetFileAttributesW(ext.c_str());
         if (a == INVALID_FILE_ATTRIBUTES) {
@@ -345,8 +401,11 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
             }
             PSECURITY_DESCRIPTOR sd = nullptr;
             SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
-            if (last && secure) {
-                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kRootSddl, SDDL_REVISION_1, &sd, nullptr)) {
+            // The root gets kRootSddl; the folder that holds it gets owner Administrators (with the inherited DACL), as
+            // the holding-folder check requires: an elevated token's default owner may be the user ("object creator").
+            const wchar_t* sddl = !secure ? nullptr : last ? kRootSddl : i + 2 == chain.size() ? L"O:BA" : nullptr;
+            if (sddl) {
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr)) {
                     *err = L"Could not build the data folder's DACL: " + sys::ErrorText(GetLastError());
                     return false;
                 }
@@ -359,7 +418,7 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
             a = GetFileAttributesW(ext.c_str());
             if (a == INVALID_FILE_ATTRIBUTES) { *err = L"Could not read " + chain[i] + L": " + sys::ErrorText(GetLastError()); return false; }
         }
-        if ((a & FILE_ATTRIBUTE_REPARSE_POINT) || (!InjectedReparsePoint().empty() && IEq(chain[i], InjectedReparsePoint()))) {
+        if ((a & FILE_ATTRIBUTE_REPARSE_POINT) || HookReparse(chain[i])) {
             *err = chain[i] + L" is a link (a junction, mount point or symbolic link). Hadron never writes through one, so changes "
                               L"are off. Remove the link as an administrator, or give Hadron another --data-dir.";
             return false;
@@ -380,16 +439,12 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
     else if (bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) fail = plain + L" is a link (a reparse point). Hadron never writes through one.";
     else if (!(bi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) fail = plain + L" is not a folder.";
     if (fail.empty()) {
-        PSID owner = nullptr;
-        PSECURITY_DESCRIPTOR osd = nullptr;
-        DWORD e = GetSecurityInfo(h, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &osd);
-        if (e != ERROR_SUCCESS || !owner) fail = L"Could not read the owner of " + plain + L": " + sys::ErrorText(e);
-        else if (!IsWellKnownSid(owner, WinBuiltinAdministratorsSid) && !IsWellKnownSid(owner, WinLocalSystemSid) &&
-                 !(AcceptTokenUserAsOwner() && IsTokenUser(owner)))
-            fail = plain + L" is owned by " + SidText(owner) +
+        std::wstring who;
+        fail = OwnerProblem(h, plain, false, &who);
+        if (fail == L"owned")
+            fail = plain + L" is owned by " + who +
                    L", not by Administrators or SYSTEM, so another program may have made it and could change what Hadron "
                    L"writes there. Changes are off. Rename it aside as an administrator and restart Hadron, or give it another --data-dir.";
-        if (osd) LocalFree(osd);
     }
     if (fail.empty()) {
         PSECURITY_DESCRIPTOR sd = nullptr;

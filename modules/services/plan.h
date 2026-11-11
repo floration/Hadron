@@ -54,6 +54,7 @@ struct PlanRow {
     std::wstring reason, basis, basisNote, evidence, warning, contested;
     std::wstring depWarning;           // DependencyCheck's own warning, recomputed on every toggle
     bool depUnticked = false;          // DependencyCheck unticked it (ticked again when the reason goes)
+    bool depKept = false;              // the user ticked it while it had a dependency warning: never unticked by the check
     bool needsTi = false;
     int seq = 0;                       // undo/resume: the original log sequence
     Op ctl = Op::Stop;                 // control plans: the operation for this row
@@ -82,16 +83,25 @@ Plan BuildControl(const SvcItem& item, int what /*0 start, 1 stop, 2 restart*/, 
 // Undo and Resume refuse a log whose machine GUID or build differs from the PC's (empty plan, the reason as a
 // note), and run every row through the same guards as a plan (CheckGuard on the live item, no Boot start, no
 // Boot/System on a service, System-start drivers only with sysok): a log has a CRC, not an author.
-Plan BuildUndo(const UndoLog& log, Backend& b, const Ctx& c);
+// Both run the dependency check against items (the loaded list) like every other plan source.
+Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items, const Ctx& c);
 Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items, const Ctx& c);
 // Marks rows whose admin write is refused (CanWrite) as "needs TrustedInstaller"; with the toggle off they
 // are excluded with the reason shown. The TrustedInstaller service itself is blocked while the toggle is on.
-void MarkTi(Plan* p, Backend& b, bool tiOn);
+// Rows it leaves out change what stays enabled, so it ends by running DependencyCheck again.
+void MarkTi(Plan* p, Backend& b, bool tiOn, const std::vector<SvcItem>& items);
 // Spec §5.3, both directions, against the start every item ends with if the ticked rows are applied:
 // disabling X while an item that stays enabled depends on X, or raising X while a dependency of X stays
 // Disabled: warning, row unticked. Iterates to a fixed point. Run again after every toggle (toggled = that
 // row): warnings are recomputed, rows it unticked come back when their reason goes, the toggled row is the
-// user's choice.
+// user's choice (a row the user ticks while it has a warning stays ticked, with the warning, until the warning
+// goes). Plans that both raise and lower can go round in a circle (a pair whose warnings each exist only while
+// the other row is ticked): when a state repeats, or at the round bound, it finishes with untick-only passes,
+// which always settle, and adds a plan note starting with kDepNotSettled.
+// Afterwards, for every row it may tick or untick: no ticked row disables an item that an item enabled at the
+// end depends on, and no ticked row raises an item whose dependency ends Disabled (user-kept rows excepted;
+// they show their warning).
+extern const wchar_t* const kDepNotSettled;
 void DependencyCheck(Plan* p, const std::vector<SvcItem>& items, int toggled = -1);
 std::string DumpPlan(const Plan& p);   // the golden text form
 // Included rows in apply order: lowering rows dependents-first, then raising rows dependencies-first.

@@ -11,9 +11,14 @@
 
 #include <fcntl.h>
 #include <io.h>
+#include <aclapi.h>
+#include <sddl.h>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <functional>
+#include <map>
+#include <random>
 
 namespace hx::services {
 
@@ -107,9 +112,16 @@ std::wstring NewTempDir(const std::wstring& tag) {
     std::wstring base = (n && n < MAX_PATH) ? std::wstring(tmp) : L".\\";
     while (!base.empty() && base.back() == L'\\') base.pop_back();
     for (int i = 0; i < 1000; i++) {
-        std::wstring d = base + L"\\HadronSvcTest-" + std::to_wstring(GetCurrentProcessId()) + L"-" + tag + L"-" + std::to_wstring(i);
-        if (GetFileAttributesW(sys::ToExtended(d).c_str()) != INVALID_FILE_ATTRIBUTES) continue;
-        std::wstring e;
+        // In a folder of its own, owned by Administrators as the holding-folder check requires (%TEMP% is owned by
+        // the user, and an elevated token's default owner may be the user too).
+        std::wstring outer = base + L"\\HadronSvcTest-" + std::to_wstring(GetCurrentProcessId()) + L"-" + tag + L"-" + std::to_wstring(i);
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:BA", SDDL_REVISION_1, &sd, nullptr)) return L"";
+        SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+        BOOL made = CreateDirectoryW(sys::ToExtended(outer).c_str(), &sa);
+        LocalFree(sd);
+        if (!made) continue;
+        std::wstring d = outer + L"\\data", e;
         if (Store(d).EnsureRoot(true, &e)) return d;
         wprintf(L"  [info] could not make the test data dir %ls: %ls\n", d.c_str(), e.c_str());
         return L"";
@@ -131,12 +143,16 @@ std::string DryRunCmd(const std::string& cmd) {
         a = b == std::string::npos ? cmd.size() : b + 2;
         if (line.rfind("for /f ", 0) == 0) {
             size_t p = line.find("('"), q = line.find("')");
-            if (p != std::string::npos && q != std::string::npos) line = line.substr(0, p) + "('echo Current REG_DWORD 0x1')" + line.substr(q + 2);
+            // :put's Start read answers 0x%DRY% (3 unless a row sets it), Select\Current answers 1.
+            const char* echo = line.find("/v Start") != std::string::npos ? "('echo Start REG_DWORD 0x%DRY%')" : "('echo Current REG_DWORD 0x1')";
+            if (p != std::string::npos && q != std::string::npos) line = line.substr(0, p) + echo + line.substr(q + 2);
         }
         if (!injected && line == "reg unload HKLM\\HXOFF") {
+            out += "set \"DRY=0\"\r\ncall :put \"Dry Boot Now\" 3 -\r\nset \"DRY=3\"\r\n";
             out += "call :put \"Intel(R) Dry Run (x86)\" 3 -\r\n";
             injected = true;
         }
+        if (line == "setlocal EnableExtensions") { out += line + "\r\nset \"DRY=3\"\r\n"; continue; }
         if (line.rfind("reg ", 0) == 0) line = "call :dry " + line;
         out += line + "\r\n";
     }
@@ -211,6 +227,48 @@ SvcItem Mk(const wchar_t* name, int start, std::vector<std::wstring> deps, DWORD
     return s;
 }
 
+// The dependency invariant, computed without DependencyCheck's code (Analyze A9): against the end state of the
+// ticked rows, no ticked row disables an item that an item enabled at the end depends on (by name or +group), and
+// no ticked row raises an item whose dependency (or every member of a +group) ends Disabled. Only the row the user
+// just toggled (toggled) or a row the user kept (depKept) may break it, and then it must show a warning. A ticked
+// row with a warning is a violation in every other case. "" when it holds, else what broke.
+std::wstring DepViolation(const Plan& p, const std::vector<SvcItem>& items, int toggled = -1) {
+    std::map<std::wstring, int> fin;
+    for (auto& s : items) fin[Lower(s.name)] = s.cfg.start;
+    for (auto& r : p.rows) if (r.include && r.blocked.empty()) fin[Lower(r.name)] = r.after.start;
+    auto endOf = [&](const std::wstring& n) { auto it = fin.find(Lower(n)); return it == fin.end() ? -1 : it->second; };
+    for (size_t k = 0; k < p.rows.size(); k++) {
+        const PlanRow& r = p.rows[k];
+        if (!r.include || !r.blocked.empty()) continue;
+        bool userKept = (int)k == toggled || r.depKept;
+        if (!r.depWarning.empty() && !userKept) return r.name + L": ticked with a dependency warning";
+        bool bad = false;
+        const SvcItem* self = nullptr;
+        for (auto& s : items) if (IEq(s.name, r.name)) self = &s;
+        if (r.after.start == 4) {
+            for (auto& s : items) {
+                if (s.kind == Kind::UserInstance || IEq(s.name, r.name) || endOf(s.name) == 4) continue;
+                for (auto& d : s.deps) {
+                    if (IEq(d, r.name)) bad = true;
+                    if (self && !self->group.empty() && d.size() > 1 && d[0] == L'+' && IEq(d.substr(1), self->group)) bad = true;
+                }
+            }
+        } else if (r.after.start < r.before.start) {
+            for (auto& d : self ? self->deps : r.deps) {
+                if (d.size() > 1 && d[0] == L'+') {
+                    int m = 0, off = 0;
+                    for (auto& s : items) if (IEq(s.group, d.substr(1))) { m++; if (endOf(s.name) == 4) off++; }
+                    if (m && m == off) bad = true;
+                } else if (endOf(d) == 4) {
+                    bad = true;
+                }
+            }
+        }
+        if (bad && !(userKept && !r.depWarning.empty())) return r.name + L": ticked, breaks a dependency, no warning";
+    }
+    return L"";
+}
+
 PlanRow Lower4(const SvcItem& s, bool include = true) {
     PlanRow r;
     r.name = s.name;
@@ -266,7 +324,7 @@ Plan PlanFor(int level, int tab, World& w) {
     Plan p;
     if (level >= 0) p = BuildPreset(level, tab, w.items, w.ctx);
     else p = BuildDefault(level == -2, tab, w.items, w.ctx);
-    MarkTi(&p, w.fx.backend, w.ctx.tiOn);
+    MarkTi(&p, w.fx.backend, w.ctx.tiOn, w.items);
     return p;
 }
 
@@ -437,15 +495,43 @@ int RunSelftest(const std::vector<std::wstring>& args) {
             d = std::wstring(n && n < MAX_PATH ? tmp : L".\\") + L"HadronSvcTest-" + std::to_wstring(GetCurrentProcessId()) + L"-owner-" + std::to_wstring(i);
             made = CreateDirectoryW(d.c_str(), nullptr) != FALSE;
         }
-        std::wstring e;
-        bool ok = made && Store(d).EnsureRoot(true, &e);
+        // d has this token's default owner (Administrators when elevated on Windows). Inside it, a root and a holding
+        // folder owned by this process's own user (allowed to set: it is the token user).
+        auto ownByMe = [&](const std::wstring& path) {
+            HANDLE tok = nullptr;
+            bool ok = false;
+            std::vector<BYTE> buf(256);
+            DWORD need = 0;
+            if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
+                if (GetTokenInformation(tok, TokenUser, buf.data(), (DWORD)buf.size(), &need))
+                    ok = SetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+                                               reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+                CloseHandle(tok);
+            }
+            return ok;
+        };
+        std::wstring e, root = d + L"\\root", hold = d + L"\\hold";
+        bool rootMade = made && CreateDirectoryW(root.c_str(), nullptr) && ownByMe(root);
+        bool ok = rootMade && Store(root).EnsureRoot(true, &e);
         if (!made) info(L"A5: could not create " + d);
-        else if (ok) info(L"A5: a folder made with this token's default owner passes (an elevated token's default owner is Administrators)");
-        else check(e.find(L"owned by") != std::wstring::npos,
-                   L"A5: a data folder owned by someone other than Administrators or SYSTEM is refused: " + e);
+        else if (!rootMade) info(L"A5: could not give a test folder this process's own user as owner: owner checks not exercised");
+        else if (ok) info(L"A5: a root owned by this process's user passes?! (" + root + L")");
+        check(!rootMade || (!ok && e.find(L"owned by") != std::wstring::npos),
+              L"A5: a data folder owned by someone other than Administrators or SYSTEM is refused: " + e);
+        std::wstring e2;
+        bool holdMade = made && CreateDirectoryW(hold.c_str(), nullptr) && ownByMe(hold);
+        bool ok2 = holdMade && Store(hold + L"\\services").EnsureRoot(true, &e2);
+        check(!holdMade || (!ok2 && e2.find(L"the folder that holds") != std::wstring::npos && e2.find(hold) != std::wstring::npos &&
+                            GetFileAttributesW((hold + L"\\services").c_str()) == INVALID_FILE_ATTRIBUTES),
+              L"A5 r2: a holding folder (like %ProgramData%\\Hadron) owned by someone else is refused before the data folder is made: " + e2);
         if (wine) {
+#ifdef HX_SERVICES_TEST_HOOKS
             Store::AcceptTokenUserAsOwner() = true;
             info(L"A5: Wine ignores the owner in a security descriptor, so from here on this process's own user passes the owner check");
+#else
+            info(L"A5: under Wine every folder is owned by this process's user, and this build has no test hooks (CMake "
+                 L"-DHADRON_SERVICES_TEST_HOOKS=ON): every check that needs a data folder will fail. Use a test build.");
+#endif
         }
     }
 
@@ -826,7 +912,14 @@ int RunSelftest(const std::vector<std::wstring>& args) {
                 size_t b = s->find("\r\n", a);
                 std::string line = s->substr(a, b == std::string::npos ? std::string::npos : b - a);
                 a = b == std::string::npos ? s->size() : b + 2;
-                bool usesName = line.find("%~1") != std::string::npos || line.find("%N%") != std::string::npos;
+                std::string bare = line;   // a for /f may carry the name inside "..." within its ('...'): quotes protect it
+                if (line.rfind("for /f ", 0) == 0)
+                    for (size_t q1; (q1 = bare.find('"')) != std::string::npos;) {
+                        size_t q2 = bare.find('"', q1 + 1);
+                        if (q2 == std::string::npos) break;
+                        bare.erase(q1, q2 - q1 + 1);
+                    }
+                bool usesName = bare.find("%~1") != std::string::npos || bare.find("%N%") != std::string::npos;
                 if ((usesName && (line.find('(') != std::string::npos || line.find(')') != std::string::npos)) ||
                     (line.rfind("if ", 0) == 0 && line.find('(') != std::string::npos))
                     blockFree = false;
@@ -939,7 +1032,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
             if (p.rows[order[k]].name == L"upnphost") xg = (int)k;
         }
         check(xa >= 0 && xg >= 0 && xg < xa, L"apply order: a dependent (upnphost) is disabled before what it depends on (SSDPSRV)");
-        Plan u = BuildUndo(logs[0], a.fx.backend, a.ctx);
+        Plan u = BuildUndo(logs[0], a.fx.backend, a.items, a.ctx);
         ApplyResult ru;
         ok = RunApply(u, env, &ru);
         auto after = CfgMap(a.fx.backend);
@@ -954,7 +1047,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         check(last.count(L"mapsbroker") && last[L"mapsbroker"].start == 4, L"drift: LastApplied records what Hadron set");
         WriteOp back{3, -1};
         a.fx.backend.SetStart(L"MapsBroker", back, Identity::Admin, &err);
-        Plan u2 = BuildUndo(logs[FindUndoable(logs)], a.fx.backend, a.ctx);
+        Plan u2 = BuildUndo(logs[FindUndoable(logs)], a.fx.backend, a.items, a.ctx);
         const PlanRow* mr = RowOf(u2, L"MapsBroker");
         check(mr && !mr->include && mr->warning.find(L"changed since") != std::wstring::npos,
               L"undo: a row changed by something else since Hadron set it is unticked with a warning");
@@ -1057,7 +1150,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
             check(ok && rr.failed == 0 && rp.alreadySet >= 1 && all && FindInterrupted(logs) < 0,
                   L"Resume: finishes the remaining rows (row 3 already applied), and the interrupted log is resolved");
         } else {
-            Plan up = BuildUndo(logs[0], a.fx.backend, a.ctx);
+            Plan up = BuildUndo(logs[0], a.fx.backend, a.items, a.ctx);
             ApplyResult ru;
             ok = RunApply(up, env, &ru);
             logs = LoadLogs(s, nullptr);
@@ -1072,7 +1165,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         freshWorld(&a);
         Store s(NewTempDir(L"ti"));
         Plan p = BuildPreset(LV_STRIPPED, TAB_SERVICES, a.items, a.ctx);
-        MarkTi(&p, a.fx.backend, true);
+        MarkTi(&p, a.fx.backend, true, a.items);
         Tick(&p, L"dmwappushservice");
         const PlanRow* dm = RowOf(p, L"dmwappushservice");
         check(dm && dm->needsTi && dm->include, L"TI marking: with the toggle on the row is included and marked");
@@ -1095,7 +1188,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         freshWorld(&b);
         Store s2(NewTempDir(L"ti-off"));
         Plan p2 = BuildPreset(LV_STRIPPED, TAB_SERVICES, b.items, b.ctx);
-        MarkTi(&p2, b.fx.backend, true);   // marked with the toggle on, then applied with it off
+        MarkTi(&p2, b.fx.backend, true, b.items);   // marked with the toggle on, then applied with it off
         Tick(&p2, L"dmwappushservice");
         ApplyResult r2;
         RunApply(p2, EnvFor(&b.fx.backend, &s2), &r2);
@@ -1106,7 +1199,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         PlanRow tiRow;
         tiRow.name = L"TrustedInstaller";
         p3.rows.push_back(tiRow);
-        MarkTi(&p3, b.fx.backend, true);
+        MarkTi(&p3, b.fx.backend, true, b.items);
         check(RowOf(p3, L"TrustedInstaller") && !RowOf(p3, L"TrustedInstaller")->blocked.empty(),
               L"TI marking: the TrustedInstaller service itself is blocked while the toggle is on");
     }
@@ -1126,19 +1219,19 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         bool okw = MakeWorld(fixture + L"\\forged", &kb, &f, &e);
         auto logs = LoadLogs(Store(fixture + L"\\forged"), nullptr);
         int k = FindUndoable(logs);
-        Plan u = k >= 0 ? BuildUndo(logs[k], f.fx.backend, f.ctx) : Plan{};
-        MarkTi(&u, f.fx.backend, false);
+        Plan u = k >= 0 ? BuildUndo(logs[k], f.fx.backend, f.items, f.ctx) : Plan{};
+        MarkTi(&u, f.fx.backend, false, f.items);
         bool allBlocked = u.rows.size() == 3;
         for (auto& r : u.rows) if (r.blocked.empty() || r.include || r.canToggle) allBlocked = false;
         check(okw && k == 0 && allBlocked && u.Included() == 0 && RowOf(u, L"stornvme") && RowOf(u, L"disk") && RowOf(u, L"RpcSs"),
               L"A4: a forged undo log (valid CRCs) can't set stornvme, disk or RpcSs to Disabled: every row blocked");
         UndoLog other = logs.empty() ? UndoLog{} : logs[0];
         other.machine = L"another-machine";
-        Plan um = BuildUndo(other, f.fx.backend, f.ctx);
+        Plan um = BuildUndo(other, f.fx.backend, f.items, f.ctx);
         Plan rm = BuildResume(other, f.fx.backend, f.items, f.ctx);
         UndoLog oldBuild = logs.empty() ? UndoLog{} : logs[0];
         oldBuild.build = L"22631";
-        Plan ub = BuildUndo(oldBuild, f.fx.backend, f.ctx);
+        Plan ub = BuildUndo(oldBuild, f.fx.backend, f.items, f.ctx);
         auto refused = [](const Plan& p) { return p.rows.empty() && !p.notes.empty() && p.notes[0].rfind(L"Refused", 0) == 0; };
         check(refused(um) && refused(rm) && refused(ub), L"A4: Undo and Resume refuse a log from another machine GUID or another build");
         // Resume through the same guards: a log that would raise a service to System start.
@@ -1155,7 +1248,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         World it;
         MakeWorld(fixture + L"\\interrupted", &kb, &it, &e);
         auto il = LoadLogs(Store(fixture + L"\\interrupted"), nullptr);
-        Plan iu = il.empty() ? Plan{} : BuildUndo(il[0], it.fx.backend, it.ctx);
+        Plan iu = il.empty() ? Plan{} : BuildUndo(il[0], it.fx.backend, it.items, it.ctx);
         bool bad = false;
         for (auto& n : iu.notes) if (n.find(L"failed their check") != std::wstring::npos) bad = true;
         check(bad, L"Undo shows how many log records failed their check and were ignored (logic M9)");
@@ -1173,7 +1266,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         r.seq = 1; r.name = L"MapsBroker"; r.before = StartCfg{2, -1}; r.after = StartCfg{3, -1};
         r.hasI = true; r.hasD = true; r.result = L"ok"; r.observed = StartCfg{2, -1}; r.afterObs = StartCfg{3, 1};
         l.rows.push_back(r);
-        Plan u = BuildUndo(l, a.fx.backend, a.ctx);
+        Plan u = BuildUndo(l, a.fx.backend, a.items, a.ctx);
         const PlanRow* m = RowOf(u, L"MapsBroker");
         check(m && m->op.start == 2 && m->op.delayed == 0 && m->after.delayed == 0,
               L"A7: Undo to plain Auto writes DelayedAutostart=0 over a lingering 1 (not Auto (delayed))");
@@ -1244,6 +1337,199 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         }
     }
 
+    // ---- A8: rows MarkTi leaves out count as staying enabled -------------------------------------------------------
+    {
+        std::vector<SvcItem> items = {Mk(L"aaa", 3, {}), Mk(L"bbb", 3, {L"aaa"})};
+        items[1].aclTi = true;   // Windows refuses the admin write to bbb: it needs TrustedInstaller
+        FakeBackend fb;
+        fb.SetItems(items);
+        // What the module does on every TI toggle change: build the plan again, then MarkTi with the toggle's state.
+        auto build = [&](bool tiOn) {
+            Plan p;
+            p.rows = {Lower4(items[0]), Lower4(items[1])};
+            DependencyCheck(&p, items);   // the builders' own check: both disabled, nothing to warn about
+            MarkTi(&p, fb, tiOn, items);
+            return p;
+        };
+        Plan off = build(false);
+        const PlanRow* a = RowOf(off, L"aaa");
+        const PlanRow* b = RowOf(off, L"bbb");
+        bool offOk = a && b && !b->include && !b->canToggle && !a->include && a->depWarning.find(L"bbb") != std::wstring::npos;
+        Plan on = build(true);
+        a = RowOf(on, L"aaa");
+        b = RowOf(on, L"bbb");
+        bool onOk = a && b && a->include && b->include && a->depWarning.empty() && b->needsTi;
+        Plan off2 = build(false);
+        a = RowOf(off2, L"aaa");
+        check(offOk && onOk && a && !a->include && DepViolation(off, items).empty() && DepViolation(on, items).empty() &&
+                  DepViolation(off2, items).empty(),
+              L"A8: aaa <- bbb(needs TI): toggle off leaves bbb out and unticks aaa with a warning; on ticks both; off again unticks aaa");
+        // The user ticks aaa anyway: kept, with the warning; MarkTi re-running (a rebuild keeps nothing) is the module's job.
+        int ka = -1;
+        for (int k = 0; k < (int)off.rows.size(); k++) if (off.rows[k].name == L"aaa") ka = k;
+        if (ka >= 0) { off.rows[ka].include = true; DependencyCheck(&off, items, ka); }
+        check(ka >= 0 && off.rows[ka].include && off.rows[ka].depKept && !off.rows[ka].depWarning.empty() &&
+                  DepViolation(off, items).empty(),
+              L"A8: ticking aaa by hand keeps it ticked and shows the warning (the user's override)");
+        // The same through a real plan source: Bloat on the fixture with bbb-style TI rows marked by the fixture's ACLs.
+        World w;
+        freshWorld(&w);
+        bool all = true;
+        for (int lv = 0; lv < 3; lv++)
+            for (int tab : {TAB_SERVICES, TAB_DRIVERS})
+                for (bool tiOn : {false, true}) {
+                    w.ctx.tiOn = tiOn;
+                    Plan p = PlanFor(lv, tab, w);
+                    if (std::wstring v = DepViolation(p, w.items); !v.empty()) { all = false; info(L"A8 fixture: " + v); }
+                }
+        for (int lv : {-1, -2}) {
+            w.ctx.tiOn = false;
+            Plan p = PlanFor(lv, TAB_SERVICES, w);
+            if (std::wstring v = DepViolation(p, w.items); !v.empty()) { all = false; info(L"A8 fixture: " + v); }
+        }
+        w.ctx.tiOn = false;
+        check(all, L"A8: every fixture preset, Default and stock plan, TI toggle off and on, holds the dependency invariant after MarkTi");
+    }
+
+    // ---- A9: plans that raise and lower settle, and end consistent --------------------------------------------------
+    {
+        // The minimal circle: raising yyy needs xxx, and another row disables xxx. Each warning exists only while the
+        // other row is ticked, so the old loop flipped both until the round limit.
+        std::vector<SvcItem> items = {Mk(L"xxx", 3, {}), Mk(L"yyy", 4, {L"xxx"})};
+        Plan p;
+        PlanRow ry;
+        ry.name = L"yyy"; ry.before = items[1].cfg; ry.after = StartCfg{2, -1}; ry.op = WriteOp{2, -1}; ry.deps = items[1].deps;
+        p.rows = {Lower4(items[0]), ry};
+        DependencyCheck(&p, items);
+        bool note = false;
+        for (auto& n : p.notes) if (n.rfind(kDepNotSettled, 0) == 0) note = true;
+        bool pairOk = !p.rows[0].include && !p.rows[1].include && !p.rows[0].depWarning.empty() && !p.rows[1].depWarning.empty() &&
+                      note && DepViolation(p, items).empty();
+        p.rows[1].include = true;   // the user ticks yyy
+        DependencyCheck(&p, items, 1);
+        int notes = 0;
+        for (auto& n : p.notes) if (n.rfind(kDepNotSettled, 0) == 0) notes++;
+        check(pairOk && p.rows[1].include && p.rows[1].depWarning.empty() && !p.rows[0].include && notes <= 1 &&
+                  DepViolation(p, items, 1).empty(),
+              L"A9: a raise/disable circle ends with both unticked, warned, and a 'did not settle' note; ticking yyy then settles");
+
+        // Analyze's fuzz case 53, every combination of initial ticks.
+        std::vector<SvcItem> s53 = {Mk(L"s0", 4, {L"s1", L"s2"}), Mk(L"s1", 2, {L"s3"}), Mk(L"s2", 3, {L"s0"}), Mk(L"s3", 3, {L"s0"})};
+        const int to[4] = {2, 4, 2, 2};
+        bool ok53 = true;
+        for (int mask = 0; mask < 16; mask++) {
+            Plan q;
+            for (int i = 0; i < 4; i++) {
+                PlanRow r;
+                r.name = s53[i].name; r.before = s53[i].cfg; r.after = StartCfg{to[i], -1}; r.op = WriteOp{to[i], -1};
+                r.deps = s53[i].deps; r.include = (mask >> i) & 1;
+                q.rows.push_back(r);
+            }
+            DependencyCheck(&q, s53);
+            if (std::wstring v = DepViolation(q, s53); !v.empty()) { ok53 = false; info(L"A9 case 53 mask " + std::to_wstring(mask) + L": " + v); }
+            for (int k = 0; k < 4; k++) {
+                q.rows[k].include = !q.rows[k].include;
+                DependencyCheck(&q, s53, k);
+                if (std::wstring v = DepViolation(q, s53, k); !v.empty()) { ok53 = false; info(L"A9 case 53 toggle: " + v); }
+            }
+        }
+        check(ok53, L"A9: Analyze's fuzz case 53 (s2 raised while s0 stays Disabled) holds the invariant for all 16 starting ticks and every toggle");
+
+        // Analyze's fuzzer, built in: the same generator and seed (209 bad plans before the fix, 259 after a toggle),
+        // checked with the stricter evaluator above, then a run with groups, user instances and toggle sequences.
+        struct Fz { int plans = 0, bad = 0, unsettled = 0; double worstMs = 0; std::wstring first; };
+        auto fuzz = [&](unsigned seed, int iters, bool rich, bool lowerOnly) {
+            Fz f;
+            std::mt19937 rng(seed);
+            for (int it = 0; it < iters; it++) {
+                int n = 2 + rng() % 5;
+                std::vector<SvcItem> its(n);
+                for (int i = 0; i < n; i++) {
+                    its[i].name = L"s" + std::to_wstring(i); its[i].type = 0x10; its[i].kind = Kind::Service;
+                    its[i].cfg = StartCfg{2 + (int)(rng() % 3), -1};
+                    for (int j = 0; j < n; j++) if (j != i && rng() % 3 == 0) its[i].deps.push_back(L"s" + std::to_wstring(j));
+                    if (rich) {
+                        if (rng() % 3 == 0) its[i].group = L"g" + std::to_wstring(rng() % 2);
+                        if (rng() % 4 == 0) its[i].deps.push_back(L"+g" + std::to_wstring(rng() % 2));
+                        if (rng() % 8 == 0) its[i].kind = Kind::UserInstance;
+                    }
+                }
+                Plan p2;
+                for (int i = 0; i < n; i++) {
+                    if (rng() % 3 == 0) continue;
+                    int t = 2 + rng() % 3;
+                    if (lowerOnly ? t <= its[i].cfg.start : t == its[i].cfg.start) continue;
+                    PlanRow r;
+                    r.name = its[i].name; r.before = its[i].cfg; r.after = {t, -1}; r.op = {t, -1}; r.deps = its[i].deps;
+                    r.include = rng() % 4 != 0;
+                    if (rich && rng() % 10 == 0) { r.blocked = L"blocked"; r.include = false; r.canToggle = false; }
+                    p2.rows.push_back(r);
+                }
+                if (p2.rows.empty()) continue;
+                f.plans++;
+                auto t0 = std::chrono::steady_clock::now();
+                DependencyCheck(&p2, its);
+                double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                if (ms > f.worstMs) f.worstMs = ms;
+                for (auto& nt : p2.notes) if (nt.rfind(kDepNotSettled, 0) == 0) f.unsettled++;
+                std::wstring v = DepViolation(p2, its);
+                for (int tg = 0; v.empty() && tg < (rich ? 4 : 1); tg++) {
+                    int k = rng() % p2.rows.size();
+                    if (!p2.rows[k].canToggle) continue;
+                    p2.rows[k].include = !p2.rows[k].include;
+                    DependencyCheck(&p2, its, k);
+                    v = DepViolation(p2, its, k);
+                }
+                if (!v.empty()) { if (!f.bad) f.first = L"iteration " + std::to_wstring(it) + L": " + v; f.bad++; }
+            }
+            return f;
+        };
+        Fz a1 = fuzz(12345, 60000, false, false), a2 = fuzz(12345, 60000, false, true), a3 = fuzz(4242, 30000, true, false);
+        for (const Fz* f : {&a1, &a2, &a3}) {
+            wchar_t buf[200];
+            swprintf(buf, 200, L"A9 fuzz: %d plans, %d broke the invariant, %d did not settle, worst %.2f ms", f->plans, f->bad,
+                     f->unsettled, f->worstMs);
+            info(buf + (f->first.empty() ? std::wstring() : L"; first: " + f->first));
+        }
+        check(a1.plans == 52177 && a1.bad == 0 && a2.plans == 36803 && a2.bad == 0 && a3.bad == 0,
+              L"A9: Analyze's fuzzer (seed 12345, 52,177 mixed and 36,803 lower-only plans) and a 30,000-plan run with groups, "
+              L"user instances, blocked rows and toggle sequences: no plan breaks the dependency invariant");
+
+        // The cost case: a circle inside a 68-row plan over 757 items took 1.7 s per toggle under Wine.
+        std::vector<SvcItem> big = items;
+        for (int i = 0; i < 755; i++) big.push_back(Mk((L"f" + std::to_wstring(i)).c_str(), 3, {L"f" + std::to_wstring((i + 1) % 755)}));
+        Plan bp;
+        bp.rows = p.rows;
+        for (auto& r : bp.rows) { r.include = true; r.depUnticked = r.depKept = false; r.depWarning.clear(); }
+        for (int i = 0; i < 66; i++) bp.rows.push_back(Lower4(big[2 + i * 11]));
+        auto t0 = std::chrono::steady_clock::now();
+        DependencyCheck(&bp, big);
+        bp.rows[3].include = !bp.rows[3].include;
+        DependencyCheck(&bp, big, 3);
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        info(L"A9: a circle in a 68-row plan over 757 items, build plus one toggle: " + std::to_wstring((int)ms) + L" ms");
+        check(DepViolation(bp, big, 3).empty() && ms < 1000,
+              L"A9: a circle inside a 68-row plan over 757 items settles (state repeat detected) and holds the invariant");
+
+        // Undo plans run the check too: undoing yyy back to Manual while xxx is Disabled (set since, by hand).
+        World u;
+        freshWorld(&u);
+        std::vector<SvcItem> ui = {Mk(L"xxx", 4, {}), Mk(L"yyy", 4, {L"xxx"})};
+        FakeBackend ub;
+        ub.SetItems(ui);
+        UndoLog l;
+        l.hasB = true; l.hasE = true; l.stamp = L"20261111-100000"; l.source = L"single"; l.count = 1;
+        l.machine = u.ctx.machine; l.build = u.ctx.build;
+        UndoRow r;
+        r.seq = 1; r.name = L"yyy"; r.before = StartCfg{3, -1}; r.after = StartCfg{4, -1};
+        r.hasI = true; r.hasD = true; r.result = L"ok"; r.observed = StartCfg{3, -1}; r.afterObs = StartCfg{4, -1};
+        l.rows.push_back(r);
+        Plan up = BuildUndo(l, ub, ui, u.ctx);
+        const PlanRow* y = RowOf(up, L"yyy");
+        check(y && !y->include && y->depWarning.find(L"xxx") != std::wstring::npos && DepViolation(up, ui).empty(),
+              L"A9: Undo runs the dependency check: raising yyy back while xxx stays Disabled is unticked with a warning");
+    }
+
     // ---- A3: TrustedInstaller is stopped only when this apply started it --------------------------------------------
     {
         World a;
@@ -1253,7 +1539,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         s.fixedStamp = L"20261111-120000";
         ServiceOnlyTi ti(&a.fx.backend);
         Plan p = BuildPreset(LV_STRIPPED, TAB_SERVICES, a.items, a.ctx);
-        MarkTi(&p, a.fx.backend, true);
+        MarkTi(&p, a.fx.backend, true, a.items);
         Tick(&p, L"dmwappushservice");
         ApplyEnv env = EnvFor(&a.fx.backend, &s);
         env.ti = &ti;
@@ -1266,7 +1552,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         a.fx.backend.SetState(L"TrustedInstaller", SERVICE_RUNNING);
         a.items = Folded(a.fx.backend);
         Plan p2 = BuildSingle(*ItemOf(a.items, L"dmwappushservice"), StartCfg{3, -1}, a.items, a.ctx);
-        MarkTi(&p2, a.fx.backend, true);
+        MarkTi(&p2, a.fx.backend, true, a.items);
         ApplyResult r2;
         bool ok2 = RunApply(p2, env, &r2);
         auto logs = LoadLogs(s, nullptr);
@@ -1285,12 +1571,32 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         std::wstring note;
         check(!en && !pend.Started() && !pend.StopIfStarted(&note) && a.fx.backend.controlLog.size() == before,
               L"A3: START_PENDING is someone else's start: never started, claimed or stopped by Hadron");
+        // Round 2: Windows starts TI between Ensure's Query and its start request (ERROR_SERVICE_ALREADY_RUNNING).
+        TiService race(&a.fx.backend);
+        a.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        a.fx.backend.faults.startRace.insert(L"trustedinstaller");
+        bool rOk = race.Ensure(&t, &e);
+        std::wstring rNote;
+        bool rClaimed = race.Started(), rStopped = race.StopIfStarted(&rNote);
+        check(rOk && !rClaimed && !rStopped && t.state == SERVICE_RUNNING,
+              L"A3 r2: a start that finds TrustedInstaller already running (Control: not our own start) is never claimed or stopped");
+        // Round 2: STOP_PENDING is waited out, then Hadron starts it and owns that start.
+        TiService sp(&a.fx.backend);
+        sp.pollMs = 1;
+        a.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOP_PENDING);
+        a.fx.backend.faults.stopPendingQueries[L"trustedinstaller"] = 2;
+        bool sOk = sp.Ensure(&t, &e);
+        bool sClaimed = sp.Started();
+        std::wstring sNote;
+        bool sStopped = sp.StopIfStarted(&sNote);
+        check(sOk && sClaimed && sStopped && stateOf(L"TrustedInstaller") == SERVICE_STOPPED,
+              L"A3 r2: STOP_PENDING TrustedInstaller is waited for, then started, claimed and stopped again (not a failed row)");
         // win32 M2: an undo-log failure after the token was taken still puts TrustedInstaller back.
         World b;
         freshWorld(&b);
         Store s2(NewTempDir(L"ti-flush"));
         Plan p3 = BuildPreset(LV_STRIPPED, TAB_SERVICES, b.items, b.ctx);
-        MarkTi(&p3, b.fx.backend, true);
+        MarkTi(&p3, b.fx.backend, true, b.items);
         Tick(&p3, L"dmwappushservice");
         FakeTi fti;
         ApplyEnv e3 = EnvFor(&b.fx.backend, &s2);
@@ -1338,7 +1644,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         World m;
         std::wstring e;
         MakeWorld(fixture + L"\\multi", &kb, &m, &e);
-        Plan u = shape ? BuildUndo(ml[base], m.fx.backend, m.ctx) : Plan{};
+        Plan u = shape ? BuildUndo(ml[base], m.fx.backend, m.items, m.ctx) : Plan{};
         const PlanRow* mb = RowOf(u, L"MapsBroker");
         check(shape && mb && mb->include && mb->after.start == 2 && mb->after.delayed == 1,
               L"interrupted undo: the banner's Undo restarts undoing the apply (MapsBroker back to Auto (delayed)), never undoes the undo");
@@ -1356,14 +1662,20 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         std::wstring real = base + L"\\real", how;
         CreateDirectoryW(real.c_str(), nullptr);
         std::wstring link = MakeLink(base, real, &how);
+        bool tested = true;
         if (link.empty()) {
+#ifdef HX_SERVICES_TEST_HOOKS
             info(L"A5: made " + how + L" here, so the reparse point is injected (Windows CI makes a real one)");
             link = real;
             how = L"reparse point (injected)";
             Store::InjectedReparsePoint() = real;
+#else
+            info(L"A5: made " + how + L" here, and this build has no test hooks: the reparse check is not exercised");
+            tested = false;
+#endif
         }
         {
-            {
+            if (tested) {
                 std::wstring e1, e2;
                 bool root = Store(link).EnsureRoot(true, &e1);
                 bool child = Store(link + L"\\Hadron\\services").EnsureRoot(true, &e2);
@@ -1373,7 +1685,9 @@ int RunSelftest(const std::vector<std::wstring>& args) {
                       L"A5: EnsureRoot refuses a data folder that is, or sits below, a " + how + L", and creates nothing through it");
             }
         }
+#ifdef HX_SERVICES_TEST_HOOKS
         Store::InjectedReparsePoint().clear();
+#endif
         std::wstring e3;
         Store deep(L"\\\\?\\" + base + L"\\a\\b\\c");
         bool okDeep = deep.EnsureRoot(true, &e3);
@@ -1493,7 +1807,7 @@ int RunLiveTest(const std::vector<std::wstring>& args) {
         auto logs = LoadLogs(st, nullptr);
         int k = FindUndoable(logs);
         if (k < 0) { wprintf(L"  FAIL: nothing to undo\n"); fails++; break; }
-        Plan u = BuildUndo(logs[k], *b, c);
+        Plan u = BuildUndo(logs[k], *b, items, c);
         if (useTi) for (auto& r : u.rows) r.needsTi = true;
         if (!run(u, L"undo")) break;
         verify(original, L"undone");
