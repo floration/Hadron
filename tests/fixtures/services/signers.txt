@@ -1,0 +1,152 @@
+HXSVC	1	signers
+G	DiagTrack	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	dmwappushservice	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	MapsBroker	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	lfsvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	RetailDemo	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WMPNetworkSvc	signed	Microsoft Windows	
+G	MessagingService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SmsRouter	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SEMgrSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	PhoneSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WalletService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	icssvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	wisvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	BcastDVRUserService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	autotimesvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	XblAuthManager	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	XblGameSave	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	XboxNetApiSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	Spooler	signed	Microsoft Windows	
+G	PrintNotify	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	Fax	signed	Microsoft Windows	
+G	bthserv	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	BTAGService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	BthAvctpSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	BluetoothUserService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	XboxGipSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WSearch	signed	Microsoft Windows	
+G	CDPSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	CDPUserSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	OneSyncSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	PimIndexMaintenanceSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SharedAccess	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	RmSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	PcaSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SensorService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SensrSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SensorDataService	signed	Microsoft Windows	
+G	SSDPSRV	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	upnphost	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	lltdsvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	QWAVE	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	stisvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WiaRpc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	FrameServer	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	ShellHWDetection	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	ScDeviceEnum	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SCardSvr	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SCPolicySvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	vmickvpexchange	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	vmicguestinterface	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	vmicshutdown	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	vmicheartbeat	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	vmicvmsession	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	vmicrdv	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	vmictimesync	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	vmicvss	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	HvHost	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	RasAuto	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	RemoteAccess	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	SysMain	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	DPS	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WdiSystemHost	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WdiServiceHost	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WerSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	DiagSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	DusmSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	UnistoreSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	UserDataSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	NcbService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	dot3svc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	cphs	catalog	Intel(R) pGFX	catalog oem41.cat
+G	TabletInputService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WpnService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	wlidsvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	LicenseManager	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	CaptureService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	NgcSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	defragsvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WlanSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	wuauserv	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	UsoSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WaaSMedicSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	InstallService	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	TrustedInstaller	signed	Microsoft Windows	
+G	VSS	signed	Microsoft Windows	
+G	swprv	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	WinDefend	signed	Microsoft Windows	
+G	WdNisSvc	signed	Microsoft Windows	
+G	SecurityHealthService	signed	Microsoft Windows	
+G	wscsvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	BrokerInfrastructure	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	RpcSs	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	RpcEptMapper	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	DcomLaunch	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	PlugPlay	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	Audiosrv	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	AudioEndpointBuilder	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	Dhcp	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	Dnscache	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	nsi	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	EventLog	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	Winmgmt	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	CryptSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	BFE	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	mpssvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	ProfSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	Schedule	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	NVDisplay.ContainerLocalSystem	signed	NVIDIA Corporation	
+G	ExampleUpdater	unsigned		
+G	ACPI	signed	Microsoft Windows	
+G	pci	signed	Microsoft Windows	
+G	pdc	signed	Microsoft Windows	
+G	stornvme	signed	Microsoft Windows	
+G	storahci	signed	Microsoft Windows	
+G	disk	signed	Microsoft Windows	
+G	partmgr	signed	Microsoft Windows	
+G	volmgr	signed	Microsoft Windows	
+G	volsnap	signed	Microsoft Windows	
+G	fvevol	signed	Microsoft Windows	
+G	iorate	signed	Microsoft Windows	
+G	rdyboost	signed	Microsoft Windows	
+G	EhStorClass	signed	Microsoft Windows	
+G	Ntfs	cantcheck		no image path in its configuration
+G	FltMgr	signed	Microsoft Windows	
+G	Wof	signed	Microsoft Windows	
+G	FileInfo	signed	Microsoft Windows	
+G	CldFlt	signed	Microsoft Windows	
+G	luafv	signed	Microsoft Windows	
+G	WdFilter	signed	Microsoft Windows	
+G	WdBoot	signed	Microsoft Windows	
+G	WdNisDrv	signed	Microsoft Windows	
+G	Wdf01000	signed	Microsoft Windows	
+G	CNG	signed	Microsoft Windows	
+G	tcpip	signed	Microsoft Windows	
+G	kbdclass	signed	Microsoft Windows	
+G	mouclass	signed	Microsoft Windows	
+G	USBXHCI	signed	Microsoft Windows	
+G	intelppm	signed	Microsoft Windows	
+G	mssmbios	signed	Microsoft Windows	
+G	Beep	cantcheck		no image path in its configuration
+G	igfxn	signed	Intel(R) pGFX	
+G	IntcDAud	signed	Intel(R) Client Components	
+G	HyperVideo	signed	Microsoft Windows	
+G	hyperkbd	signed	Microsoft Windows	
+G	BTHUSB	signed	Microsoft Windows	
+G	Serial	signed	Microsoft Windows	
+G	nvlddmkm	signed	NVIDIA Corporation	
+G	xboxgip	signed	Microsoft Windows	
+G	ExampleAudioFlt	untrusted	Example Audio Inc.	the certificate chain ends in a root Windows does not trust
+G	ExampleCriticalDrv	signed	Example Hardware Inc.	
+G	hvservice	signed	Microsoft Windows	

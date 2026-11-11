@@ -16,7 +16,12 @@ guards protect, a boot disk chain, class and device filters, per-user templates 
 items. Start types follow common Windows 10 defaults but are NOT a measured stock table (the KB carries no stock values
 for that reason). Synthetic, on purpose:
   - dmwappushservice carries `X acl=ti` (an admin write is refused), so the TrustedInstaller marking shows in a preset;
-  - ExampleAudioFlt (a device LowerFilters entry) and ExampleCriticalDrv (ErrorControl Critical) exercise two guards.
+  - ExampleAudioFlt (a device LowerFilters entry) and ExampleCriticalDrv (ErrorControl Critical) exercise two guards;
+  - FrameServer has a device-interface arrival trigger for the video-camera interface class, and hw.txt has a webcam
+    seen before under the Image class (no Camera-class devnode): the trigger, not the class hint, keeps it (follow-up 8);
+  - the Bluetooth radio and the phantom scanner carry a last-arrival date (DEVPKEY_Device_LastArrivalDate);
+  - signers.txt (the Signer column) and events7040.txt (who changed DiagTrack and XblGameSave; WSearch has none) are
+    made up for the page's renders and tests, not read from a real PC.
 Formats: docs/design/services.md (snapshot, hw dump, undo log). The writer mirrors store.cpp exactly, so the selftest's
 parse -> write round trip reproduces snapshot.txt byte for byte.
 """
@@ -254,6 +259,9 @@ def build_items(overrides=None):
                 'bthserv', 'BTAGService', 'BthAvctpSvc', 'BluetoothUserService') else 'start on custom system state change'
             if name in ('bthserv', 'BTAGService', 'BthAvctpSvc', 'BluetoothUserService'):
                 ifaces = '{0850302a-b344-4fda-9be9-90576b8d46f0}'
+            if name == 'FrameServer':
+                triggers = 'start on device interface arrival ' + CAMERA_IFACE
+                ifaces = CAMERA_IFACE
         if running:
             PIDS[name] = pid
         out.append(row(name, display, typ, cfg, trig, state, 1, acct, image, '', deps, desc, start, PROTECT.get(name, 0),
@@ -293,6 +301,21 @@ GUID = {'DiskDrive': '{4d36e967-e325-11ce-bfc1-08002be10318}', 'Volume': '{71a27
         'MEDIA': '{4d36e96c-e325-11ce-bfc1-08002be10318}', 'USB': '{36fc9e60-c465-11cf-8056-444553540000}',
         'Net': '{4d36e972-e325-11ce-bfc1-08002be10318}', 'HIDClass': '{745a17a0-74d3-11d0-b6fe-00a0c90f57da}'}
 
+CAMERA_IFACE = '{e5323777-f976-4f5b-9b55-b94699c46e44}'   # KSCATEGORY_VIDEO_CAMERA
+WEBCAM = r'USB\VID_046D&PID_085C\2D1A3F70'
+
+
+def filetime(y, mo, d, h=0, mi=0):
+    """A UTC date as a FILETIME (100 ns since 1601), the way DEVPKEY_Device_LastArrivalDate stores it."""
+    import calendar
+    return (calendar.timegm((y, mo, d, h, mi, 0)) + 11644473600) * 10000000
+
+
+# Last arrival per devnode id (the 10th N field, hex); nodes without one keep 9 fields.
+ARRIVAL = {r'USB\VID_8087&PID_0033\5&2d5a1f0&0&14': filetime(2026, 11, 9, 7, 41),
+           r'USB\VID_04B8&PID_0142\L7DZ012345': filetime(2025, 6, 14, 16, 2),
+           WEBCAM: filetime(2026, 3, 2, 19, 30)}
+
 # id, service, class, present, parent, upper, lower
 NODES = [
     (r'ACPI_HAL\PNP0C08\0', 'ACPI', 'System', 1, r'HTREE\ROOT\0', '', ''),
@@ -319,6 +342,8 @@ NODES = [
     (r'HID\VID_046D&PID_C547&MI_01\7&1a2b3c4d&0&0000', 'mouhid', 'Mouse', 1,
      r'PCI\VEN_8086&DEV_7AE0&SUBSYS_7E061462&REV_11\3&11583659&0&A0', '', ''),
     (r'PCI\VEN_8086&DEV_125C&SUBSYS_7E061462&REV_04\4&1b2c3d4e&0&00E1', 'e2fnexpress', 'Net', 1, r'ACPI\PNP0A08\0', '', ''),
+    # A webcam seen before, under the Image class (no Camera-class devnode anywhere): only the trigger names it.
+    (WEBCAM, 'usbvideo', 'Image', 0, r'PCI\VEN_8086&DEV_7AE0&SUBSYS_7E061462&REV_11\3&11583659&0&A0', '', ''),
 ]
 CLASS_FILTERS = [('DiskDrive', 'EhStorClass', ''), ('Volume', 'volsnap', 'fvevol;iorate;rdyboost'),
                  ('Keyboard', 'kbdclass', ''), ('Mouse', 'mouclass', '')]
@@ -329,8 +354,80 @@ def hw_dump():
     for cls, up, lo in sorted(CLASS_FILTERS, key=lambda c: GUID[c[0]]):
         lines.append('C\t%s\t%s\t%s' % (GUID[cls], up, lo))
     lines.append('I\t{0850302a-b344-4fda-9be9-90576b8d46f0}')
+    lines.append('F\t%s\t%s' % (CAMERA_IFACE, esc(WEBCAM)))   # a device of that interface class, present or not
     for (i, svc, cls, present, parent, up, lo) in NODES:
-        lines.append('N\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s' % (esc(i), svc, cls, GUID[cls], present, esc(parent), up, lo))
+        line = 'N\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s' % (esc(i), svc, cls, GUID[cls], present, esc(parent), up, lo)
+        if i in ARRIVAL:
+            line += '\t%016X' % ARRIVAL[i]
+        lines.append(line)
+    return '\n'.join(lines) + '\n'
+
+
+SIGNERS_HDR = 'HXSVC\t1\tsigners'
+EVENTS_HDR = 'HXSVC\t1\tevents'
+# Synthetic signer results (follow-up 6): G name state subject detail.
+SIGNER_SPECIAL = {
+    'NVDisplay.ContainerLocalSystem': ('signed', 'NVIDIA Corporation', ''),
+    'nvlddmkm': ('signed', 'NVIDIA Corporation', ''),
+    'ExampleUpdater': ('unsigned', '', ''),
+    'ExampleAudioFlt': ('untrusted', 'Example Audio Inc.', 'the certificate chain ends in a root Windows does not trust'),
+    'ExampleCriticalDrv': ('signed', 'Example Hardware Inc.', ''),
+    'igfxn': ('signed', 'Intel(R) pGFX', ''),
+    'IntcDAud': ('signed', 'Intel(R) Client Components', ''),
+    'cphs': ('catalog', 'Intel(R) pGFX', 'catalog oem41.cat'),
+    'Ntfs': ('cantcheck', '', 'no image path in its configuration'),
+    'Beep': ('cantcheck', '', 'no image path in its configuration'),
+}
+
+
+def signers():
+    lines = [SIGNERS_HDR]
+    for (name, *_rest) in SERVICES:
+        if name in SIGNER_SPECIAL:
+            st, subj, det = SIGNER_SPECIAL[name]
+        elif _rest[5].startswith(SVCHOST):   # a svchost service: its ServiceDll, catalog-signed in this picture
+            st, subj, det = 'catalog', 'Microsoft Windows', 'catalog Microsoft-Windows-Client-Features-Package.cat'
+        else:
+            st, subj, det = 'signed', 'Microsoft Windows', ''
+        lines.append('G\t%s\t%s\t%s\t%s' % (esc(name), st, esc(subj), esc(det)))
+    for (name, *_rest) in DRIVERS:
+        st, subj, det = SIGNER_SPECIAL.get(name, ('signed', 'Microsoft Windows', ''))
+        lines.append('G\t%s\t%s\t%s\t%s' % (esc(name), st, esc(subj), esc(det)))
+    return '\n'.join(lines) + '\n'
+
+
+USER_SID = 'S-1-5-21-1004336348-1177238915-682003330-1001'
+
+
+def event7040(record_id, when, display, frm, to, name, sid, quote="'"):
+    q = quote
+    data = ''.join('<Data Name=%sparam%d%s>%s</Data>' % (q, k, q, v) for k, v in enumerate((display, frm, to, name), 1) if v is not None)
+    return ("<Event xmlns=%shttp://schemas.microsoft.com/win/2004/08/events/event%s><System>"
+            "<Provider Name=%sService Control Manager%s Guid=%s{555908d1-a6d7-4695-8e1e-26931d2012f4}%s "
+            "EventSourceName=%sService Control Manager%s/><EventID Qualifiers=%s16384%s>7040</EventID><Version>0</Version>"
+            "<Level>4</Level><Task>0</Task><Opcode>0</Opcode><Keywords>0x8080000000000000</Keywords>"
+            "<TimeCreated SystemTime=%s%s%s/><EventRecordID>%d</EventRecordID><Correlation/>"
+            "<Execution ProcessID=%s812%s ThreadID=%s9120%s/><Channel>System</Channel><Computer>DESKTOP-FIXTURE</Computer>"
+            "<Security UserID=%s%s%s/></System><EventData>%s</EventData></Event>") % (
+        q, q, q, q, q, q, q, q, q, q, q, when, q, record_id, q, q, q, q, q, sid, q, data)
+
+
+def events():
+    """Synthetic System-log 7040s (follow-up 7): DiagTrack by a user (an older event too, so the newest must win),
+    XblGameSave by SYSTEM with double quotes and no param4 (matched by display name), one for an item that did not
+    change (ignored) and none for WSearch ("no 7040 event found")."""
+    lines = [EVENTS_HDR, 'A\t%s\t%s' % (USER_SID, esc('DESKTOP-FIXTURE\\user')), 'A\tS-1-5-18\t' + esc('NT AUTHORITY\\SYSTEM')]
+    ev = [
+        event7040(48102, '2026-11-02T08:01:44.1200931Z', 'Connected User Experiences and Telemetry', 'auto start',
+                  'demand start', 'DiagTrack', USER_SID),
+        event7040(48211, '2026-11-08T21:14:09.5308412Z', 'Connected User Experiences and Telemetry', 'demand start',
+                  'disabled', 'DiagTrack', USER_SID),
+        event7040(48390, '2026-11-09T19:12:03.0046120Z', 'Xbox Live Game Save', 'demand start', 'disabled', None,
+                  'S-1-5-18', quote='"'),
+        event7040(47950, '2026-10-30T10:00:00.0000000Z', 'Print Spooler', 'demand start', 'auto start', 'Spooler', 'S-1-5-18'),
+    ]
+    for e in ev:
+        lines.append('E\t' + esc(e))
     return '\n'.join(lines) + '\n'
 
 
@@ -402,6 +499,8 @@ def main(argv):
     write(os.path.join(out, 'first.txt'), snapshot(first_meta, {'DiagTrack': '2/-', 'WSearch': '2/1', 'XblGameSave': '3/-'}))
     # The live fixture has those three changed by "someone else".
     write(os.path.join(out, 'snapshot.txt'), snapshot(META, {'DiagTrack': '4/-', 'WSearch': '3/-', 'XblGameSave': '4/-'}))
+    write(os.path.join(out, 'signers.txt'), signers())
+    write(os.path.join(out, 'events7040.txt'), events())
     stamp, log = interrupted_log()
     idir = os.path.join(out, 'interrupted')
     over = {'DiagTrack': '4/-', 'WSearch': '3/-', 'XblGameSave': '4/-', 'MapsBroker': '4/1', 'lfsvc': '4/-'}

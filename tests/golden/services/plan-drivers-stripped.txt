@@ -24,7 +24,7 @@ Note: Start types only. Changes take effect at the next restart; Hadron never re
     basis: reasoning -- Hardware-absent: no devnode for this driver was ever recorded on this PC.
     evidence: no devnode for service Serial ever seen
 [-] BTHUSB  Manual -> Disabled  (3/- -> 4/-)
-    Kept: hardware in use or seen before. present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth)
+    Kept: hardware in use or seen before. present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth, last arrived 2026-11-09)
     why: no Bluetooth device was ever seen
     basis: reasoning -- Hardware-absent only; Bluetooth is a hot-plug class, so the row is unticked even then.
-    evidence: present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth)
+    evidence: present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth, last arrived 2026-11-09)
