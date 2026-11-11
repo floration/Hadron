@@ -37,6 +37,7 @@ public:
 
     void Cancel() { cancel_.store(true); }
     bool Cancelled() const { return cancel_.load(); }
+    const std::atomic<bool>* CancelFlag() const { return &cancel_; }   // for code that polls a plain flag
     bool Running() const { return thread_ != nullptr; }
 
     void Join() {

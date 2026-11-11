@@ -12,6 +12,7 @@
 #include "core/sys/update.h"
 #include "core/sys/worker.h"
 #include "core/ui/theme.h"
+#include "core/ui/aa.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <objbase.h>   // CoInitializeEx/CoUninitialize: WIN32_LEAN_AND_MEAN excludes OLE on MSVC
@@ -267,10 +268,7 @@ void Host::PaintChrome(HDC dc, const RECT& cl) {
             SelectObject(dc, o);
             int w = sz.cx + S(20, dpi_);
             RECT r{right - w, st.top + S(4, dpi_), right, st.bottom - S(4, dpi_)};
-            { HBRUSH b = CreateSolidBrush(t.panel2); HPEN pn = CreatePen(PS_SOLID, 1, t.border);
-              HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pn);
-              RoundRect(dc, r.left, r.top, r.right, r.bottom, S(8, dpi_), S(8, dpi_));
-              SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b); DeleteObject(pn); }
+            ui::AaRoundRect(dc, r, S(8, dpi_) / 2.0, t.panel2, t.border);
             RECT tr = r;
             SelectObject(dc, fonts_.caption); SetTextColor(dc, t.text1); SetBkMode(dc, TRANSPARENT);
             DrawTextW(dc, label.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
@@ -355,13 +353,14 @@ void Host::SetUpdateMode(UpdMode m) {
     if (!store_.Save(&serr)) SetStatus((L"Update setting not saved: " + sys::ErrorText(serr)).c_str());
     sys::Write(LogLevel::Info, m == UpdMode::On ? L"update: automatic updates on" : L"update: automatic updates off");
     if (m == UpdMode::On) StartUpdateCheck(/*install=*/true);
+    else updWorker_.Cancel();   // an opt-out stops a running download (a swap in progress still finishes)
     InvalidateChrome();
 }
 
 void Host::StartUpdateCheck(bool install) {
     if (updWorker_.Running() || updReady_) return;
     if (!updWorker_.Start(frame_, WM_HX_UPDATE_DONE, [this, install] {
-            updResult_ = sys::update::CheckAndInstall(install, nullptr);
+            updResult_ = sys::update::CheckAndInstall(install, updWorker_.CancelFlag());
         })) {
         SetStatus((L"Update check couldn't start: " + sys::ErrorText(GetLastError())).c_str());
         return;
@@ -375,7 +374,8 @@ void Host::OnUpdateDone() {
     const auto& r = updResult_;
     if (r.outcome != Outcome::Failed && r.outcome != Outcome::Cancelled) {
         store_.Section(L"update").SetStr(L"last", std::to_wstring(_time64(nullptr)));
-        store_.Save();
+        DWORD serr = 0;
+        if (!store_.Save(&serr)) sys::Write(LogLevel::Warn, L"update: last-check time not saved: " + sys::ErrorText(serr));
     }
     if (r.outcome == Outcome::Installed) updReady_ = true;
     sys::Write(r.outcome == Outcome::Failed ? LogLevel::Warn : LogLevel::Info, L"update: " + r.message);
@@ -386,7 +386,9 @@ void Host::RestartForUpdate() {
     for (auto& mod : modules_)
         if (!mod->CanClose()) { SetStatus(L"Finish the running operation first, then restart to update"); return; }
     std::wstring exe = sys::ModulePath();
-    std::wstring cmd = GetCommandLineW();   // same arguments as this run
+    // Same arguments as this run, plus our PID: the new process waits for this one to exit before it
+    // loads settings, so the two never overlap (an older --wait-pid from a previous restart is harmless).
+    std::wstring cmd = std::wstring(GetCommandLineW()) + L" --wait-pid=" + std::to_wstring(GetCurrentProcessId());
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
@@ -465,7 +467,7 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_DESTROY:
         updWorker_.Cancel();
-        updWorker_.Join();                            // bounded by the WinHTTP timeouts
+        updWorker_.Join();                            // cancel is polled per read; each fetch has a 3-minute budget
         for (auto& mod : modules_) mod->Shutdown();   // joins workers before HWNDs die
         PostQuitMessage(0);                           // only the host does this (ARCHITECTURE.md)
         return 0;
@@ -545,6 +547,11 @@ int Host::Run(const CommandLine& cl) {
     for (auto& a : cl.rest) if (a == L"--snapshot") snapshotArg = true;
     if (cl.selftest || !cl.screenshot.empty() || !cl.fixture.empty() || snapshotArg) sys::SetNoFirmwareWrites();
     elevated_ = sys::IsElevated();
+    for (auto& a : cl.rest)   // restart after an update: wait (up to 30 s) for the old process to finish exiting
+        if (a.rfind(L"--wait-pid=", 0) == 0) {
+            DWORD pid = (DWORD)wcstoul(a.c_str() + 11, nullptr, 10);
+            if (HANDLE p = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr) { WaitForSingleObject(p, 30000); CloseHandle(p); }
+        }
 
     for (auto& a : cl.rest)   // core self-update logic, no network (CI runs it on one exe)
         if (a == L"--selftest-update") return sys::update::SelfTest();
@@ -640,7 +647,7 @@ int Host::Run(const CommandLine& cl) {
     Activate(PickInitial(cl));
     ShowWindow(frame_, SW_SHOW);
     UpdateWindow(frame_);
-    if (updMode_ == UpdMode::On) {   // at most one automatic check every 20 hours
+    if (updMode_ == UpdMode::On && cl.fixture.empty() && !snapshotArg) {   // never in test/fixture runs; at most every 20 h
         long long last = _wtoi64(store_.Section(L"update").GetStr(L"last", L"0").c_str());
         if (_time64(nullptr) - last > 20 * 3600) StartUpdateCheck(/*install=*/true);
     }

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 # it this is a dev build: version 0.1.0 in VERSIONINFO, and the updater never replaces a dev exe.
 set(HADRON_VERSION "" CACHE STRING "Release version x.y.z; empty = dev build")
 if(HADRON_VERSION)
-  if(NOT HADRON_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  if(NOT HADRON_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
     message(FATAL_ERROR "HADRON_VERSION must be x.y.z, got '${HADRON_VERSION}'")
   endif()
   set(_hx_ver "${HADRON_VERSION}")
@@ -12,6 +12,8 @@ else()
   set(_hx_ver "0.1.0")
   set(_hx_dev 1)
 endif()
+# Don't let a release version stick in this build dir's cache: every configure must pass it again.
+unset(HADRON_VERSION CACHE)
 project(Hadron VERSION ${_hx_ver} LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -41,13 +43,15 @@ add_library(hadron_core STATIC
   core/sys/log.cpp
   core/sys/png.cpp
   core/ui/theme.cpp
+  core/ui/aa.cpp
   core/ui/widgets.cpp
   core/host/cmdline.cpp
   core/sys/update.cpp
   core/host/host.cpp)
-# winhttp, bcrypt and version are for the self-updater (core/sys/update.cpp); all Windows SDK.
+# winhttp, bcrypt and version are for the self-updater (core/sys/update.cpp); msimg32 (AlphaBlend) for the
+# anti-aliased shapes in core/ui/aa.cpp. All Windows SDK.
 target_link_libraries(hadron_core PUBLIC
-  dwmapi dbghelp shell32 ole32 gdi32 user32 comdlg32 comctl32 winhttp bcrypt version)
+  dwmapi dbghelp shell32 ole32 gdi32 user32 comdlg32 comctl32 winhttp bcrypt version msimg32)
 target_compile_definitions(hadron_core PRIVATE
   HADRON_VERSION_MAJOR=${PROJECT_VERSION_MAJOR} HADRON_VERSION_MINOR=${PROJECT_VERSION_MINOR}
   HADRON_VERSION_PATCH=${PROJECT_VERSION_PATCH} HADRON_DEV_BUILD=${_hx_dev})

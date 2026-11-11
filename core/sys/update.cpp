@@ -6,6 +6,8 @@
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cwctype>
 #include <algorithm>
 #include <map>
@@ -202,12 +204,12 @@ std::wstring HttpErr(const wchar_t* step, DWORD e) {
     return std::wstring(step) + L": " + t + L" (" + std::to_wstring(e) + L")";
 }
 
-// GET over HTTPS from an allowed host, following redirects only to allowed hosts. Returns false with
-// *err on any failure; *status gets the HTTP status when a response arrived.
-bool HttpGet(const std::wstring& url, uint64_t maxBytes, std::vector<uint8_t>* body, DWORD* status,
-             std::wstring* err, const std::atomic<bool>* cancel) {
+// One GET hop over HTTPS. Redirects are not followed here: the caller checks each Location itself.
+// The host check runs on WinHttpCrackUrl's own parse, the same one WinHttpConnect uses.
+bool HttpHop(const std::wstring& url, uint64_t maxBytes, uint64_t deadline, std::vector<uint8_t>* body, DWORD* status,
+             std::wstring* location, std::wstring* err, const std::atomic<bool>* cancel) {
     *status = 0;
-    if (!HostAllowed(url)) { *err = L"refused URL outside GitHub: " + url; return false; }
+    location->clear();
     URL_COMPONENTS uc{};
     uc.dwStructSize = sizeof(uc);
     wchar_t host[256] = {}, path[2048] = {}, extra[2048] = {};
@@ -215,31 +217,30 @@ bool HttpGet(const std::wstring& url, uint64_t maxBytes, std::vector<uint8_t>* b
     uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
     uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 2048;
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) { *err = HttpErr(L"WinHttpCrackUrl", GetLastError()); return false; }
+    std::wstring h(host, uc.dwHostNameLength);
+    if (uc.nScheme != INTERNET_SCHEME_HTTPS || uc.nPort != INTERNET_DEFAULT_HTTPS_PORT || uc.dwUserNameLength ||
+        uc.dwPasswordLength || !HostAllowed(L"https://" + h + L"/")) {
+        *err = L"refused URL outside GitHub: " + url; return false;
+    }
     std::wstring ua = L"Hadron-Updater/" + ToString(Current());
     HInet ses{WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)};
     if (!ses.h) ses.h = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!ses.h) { *err = HttpErr(L"WinHttpOpen", GetLastError()); return false; }
-    WinHttpSetTimeouts(ses.h, 15000, 15000, 30000, 30000);
-    HInet con{WinHttpConnect(ses.h, host, uc.nPort, 0)};
+    if (!WinHttpSetTimeouts(ses.h, 15000, 15000, 30000, 30000)) { *err = HttpErr(L"WinHttpSetTimeouts", GetLastError()); return false; }
+    HInet con{WinHttpConnect(ses.h, h.c_str(), uc.nPort, 0)};
     if (!con.h) { *err = HttpErr(L"WinHttpConnect", GetLastError()); return false; }
-    std::wstring obj = std::wstring(path) + extra;
+    std::wstring obj = std::wstring(path, uc.dwUrlPathLength) + std::wstring(extra, uc.dwExtraInfoLength);
     HInet req{WinHttpOpenRequest(con.h, L"GET", obj.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                  WINHTTP_FLAG_SECURE)};
     if (!req.h) { *err = HttpErr(L"WinHttpOpenRequest", GetLastError()); return false; }
+    DWORD noRedirect = WINHTTP_DISABLE_REDIRECTS;
+    if (!WinHttpSetOption(req.h, WINHTTP_OPTION_DISABLE_FEATURE, &noRedirect, sizeof(noRedirect))) {
+        *err = HttpErr(L"WinHttpSetOption", GetLastError()); return false;
+    }
     const wchar_t* hdr = L"Accept: application/vnd.github+json, application/octet-stream\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
     if (!WinHttpSendRequest(req.h, hdr, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(req.h, nullptr)) {
         *err = HttpErr(L"download", GetLastError()); return false;
-    }
-    // Where did the redirects end up? Only GitHub hosts are accepted.
-    DWORD ulen = 0;
-    WinHttpQueryOption(req.h, WINHTTP_OPTION_URL, nullptr, &ulen);
-    if (ulen) {
-        std::wstring fin(ulen / sizeof(wchar_t) + 1, L'\0');
-        if (WinHttpQueryOption(req.h, WINHTTP_OPTION_URL, fin.data(), &ulen)) {
-            fin.resize(wcslen(fin.c_str()));
-            if (!HostAllowed(fin)) { *err = L"redirected outside GitHub: " + fin; return false; }
-        }
     }
     DWORD sc = 0, scl = sizeof(sc);
     if (!WinHttpQueryHeaders(req.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
@@ -247,9 +248,22 @@ bool HttpGet(const std::wstring& url, uint64_t maxBytes, std::vector<uint8_t>* b
         *err = HttpErr(L"WinHttpQueryHeaders", GetLastError()); return false;
     }
     *status = sc;
+    if (sc == 301 || sc == 302 || sc == 303 || sc == 307 || sc == 308) {
+        DWORD len = 0;
+        WinHttpQueryHeaders(req.h, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &len, WINHTTP_NO_HEADER_INDEX);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || !len) { *err = L"redirect without a location"; return false; }
+        std::wstring loc(len / sizeof(wchar_t) + 1, L'\0');
+        if (!WinHttpQueryHeaders(req.h, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, loc.data(), &len, WINHTTP_NO_HEADER_INDEX)) {
+            *err = HttpErr(L"WinHttpQueryHeaders", GetLastError()); return false;
+        }
+        loc.resize(wcslen(loc.c_str()));
+        *location = loc;
+        return true;
+    }
     body->clear();
     for (;;) {
         if (cancel && cancel->load()) { *err = L"cancelled"; return false; }
+        if (GetTickCount64() > deadline) { *err = L"download took too long; stopped"; return false; }
         DWORD avail = 0;
         if (!WinHttpQueryDataAvailable(req.h, &avail)) { *err = HttpErr(L"download", GetLastError()); return false; }
         if (avail == 0) break;
@@ -261,6 +275,25 @@ bool HttpGet(const std::wstring& url, uint64_t maxBytes, std::vector<uint8_t>* b
         body->resize(at + got);
     }
     return true;
+}
+
+// GET from an allowed host, following up to 5 redirects; every hop is checked against the allowlist.
+// The whole fetch has a 3-minute budget so a trickling server can't keep a closing window alive.
+bool HttpGet(const std::wstring& url, uint64_t maxBytes, std::vector<uint8_t>* body, DWORD* status,
+             std::wstring* err, const std::atomic<bool>* cancel) {
+    uint64_t deadline = GetTickCount64() + 180000;
+    std::wstring at = url, loc;
+    for (int hop = 0; hop < 6; hop++) {
+        if (cancel && cancel->load()) { *err = L"cancelled"; return false; }
+        if (!HttpHop(at, maxBytes, deadline, body, status, &loc, err, cancel)) return false;
+        if (loc.empty()) return true;
+        if (loc.compare(0, 8, L"https://") != 0 && loc.compare(0, 8, L"HTTPS://") != 0) {
+            *err = L"redirected to a non-https URL: " + loc; return false;
+        }
+        at = loc;
+    }
+    *err = L"too many redirects";
+    return false;
 }
 
 // --- files -----------------------------------------------------------------------------------------
@@ -275,6 +308,31 @@ Version FileVersion(const std::wstring& path) {
     v.major = HIWORD(fi->dwFileVersionMS); v.minor = LOWORD(fi->dwFileVersionMS); v.patch = HIWORD(fi->dwFileVersionLS);
     v.ok = true;
     return v;
+}
+
+// True if `path` (\\?\ form) is a plain directory, not a reparse point, whose final path is itself.
+bool RealDirAt(const std::wstring& path, std::wstring* why) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { *why = ToShell(path) + L": " + ErrorText(GetLastError()); return false; }
+    BY_HANDLE_FILE_INFORMATION fi{};
+    bool ok = GetFileInformationByHandle(h, &fi) != FALSE;
+    DWORD e = GetLastError();
+    std::wstring fin;
+    if (ok) {
+        DWORD n = GetFinalPathNameByHandleW(h, nullptr, 0, FILE_NAME_NORMALIZED);
+        if (n) { fin.resize(n); n = GetFinalPathNameByHandleW(h, fin.data(), n, FILE_NAME_NORMALIZED); fin.resize(n); }
+        if (!n) { ok = false; e = GetLastError(); }
+    }
+    CloseHandle(h);
+    if (!ok) { *why = ToShell(path) + L": " + ErrorText(e); return false; }
+    if ((fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !(fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        *why = ToShell(path) + L" is a link or not a folder"; return false;
+    }
+    if (Lower(ToShell(fin)) != Lower(ToShell(path))) {
+        *why = ToShell(path) + L" resolves to " + ToShell(fin); return false;
+    }
+    return true;
 }
 
 std::wstring Stamp() {
@@ -293,8 +351,14 @@ bool Install(const std::vector<uint8_t>& bytes, const Version& want, const std::
 
     // Two instances of the same exe could both find the update: one installs, the other sees it done.
     HANDLE mx = CreateMutexW(nullptr, FALSE, (L"Local\\Hadron.update." + Lower(name)).c_str());
-    if (mx) WaitForSingleObject(mx, 60000);
-    struct Unlock { HANDLE h; ~Unlock() { if (h) { ReleaseMutex(h); CloseHandle(h); } } } unlock{mx};
+    if (!mx) { *err = L"can't create the update lock: " + ErrorText(GetLastError()); return false; }
+    DWORD wr = WaitForSingleObject(mx, 60000);
+    if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) {
+        CloseHandle(mx);
+        *err = L"another Hadron window is installing an update; try again later";
+        return false;
+    }
+    struct Unlock { HANDLE h; ~Unlock() { ReleaseMutex(h); CloseHandle(h); } } unlock{mx};
     Version onDisk = FileVersion(exe);
     if (onDisk.ok && Compare(onDisk, want) >= 0) return true;   // already installed by another instance
 
@@ -305,7 +369,10 @@ bool Install(const std::vector<uint8_t>& bytes, const Version& want, const std::
     bool ok = WriteFile(f, bytes.data(), (DWORD)bytes.size(), &wrote, nullptr) && wrote == bytes.size() && FlushFileBuffers(f);
     DWORD we = GetLastError();
     CloseHandle(f);
-    auto dropTmp = [&] { DeleteFileW(tmp.c_str()); };   // our own temp file, created above with CREATE_NEW
+    auto dropTmp = [&] {   // our own temp file, created above with CREATE_NEW
+        if (!DeleteFileW(tmp.c_str()))
+            Write(LogLevel::Warn, L"update: couldn't remove " + ToShell(tmp) + L": " + ErrorText(GetLastError()));
+    };
     if (!ok) { *err = L"can't write the update: " + ErrorText(we); dropTmp(); return false; }
 
     Version got = FileVersion(tmp);
@@ -321,6 +388,12 @@ bool Install(const std::vector<uint8_t>& bytes, const Version& want, const std::
     }
     if (!CreateDirectoryW(oldDir.c_str(), nullptr)) {
         *err = L"can't create " + ToShell(oldDir) + L": " + ErrorText(GetLastError()); dropTmp(); return false;
+    }
+    // Both folders must be real folders exactly where we expect them: an elevated process must not follow a
+    // junction or symlink someone planted at .hadron-old (rule 1: reparse points are leaves).
+    std::wstring why;
+    if (!RealDirAt(oldRoot, &why) || !RealDirAt(oldDir, &why)) {
+        *err = L"refused to keep the old exe: " + why; dropTmp(); return false;
     }
     std::wstring exeX = ToExtended(exe), kept = oldDir + L"\\" + name;
     // A running exe can be renamed but not overwritten. No MOVEFILE_COPY_ALLOWED: same folder, same volume.
@@ -419,7 +492,7 @@ bool ParseRelease(const std::string& json, const std::wstring& exeName, Release*
             if (n == want) {
                 out->assetUrl = Widen(url->s);
                 const JVal* sz = a.Get("size");
-                if (sz && sz->t == JVal::Num && sz->n > 0) out->assetSize = (uint64_t)sz->n;
+                if (sz && sz->t == JVal::Num && sz->n > 0) out->assetSize = sz->n < 1e15 ? (uint64_t)sz->n : UINT64_MAX;
             } else if (n == L"sha256sums") {
                 out->sumsUrl = Widen(url->s);
             }
@@ -459,7 +532,7 @@ Result CheckAndInstall(bool install, const std::atomic<bool>* cancel) {
         r.message = L"Update check failed: " + err;
         return r;
     }
-    if (sc == 404) { r.outcome = Outcome::NoRelease; r.message = L"Updates: no releases published yet"; return r; }
+    if (sc == 404) { r.outcome = Outcome::NoRelease; r.message = L"Updates: no published release found (HTTP 404)"; return r; }
     if (sc != 200) {
         // GitHub explains refusals (rate limit, blocked) in a JSON "message"; show it rather than guess.
         std::wstring why;
@@ -486,6 +559,15 @@ Result CheckAndInstall(bool install, const std::atomic<bool>* cancel) {
     }
     if (rel.assetUrl.empty()) { r.message = L"Update " + ToString(rel.version) + L" has no " + name + L"; not installed"; return r; }
     if (rel.sumsUrl.empty()) { r.message = L"Update " + ToString(rel.version) + L" has no SHA256SUMS; not installed"; return r; }
+    {   // Both files must come from this repo's release for this tag.
+        std::wstring want = L"https://github.com/floration/hadron/releases/download/" + Lower(rel.tag) + L"/";
+        auto pinned = [&](const std::wstring& u) { return Lower(u).compare(0, want.size(), want) == 0; };
+        if (!pinned(rel.assetUrl) || !pinned(rel.sumsUrl)) {
+            r.message = L"Update " + ToString(rel.version) + L": download links aren't this repo's release files; not installed";
+            return r;
+        }
+    }
+    if (rel.assetSize > kMaxAsset) { r.message = L"Update " + ToString(rel.version) + L" is unexpectedly large; not installed"; return r; }
 
     std::vector<uint8_t> sums;
     if (!HttpGet(rel.sumsUrl, 1 << 20, &sums, &sc, &err, cancel) || sc != 200) {
