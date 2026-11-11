@@ -90,6 +90,13 @@ shot services-regfallback-plan "$S" --fixture "$FIX" --plan stripped --regfallba
 shot services-console-signer "$S" --fixture "$FIX" --layout console --sort signer --select ExampleUpdater
 shot services-console-drift-7040 "$S" --fixture "$FIX" --layout console --select XblGameSave
 shot services-console-regfallback-plan "$S" --fixture "$FIX" --layout console --plan stripped --regfallback on --select dmwappushservice
+# fix/svcdrv-visibility: a registry-only row, and the protected-items override (on; its second confirmation). --protected
+# and --plan single: are fixture-only.
+for L in baseline console; do
+    shot services-regonly-$L "$S" --fixture "$FIX" --layout $L --tab drivers --select Fs_Rec
+    shot services-protected-on-$L "$S" --fixture "$FIX" --layout $L --plan single:BrokerInfrastructure:4 --protected on
+    shot services-protected-ask-$L "$S" --fixture "$FIX" --layout $L --plan single:ACPI:4 --protected ask
+done
 # Custom presets and measured before/after (docs/pipeline/fixes/svcdrv-presets.md); fixture mode writes nothing.
 for L in baseline console; do
     shot services-presets-$L "$S" --fixture "$FIX" --layout $L --presets
