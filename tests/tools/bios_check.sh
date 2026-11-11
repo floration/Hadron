@@ -25,8 +25,10 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
 EOF
 export WINEDEBUG=-all
 # Ubuntu's wine64 package doesn't put wineserver on PATH; find it, or skip the wait.
-WS="$(command -v wineserver || command -v wineserver64 || ls /usr/lib/wine/wineserver* 2>/dev/null | head -1 || true)"
-wswait() { if [ -n "$WS" ]; then "$WS" -w || true; fi; }
+# Waiting matters: a shot started while the previous (display-less) wineserver is still alive
+# attaches to it and gets no window.
+WS="$(command -v wineserver || command -v wineserver64 || find /usr/lib /usr/libexec /opt -name 'wineserver*' -type f 2>/dev/null | head -1 || true)"
+wswait() { if [ -n "$WS" ]; then "$WS" -w || true; else while pgrep -x 'wineserver(64)?' > /dev/null 2>&1 || pgrep -f '[w]ineserver' > /dev/null 2>&1; do sleep 1; done; fi; }
 
 echo "== selftest (standalone, folder fixture)"
 wine "$BUILD/HadronBios.exe" --selftest --fixture "$FIX/snap"
@@ -36,9 +38,9 @@ wswait
 
 shot() {   # name exe args...
     local name="$1"; shift
-    xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" wine "$@" --screenshot "$OUT/$name.png" > /dev/null 2>&1 || true
+    xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" wine "$@" --screenshot "$OUT/$name.png" > "$FIX/$name.log" 2>&1 || true
     wswait
-    if [ -s "$OUT/$name.png" ]; then echo "wrote $OUT/$name.png"; else echo "MISSING $OUT/$name.png"; exit 1; fi
+    if [ -s "$OUT/$name.png" ]; then echo "wrote $OUT/$name.png"; else echo "MISSING $OUT/$name.png"; cat "$FIX/$name.log"; exit 1; fi
 }
 for th in dark light; do
     for ly in baseline console; do
