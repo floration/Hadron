@@ -214,19 +214,19 @@ bool LoadSnapshotFrom(FileSource& src, const std::wstring& label, SnapLoad* out)
             std::wstring why;
             Cached cd;
             cd.ok = src.Read(L"vars/" + file, &data, kMaxSnapVar, &why);
-            if (cd.ok) {
-                total += data.size();
-                if (total > kMaxSnapTotal) {
-                    out->error = L"The snapshot holds more than " + std::to_wstring(kMaxSnapTotal >> 20) +
-                                 L" MB of variable data; refusing to load it.";
-                    out->vars.clear();
-                    return false;
-                }
-                cd.data.assign(data.begin(), data.end());
-            }
+            if (cd.ok) cd.data.assign(data.begin(), data.end());
             hit = cache.emplace(Lower(file), std::move(cd)).first;
         }
         if (!hit->second.ok) { skip(L"whose vars file can't be read"); continue; }
+        // Count every copy that goes into out->vars, not just each file read: a hostile index can
+        // point many rows at one file, and each row stores its own copy.
+        total += hit->second.data.size();
+        if (total > kMaxSnapTotal) {
+            out->error = L"The snapshot holds more than " + std::to_wstring(kMaxSnapTotal >> 20) +
+                         L" MB of variable data; refusing to load it.";
+            out->vars.clear();
+            return false;
+        }
         VarKey key = MakeVarKey(c[cName], c[cGuid]);
         if (out->vars.count(key)) skip(L"duplicate (the later row is used)");
         else out->loaded++;

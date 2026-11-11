@@ -1759,6 +1759,18 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
             // index.csv + same.bin + console.bin + huge.bin + system.txt: one read per distinct file name.
             check(ms.reads == 5, L"snapshot: one read per file name, not per row (" + std::to_wstring(ms.reads) + L" reads)");
         }
+        {
+            // Many rows pointing at one maximum-size file: the total cap counts every copy, not each read.
+            MemSource ms;
+            std::string idx = "\"Name\",\"Guid\",\"Size\",\"Attributes\",\"Error\",\"File\"\r\n";
+            for (int i = 0; i < 70; i++) idx += "\"V" + std::to_string(i) + "\",\"{g}\",\"1\",\"0x7\",\"0\",\"big.bin\"\r\n";
+            ms.files[L"index.csv"] = idx;
+            ms.files[L"vars/big.bin"] = std::string(kMaxSnapVar, 'q');
+            SnapLoad sl3;
+            bool l3 = LoadSnapshotFrom(ms, L"repeat", &sl3);
+            check(!l3 && sl3.vars.empty() && ms.reads <= 2,
+                  L"snapshot: 70 rows x 4 MB from one file hit the 256 MB total cap (" + sl3.error + L")");
+        }
     }
     // --- SMBIOS ---
     {
