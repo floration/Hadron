@@ -99,6 +99,10 @@ WriteOp OpTo(const StartCfg& have, const StartCfg& want) {
 }
 StartCfg AfterOf(const StartCfg& have, const WriteOp& op) { return StartCfg{op.start, op.delayed >= 0 ? op.delayed : have.delayed}; }
 
+// What a plan says about a driver the KB doesn't clear for changes (no "sysok", Hadron's internal name, in user text).
+const wchar_t kSysStartKept[] = L"Protected: a System-start driver that Hadron's KB does not list as safe to lower";
+const wchar_t kDriverKept[] = L"Protected: a driver that Hadron's KB does not list as safe to change";
+
 bool SysOk(const SvcItem& s, const Ctx& c) {
     const KbEntry* e = c.kb ? c.kb->Find(TemplateName(s.name, s.type)) : nullptr;
     return e && e->sysok && e->ForBuild(c.build);
@@ -115,7 +119,7 @@ std::wstring TargetGuard(const SvcItem& live, const StartCfg& target, const Ctx&
     if (target.start == 0) return L"Refused: Hadron never sets Boot start";
     if (!drv && target.start < 2) return L"Refused: Boot and System start are for drivers only";
     if (drv && (target.start < 2 || live.cfg.start < 2) && !SysOk(live, c))
-        return L"Protected: System-start driver without a curated sysok entry";
+        return kSysStartKept;
     return L"";
 }
 
@@ -252,9 +256,9 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
         Guard g = CheckGuard(s, c);
         if (g.neverTouch || g.neverPreset) r.blocked = L"Protected: not in presets. " + g.reason;
         else if (r.driver && s.cfg.start == 1 && !e->sysok)
-            r.blocked = L"Protected: System-start driver without a curated sysok entry";
+            r.blocked = kSysStartKept;
         else if (r.driver && !e->sysok)
-            r.blocked = L"Protected: driver without a curated sysok entry";
+            r.blocked = kDriverKept;
         if (r.blocked.empty() && !e->hw.empty()) {
             std::wstring ev;
             int h = c.hw ? HwEvidence(*c.hw, e->hw, s.name, &ev) : 0;
@@ -328,7 +332,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             else if (s.protect) r.blocked = L"Protected: " + g.reason;
             else if (f->cfg.start < 2) r.blocked = L"Kept: Hadron never sets Boot or System start; Windows changes these itself";
             else if (r.driver && s.cfg.start < 2 && !SysOk(s, c))
-                r.blocked = L"Protected: System-start driver without a curated sysok entry (live start type)";
+                r.blocked = kSysStartKept + std::wstring(L" (its start type now)");
             if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
             p.rows.push_back(std::move(r));
         }
@@ -362,7 +366,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (g.neverTouch || g.neverPreset) r.blocked = L"Protected: not in presets. " + g.reason;
             else if (t.start < 2) r.blocked = L"Kept: Hadron never sets Boot or System start";
             else if (r.driver && s.cfg.start < 2 && !SysOk(s, c))
-                r.blocked = L"Protected: System-start driver without a curated sysok entry (live start type)";
+                r.blocked = kSysStartKept + std::wstring(L" (its start type now)");
             if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
             p.rows.push_back(std::move(r));
         }
@@ -398,6 +402,9 @@ Plan BuildSingle(const SvcItem& s, StartCfg target, const std::vector<SvcItem>& 
     if (s.kind == Kind::UserInstance) r.blocked = L"Per-user instance: change its template instead";
     else if (g.neverTouch) r.blocked = L"Protected: " + g.reason;
     else if (target.start < 2) r.blocked = L"Hadron never sets Boot or System start";
+    // R6: lowering a System-start driver could never be put back by Hadron (Undo, a single change and Default all
+    // refuse to set System start without the KB's clearance), so a single change needs the same clearance a preset does.
+    else if (r.driver && s.cfg.start < 2 && !SysOk(s, c)) r.blocked = kSysStartKept;
     else if (c.tiOn && IEq(s.name, L"TrustedInstaller")) r.blocked = L"Not while the TrustedInstaller toggle is on: the toggle needs this service";
     else if (target.start == 2 && target.delayed == 1 && !s.group.empty())
         r.blocked = L"Windows doesn't allow a delayed auto-start service in a load-order group (" + s.group + L"): use Auto";

@@ -653,6 +653,17 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         const PlanRow* ir = RowOf(p4, L"igfxn");
         check(ir && !ir->blocked.empty() && ir->blocked.find(L"System-start") != std::wstring::npos,
               L"guard: a System-start driver without sysok is blocked (live start type)");
+        // R6: a single change may not lower a System-start driver without sysok either (nothing could put it back).
+        Plan s6 = BuildSingle(*ItemOf(sysItems, L"igfxn"), StartCfg{4, -1}, sysItems, c4);
+        Kb kb6;
+        kb6.Parse("V\t1\tservices\nB\t19045\n"
+                  "K\tigfxn\tdrv\t19045\tt\te\t\t\t\t4\t\t\twhy\t\t1\t0\treasoning\tn\treasoning\tn\t\t\t\tself\t\t\n", &err);
+        Ctx c6 = c;
+        c6.kb = &kb6;
+        Plan s7 = BuildSingle(*ItemOf(sysItems, L"igfxn"), StartCfg{4, -1}, sysItems, c6);
+        check(s6.Included() == 0 && RowOf(s6, L"igfxn") && RowOf(s6, L"igfxn")->blocked.find(L"System-start") != std::wstring::npos &&
+                  s7.Included() == 1,
+              L"R6: a single change refuses to lower a System-start driver the KB doesn't clear (sysok), and allows one it does");
 
         // Per-user instance, TI service with the toggle on, Boot/System by hand, drivers never controlled.
         SvcItem inst;
@@ -714,7 +725,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
             c6.first = &f6;
             Plan p6 = BuildDefault(false, TAB_DRIVERS, it6, c6);
             const PlanRow* br = RowOf(p6, L"Beep");
-            check(br && !br->blocked.empty() && br->blocked.find(L"sysok") != std::wstring::npos,
+            check(br && !br->blocked.empty() && br->blocked.find(L"System-start") != std::wstring::npos && br->blocked.find(L"sysok") == std::wstring::npos,
                   L"Restore first snapshot: a live System-start driver without sysok is blocked (logic M6)");
         }
         Plan pc = BuildControl(*ItemOf(w.items, L"igfxn"), 1, w.fx.backend, w.items, w.ctx);
