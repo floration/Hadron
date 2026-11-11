@@ -25,7 +25,8 @@
 
 namespace hx::services {
 
-// Precedence (probe round 2, which matched the known values): (1) the edition file's override
+// Precedence (probe round 2; checked against the probe session's expected values, not a source): (1) the edition
+// file's override
 // (%windir%\servicing\Editions\<EditionID>Edition.xml, <component name=".."><Start_X>2</Start_X></component>);
 // (2) the component's <serviceData start> or its registryKey Services\X Start value; (3) a configuration-setting
 // default (<xsd:element name="Start_X" default="3" wcm:handler="regkey('...\Services\X')" wcm:legacyName="Start">).
@@ -39,6 +40,7 @@ struct SxsValue {
     int setStart = -1, setDelayed = -1;   // configuration-setting defaults
     int edStart = -1, edDelayed = -1;     // the edition file's override
     bool conflict = false;       // two manifests (or serviceData and the registry value) disagree: no value
+    bool editionUnread = false;  // a setting the edition file can override targets it, and that file wasn't read
     // The file that first set each layer's start (for --dump-stock-live; not cached).
     std::wstring fileService, fileRegistry, fileSetting, fileEdition;
     Src StartSrc() const;
@@ -48,13 +50,20 @@ struct SxsValue {
     bool LowConfidence() const;  // the start, or an Auto value's delay, comes from a setting default alone
     // delayed 0/1 for Auto, -1 otherwise (left alone).
     StartCfg Cfg() const;
+    // The DelayedAutostart value by layer (edition, then serviceData/registry, then a setting default); -1 when no
+    // file sets it (owner's live run: print "-" for absent, never 0).
+    int RawDelayed() const { return edDelayed >= 0 ? edDelayed : delayed >= 0 ? delayed : setDelayed; }
 };
 std::wstring SxsSrcText(SxsValue::Src s);   // "the edition file's override", ...
 
-// Probe round 2: start types Windows sets at runtime from the hardware or software it finds, not from any file
-// (WlanSvc, stisvc, camsvc, IKEEXT, PolicyAgent, iphlpsvc, ssh-agent, WinHttpAutoProxySvc; DelayedAutostart on BITS,
-// WinRM, dcsvc, dmwappushservice). Shown with the manifest value and a note, never applied.
-bool SxsRuntimeDependent(const std::wstring& name);
+// Services the probe flagged as changed after setup (probe-session judgement, not a source; kb-audit svcdrv-stock M2).
+// Shown with their values and a note, never applied.
+bool SxsRuntimeStart(const std::wstring& name);     // start type: WlanSvc, stisvc, camsvc, IKEEXT, PolicyAgent, iphlpsvc,
+                                                    // ssh-agent, WinHttpAutoProxySvc
+bool SxsRuntimeDelayed(const std::wstring& name);   // DelayedAutostart: BITS, WinRM, dcsvc, dmwappushservice
+
+// The cache's scanner version (review F5): a cache written by another version is renamed aside and read again.
+constexpr int kSxsScannerVersion = 2;
 
 struct SxsStock {
     bool ok = false;
@@ -62,12 +71,19 @@ struct SxsStock {
     std::wstring edition;        // EditionID, "" when unknown
     bool editionRead = false;    // the edition file was found and read
     std::wstring err;            // why there is no value (ok false), shown to the user
+    std::wstring editionErr;     // why the edition file wasn't read
     int manifests = 0, failed = 0, skipped = 0, overrides = 0;
+    bool truncated = false;      // the manifest listing ended on an error (review F4)
     bool fromCache = false;
+    bool fixture = false;        // read from the test fixture's hand-written XML, not a real PC (kb-audit s3)
+    // Some manifests failed or were skipped, or the listing was cut short: manifest values are shown, not applied.
+    bool Incomplete() const { return failed > 0 || skipped > 0 || truncated; }
+    // Only a complete scan with the edition file read is cached (review F3, F4).
+    bool Cacheable() const { return ok && !Incomplete() && editionRead && !fixture; }
     std::map<std::wstring, SxsValue> byName;   // lower-case service name
-    // The value for a name; a per-user instance ("CDPUserSvc_4f2a1") falls back to its template. Null when none or
-    // when the manifests conflict.
-    const SxsValue* Find(const std::wstring& name) const;
+    // The value for a name; with instance, a per-user instance ("CDPUserSvc_4f2a1") falls back to its template
+    // (review F6: only for Kind::UserInstance). Null when none or when the manifests conflict.
+    const SxsValue* Find(const std::wstring& name, bool instance = false) const;
     int Usable() const;
 };
 
@@ -89,7 +105,9 @@ class SxsReader {
 public:
     virtual ~SxsReader() = default;
     // Prepares the reader (live: finds and loads wcp.dll's dictionary and msdelta.dll) and lists the manifests.
-    virtual bool List(std::vector<std::wstring>* names, std::wstring* err) = 0;
+    // *truncated: the listing ended on an error (some names may be missing).
+    virtual bool List(std::vector<std::wstring>* names, bool* truncated, std::wstring* err) = 0;
+    virtual bool IsFixture() const { return false; }
     // The manifest's XML. *skipped = true (and false returned) when its attributes forbid reading it.
     virtual bool ReadXml(const std::wstring& name, std::string* xml, bool* skipped, std::wstring* err) = 0;
     virtual std::wstring BuildUbr() = 0;   // "19045.2965"; "" when unknown (no cache then)
@@ -104,6 +122,18 @@ std::unique_ptr<SxsReader> MakeFakeSxsReader(const std::wstring& dir);
 
 // Reads every manifest (cancel: stop early, ok false).
 SxsStock ScanSxs(SxsReader& r, const std::function<bool()>& cancelled = nullptr);
+
+// The words for manifest values: this PC's (read on this PC by Hadron) or the test fixture's (not a real PC).
+struct SxsWords {
+    std::wstring who;        // "this PC's manifests"
+    std::wstring shortSrc;   // the detail pane's source, in brackets after the value
+    std::wstring label;      // the Basis label of an applied row (BasisLabel's condition)
+    std::wstring note;       // the start of a basis note, up to "(... build N.UBR Edition"
+    std::wstring uses;       // "Hadron uses it as the Windows stock value."
+    std::wstring reason;     // a plan row's reason
+    std::wstring planSrc;    // the plan note's source
+};
+SxsWords SxsWordsFor(const SxsStock* s);
 
 // --dump-stock-live's UTF-8 TSV: "#" header lines (build.UBR, EditionID, manifests, failures, skipped, elapsed ms),
 // then name, start, delayed, layer (edition|serviceData|registry|settingDefault), conflict, source file per name.

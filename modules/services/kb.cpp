@@ -116,8 +116,8 @@ std::wstring LevelName(int level) {
     return L"Default";
 }
 
-std::wstring BasisLabel(const std::wstring& basis) {
-    if (basis == L"owner-measured") return L"measured by Hadron's author";
+std::wstring BasisLabel(const std::wstring& basis, const std::wstring& cond) {
+    if (basis == L"owner-measured") return cond.empty() ? std::wstring(L"measured by Hadron's author") : cond;
     if (basis == L"published") return L"published";
     if (basis == L"reasoning") return L"reasoning (how Windows works, no data)";
     if (basis == L"folklore") return L"folklore (repeated, no evidence)";

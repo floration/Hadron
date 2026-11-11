@@ -135,8 +135,10 @@ LABELS = {
     'FNMSICENTER': 'file.net\'s MSI_Central_Service.exe page (third-party)',
     'FNMYSTIC': 'file.net\'s Mystic_Light_Service.exe page (third-party)',
     'FNRTKAUD': 'file.net\'s RtkAudUService64.exe page (third-party)',
-    'TBLWINTIPS': 'wintips.org\'s "Default Startup Type of Services on Windows 10 PRO OS" (third-party table)',
-    'TBLTWEAKHOUND': 'TweakHound\'s "Windows 10 Default Services v20H2" (third-party table)',
+    'TBLWINTIPS': 'wintips.org\'s "Default Startup Type of Services on Windows 10 PRO OS" (third-party table; no build '
+                  'stated, its upload date only in its URL, Office installed)',
+    'TBLTWEAKHOUND': 'TweakHound\'s "Windows 10 Default Services v20H2" (third-party table; a default install with '
+                     'VirtualBox Guest Additions, so a VM)',
 }
 
 ENTRIES = []
@@ -1489,7 +1491,8 @@ STOCK = [
      '@W32TWG (supported Windows client and Windows Server versions): on workgroup computers "The startup value for '
      'the Windows Time service is Manual", and it is a trigger-start service by default. For domain-joined PCs the '
      'page says it starts on a trigger event and gives no other start type. The page names no build; Hadron uses it as '
-     'the Windows 10 stock value.'),
+     'the Windows 10 stock value. @TBLWINTIPS (third-party) lists "Automatic (Delayed Start)" and @TBLTWEAKHOUND '
+     '"Manual (Trigger Start)"; Hadron keeps the Microsoft page\'s value.'),
     ('TimeBrokerSvc', '3/-',
      '@TASKSCHED (supported Windows client versions) says to check that its Start value "is set to '
      '[[3|published|@TASKSCHED]] by default" (Manual). The page names no build; Hadron uses it as the Windows 10 '
@@ -1520,6 +1523,7 @@ for _name, _cfg, _note in STOCK:
 # A value ships only where both list the same start type (Trigger Start is not a start type and is ignored); where
 # they differ the entry records "sources disagree" and nothing is applied. A Microsoft value in STOCK above stays.
 TABLE_WINTIPS = {
+    'diagnosticshub.standardcollector.service': 'Manual',   # "Microsoft (R) Diagnostics Hub Standard Collector Service"
     'AJRouter': 'Manual (Trigger Start)',
     'ALG': 'Manual',
     'AppIDSvc': 'Manual (Trigger Start)',
@@ -1752,6 +1756,7 @@ TABLE_WINTIPS = {
     'XboxNetApiSvc': 'Manual',
 }
 TABLE_TWEAKHOUND = {
+    'diagnosticshub.standardcollector.service': 'Manual',   # "Microsoft (R) Diagnostics Hub Standard Collector Service"
     'AJRouter': 'Manual (Trigger Start)',
     'ALG': 'Manual',
     'AppIDSvc': 'Manual (Trigger Start)',
@@ -1995,7 +2000,8 @@ def _table_cfg(v):
     raise ValueError(v)
 
 
-_TABLE_HEAD = 'Third-party tables: @TBLWINTIPS (Windows 10 Pro, no version stated) lists "%s"; @TBLTWEAKHOUND (Windows 10 20H2) lists "%s".'
+_TABLE_HEAD = ('Third-party tables: @TBLWINTIPS (Windows 10 Pro, no build stated) lists "%s"; @TBLTWEAKHOUND (Windows 10 '
+               '20H2, build [[19042.685|published|@TBLTWEAKHOUND]]) lists "%s".')
 TABLE_STOCK, TABLE_DISAGREE = [], []
 for _name in sorted(set(TABLE_WINTIPS) & set(TABLE_TWEAKHOUND), key=str.lower):
     _hit = [e for e in ENTRIES if e['name'].lower() == _name.lower()]
@@ -2006,7 +2012,9 @@ for _name in sorted(set(TABLE_WINTIPS) & set(TABLE_TWEAKHOUND), key=str.lower):
     if _table_cfg(_w) == _table_cfg(_t):
         TABLE_STOCK.append(_name)
         _hit[0].update(stock=_table_cfg(_w), stock_basis='published',
-                       stock_note=_head + ' The two third-party tables agree. Neither is a capture of this release, so '
+                       stock_note=_head + ' The two third-party tables agree. Neither table is a capture of the release Hadron targets (TweakHound '
+                                          'states 20H2; wintips states no build, and its URL dates its upload before that '
+                                          'release), so '
                                           'the value names no build; Hadron uses it as the Windows 10 stock value.')
     else:
         TABLE_DISAGREE.append(_name)

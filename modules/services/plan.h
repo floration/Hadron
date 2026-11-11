@@ -29,6 +29,7 @@ struct Ctx {
     std::wstring machine;              // machine GUID (first.txt must match)
     bool tiOn = false;
     const SxsStock* sxs = nullptr;     // this PC's WinSxS manifest values, when read (fix/svcdrv-stock)
+    bool sxsPending = false;           // the manifest pass is still running (review F2: the stock plan waits)
     // Filled by Prepare() from hw.
     std::set<std::wstring> filters, bootChain;
     void Prepare();
@@ -55,6 +56,7 @@ struct StockPick {
     bool hasCfg = false;         // Show: cfg holds a value
     std::wstring value;          // the detail pane's "Windows stock" text
     std::wstring reason, basis, basisNote;   // a plan row's texts
+    std::wstring basisCond;      // BasisLabel's condition for an owner-measured value read from the manifests
     std::wstring why;            // Show: why it is not applied
 };
 StockPick StockFor(const SvcItem& s, const Ctx& c);
@@ -71,6 +73,7 @@ struct PlanRow {
     bool include = true, canToggle = true;
     std::wstring blocked;              // non-empty: shown for information, never applied
     std::wstring reason, basis, basisNote, evidence, warning, contested;
+    std::wstring basisCond;            // BasisLabel's condition (manifest stock rows: "read on this PC by Hadron (...)")
     std::wstring depWarning;           // DependencyCheck's own warning, recomputed on every toggle
     bool depUnticked = false;          // DependencyCheck unticked it (ticked again when the reason goes)
     bool depKept = false;              // the user ticked it while it had a dependency warning: never unticked by the check

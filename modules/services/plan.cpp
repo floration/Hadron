@@ -313,7 +313,8 @@ StockPick StockFor(const SvcItem& s, const Ctx& c) {
     const bool hasK = kbFor && e->stock >= 0;
     const bool kDis = kbFor && e->stockSrc == L"disagree";
     const StartCfg k{hasK ? e->stock : 3, hasK && e->stock == 2 ? e->stockDelayed : -1};
-    const SxsValue* m = c.sxs ? c.sxs->Find(s.name) : nullptr;
+    // Review F6: the template fallback only for a per-user instance.
+    const SxsValue* m = c.sxs ? c.sxs->Find(s.name, s.kind == Kind::UserInstance) : nullptr;
     if (drv && !(e && e->sysok)) m = nullptr;   // drivers: a manifest value only with the KB's sysok (guard unchanged)
     auto same = [](const StartCfg& a, const StartCfg& b) { return a.start == b.start && (a.start != 2 || a.Delayed() == b.Delayed()); };
     auto label = [](const StartCfg& x) { return StartLabel(x, false); };
@@ -323,13 +324,13 @@ StockPick StockFor(const SvcItem& s, const Ctx& c) {
         else if (e->stockSrc == L"table" || kDis) { kbText = L"two agreeing third-party tables"; kbShort = L"published; two agreeing third-party tables, no build named"; }
         else { kbText = L"a Microsoft page"; kbShort = L"published; the page names no build"; }
     }
-    std::wstring cond, mShort;
+    auto says = [&]() { return kbText == L"two agreeing third-party tables" ? std::wstring(L" say ") : std::wstring(L" says "); };
+    const SxsWords w = SxsWordsFor(c.sxs);
+    std::wstring mShort;
     StartCfg mv;
     if (m) {
         mv = m->Cfg();
-        cond = L"read from this PC's WinSxS component manifests, Windows build " + c.sxs->build +
-               (c.sxs->edition.empty() ? std::wstring() : L" (" + c.sxs->edition + L")");
-        mShort = L"this PC's component manifests, build " + c.sxs->build;
+        mShort = w.shortSrc;
     }
     auto show = [&](const std::wstring& why) {
         p.kind = StockPick::Show;
@@ -337,29 +338,44 @@ StockPick StockFor(const SvcItem& s, const Ctx& c) {
         if (m) { p.cfg = mv; p.hasCfg = true; }
         else if (hasK) { p.cfg = k; p.hasCfg = true; }
         p.value = L"not applied: " + why;
-        p.basisNote = (m ? L"Manifests: " + label(mv) + L", " + cond + L" (" + SxsSrcText(m->StartSrc()) + L"). " : std::wstring()) +
+        p.basisNote = (m ? L"Manifests: " + label(mv) + L", " + w.label + L" (" + SxsSrcText(m->StartSrc()) + L"). " : std::wstring()) +
                       (hasK || kDis ? L"KB: " + e->stockNote : std::wstring());
         return p;
     };
-    if (SxsRuntimeDependent(s.name) && (m || hasK))
-        return show(L"Windows can set this start type at runtime from the hardware or software it finds, so no file or table value is reliable for this PC" +
-                    (m ? L" (this PC's manifests say " + label(mv) + L")" : std::wstring()) +
-                    (hasK ? L"; " + kbText + L" say" + (kbText == L"a Microsoft page" || kbText.rfind(L"Hadron", 0) == 0 ? L"s " : L" ") + label(k) : std::wstring()));
+    // kb-audit svcdrv-stock M2: the probe flagged these as changed after setup; a judgement, not a source.
+    if (SxsRuntimeStart(s.name) && (m || hasK))
+        return show(L"Hadron doesn't apply a stock value here: this service's start type may be changed after setup by the "
+                    L"hardware or software found (reasoning, from a probe on one PC; not checked per service)" +
+                    (m ? L"; " + w.who + L" say " + label(mv) : std::wstring()) + (hasK ? L"; " + kbText + says() + label(k) : std::wstring()));
+    if (SxsRuntimeDelayed(s.name) && (m || hasK))
+        return show(L"Hadron doesn't apply a stock value here: Windows may write this service's DelayedAutostart after setup "
+                    L"(reasoning, from a probe on one PC; not checked per service)" +
+                    (m ? L"; " + w.who + L" say " + label(mv) : std::wstring()) + (hasK ? L"; " + kbText + says() + label(k) : std::wstring()));
+    // Review F3/F4: incomplete manifest data is shown, never applied.
+    if (m && c.sxs->Incomplete())
+        return show(std::to_wstring(c.sxs->failed) + L" component manifests could not be read and " + std::to_wstring(c.sxs->skipped) +
+                    L" were skipped" + (c.sxs->truncated ? L", and the listing was cut short" : L"") +
+                    L", so " + w.who + L" may be incomplete (they say " + label(mv) + L")");
+    if (m && m->editionUnread)
+        return show(L"the edition file could not be read, and it can override this service's start type (" + w.who + L" say " +
+                    label(mv) + L" without it)");
     if (m && !m->LowConfidence()) {
         if (hasK && !same(mv, k))
-            return show(L"sources disagree: this PC's manifests say " + label(mv) + L"; " + kbText + L" say" +
-                        (kbText == L"two agreeing third-party tables" ? L" " : L"s ") + label(k));
+            return show(L"sources disagree: " + w.who + L" say " + label(mv) + L"; " + kbText + says() + label(k));
         if (kDis)
-            return show(L"sources disagree: this PC's manifests say " + label(mv) + L"; the third-party tables disagree with each other");
+            return show(L"sources disagree: " + w.who + L" say " + label(mv) + L"; the third-party tables disagree with each other");
         p.kind = StockPick::Apply;
         p.cfg = mv;
+        // kb-audit svcdrv-stock M1: rule 7's owner-measured kind (first-hand, on the target PC, with its conditions), but
+        // labelled as what it is: read on this PC by Hadron, not measured by the author.
         p.basis = L"owner-measured";
-        p.basisNote = L"Windows stock start type " + cond + L", from " + SxsSrcText(m->StartSrc()) + L"." +
+        p.basisCond = w.label;
+        p.basisNote = w.note + L", from " + SxsSrcText(m->StartSrc()) + L"). " + w.uses +
                       (hasK ? L" " + std::wstring(kbText == L"two agreeing third-party tables" ? L"Two agreeing third-party tables agree"
                                                     : kbText == L"a Microsoft page" ? L"A Microsoft page agrees" : L"Hadron's KB agrees") +
                                   L": " + e->stockNote
                             : std::wstring());
-        p.reason = L"Windows stock start type from this PC's component manifests (build " + c.sxs->build + L")";
+        p.reason = w.reason;
         p.value = label(mv) + L" (" + mShort + (hasK ? L"; " + kbText + L" agree" + (kbText == L"two agreeing third-party tables" ? L"" : L"s") : std::wstring()) + L")";
         return p;
     }
@@ -368,17 +384,15 @@ StockPick StockFor(const SvcItem& s, const Ctx& c) {
             p.kind = StockPick::Apply;
             p.cfg = mv;
             p.basis = e->stockBasis;
-            p.basisNote = L"Windows stock start type " + cond + L", from a configuration-setting default (low confidence: such "
-                          L"defaults can be Server values), applied because " + kbText + L" agree" +
-                          (kbText == L"two agreeing third-party tables" ? L"" : L"s") + L": " + e->stockNote;
-            p.reason = L"Windows stock start type from this PC's component manifests (a setting default) and " + kbText;
+            p.basisNote = w.note + L", from a configuration-setting default: low confidence, such defaults can be Server values), "
+                          L"applied because " + kbText + L" agree" + (kbText == L"two agreeing third-party tables" ? L"" : L"s") + L": " + e->stockNote;
+            p.reason = w.reason + L", a setting default, and " + kbText;
             p.value = label(mv) + L" (" + mShort + L", a setting default; " + kbShort + L")";
             return p;
         }
-        return show(L"only a configuration-setting default in this PC's manifests gives " + label(mv) +
+        return show(L"only a configuration-setting default in " + w.who + L" gives " + label(mv) +
                     L", and such defaults can be Server values; " +
-                    (hasK ? kbText + L" say" + (kbText == L"two agreeing third-party tables" ? L" " : L"s ") + label(k)
-                          : std::wstring(L"no table confirms it")));
+                    (hasK ? kbText + says() + label(k) : std::wstring(L"no table confirms it")));
     }
     if (hasK) {
         p.kind = StockPick::Apply;
@@ -470,6 +484,13 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
         // R20 (proxy Q2): never a bare "Nothing to change." that reads as "already at stock".
         const std::wstring none = L"Hadron has no Windows-stock data for build " + (c.build.empty() ? std::wstring(L"(unknown)") : c.build) +
                                   L" yet: nothing will be changed.";
+        if (c.sxsPending) {   // review F2: never a plan from the KB alone while the manifests are being read
+            const std::wstring wait = L"Hadron is still reading this PC's component manifests: the Windows-stock plan is built "
+                                      L"once they are read.";
+            p.notes.push_back(wait);
+            p.emptyText = L"still reading this PC's component manifests";
+            return p;
+        }
         const bool sxsOk = c.sxs && c.sxs->ok;
         if (c.build != L"19045" && !sxsOk) {
             p.notes.push_back(none);
@@ -477,10 +498,18 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             p.emptyText = none;
             return p;
         }
-        if (sxsOk)
-            p.notes.push_back(L"Stock values come first from this PC's own WinSxS component manifests (build " + c.sxs->build +
-                              (c.sxs->edition.empty() ? std::wstring() : L", " + c.sxs->edition) +
-                              L"), cross-checked with Hadron's KB. Where they disagree, both are shown and nothing is applied.");
+        if (sxsOk) {
+            p.notes.push_back(L"Stock values come first from " + SxsWordsFor(c.sxs).planSrc +
+                              L", cross-checked with Hadron's KB. Where they disagree, both are shown and nothing is applied.");
+            if (c.sxs->Incomplete())
+                p.notes.push_back(std::to_wstring(c.sxs->failed) + L" component manifests could not be read and " +
+                                  std::to_wstring(c.sxs->skipped) + L" were skipped (reparse point, recall or offline)" +
+                                  (c.sxs->truncated ? L", and the listing was cut short" : L"") +
+                                  L": manifest values are shown, not applied.");
+            if (!c.sxs->editionRead)
+                p.notes.push_back(L"The edition file could not be read (" + c.sxs->editionErr +
+                                  L"): services its settings can set are shown, not applied.");
+        }
         else if (c.sxs && !c.sxs->err.empty())
             p.notes.push_back(L"This PC's component manifests could not be read, so only Hadron's KB is used: " + c.sxs->err);
         int withStock = 0, total = 0, shown = 0;
@@ -496,8 +525,9 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             StartCfg t{k.cfg.start, k.cfg.start == 2 ? k.cfg.delayed : s.cfg.delayed};
             if (k.kind == StockPick::Show) {
                 shown++;
-                r.op = OpTo(s.cfg, t);
-                r.after = AfterOf(s.cfg, r.op);
+                // kb-audit s6: nothing will be written, so Planned is the start type now; the value is in the text.
+                r.op = OpTo(s.cfg, s.cfg);
+                r.after = s.cfg;
                 r.reason = L"Windows stock start type: not applied";
                 r.basis = L"not applied";
                 r.basisNote = k.basisNote;
@@ -512,6 +542,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             r.after = AfterOf(s.cfg, r.op);
             r.reason = k.reason;
             r.basis = k.basis;
+            r.basisCond = k.basisCond;
             r.basisNote = k.basisNote;
             Guard g = CheckGuard(s, c);
             // DECISIONS 2026-11-11 (proxy, Small fixes): a KB `never` means "not in a preset level", not "never restore
@@ -536,7 +567,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
                           L"Storage drivers never get a stock value: Windows sets those per PC.");
         if (shown)
             p.notes.push_back(std::to_wstring(shown) + L" more are shown and not applied: their sources disagree, only a setting "
-                              L"default gives them, or Windows sets them at runtime.");
+                              L"default gives them, the manifest data is incomplete, or Hadron treats them as set after setup.");
     }
     if (std::wstring hn = HwNote(tab, c); !hn.empty()) p.notes.push_back(hn);
     DependencyCheck(&p, items);
@@ -969,7 +1000,7 @@ std::string DumpPlan(const Plan& p) {
     o += L"Plan: " + p.title + L"\n";
     o += L"Source: " + p.source + L"\n";
     o += L"Rows: " + std::to_wstring(p.Included()) + L" ticked, " + std::to_wstring(p.Optional()) + L" unticked, " +
-         std::to_wstring(p.Blocked()) + L" kept or protected; already set: " + std::to_wstring(p.alreadySet) + L"\n";
+         std::to_wstring(p.Blocked()) + L" kept, protected or not applied; already set: " + std::to_wstring(p.alreadySet) + L"\n";
     for (auto& n : p.notes) o += L"Note: " + n + L"\n";
     for (auto& r : p.rows) {
         std::wstring box = !r.blocked.empty() ? L"[-]" : (r.include ? L"[x]" : L"[ ]");

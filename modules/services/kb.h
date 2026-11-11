@@ -62,6 +62,8 @@ private:
 
 bool LoadEmbeddedKb(Kb* kb, std::wstring* err);   // RCDATA SERVICES_KB from this exe
 std::wstring LevelName(int level);                 // "Pure bloat removal", "Stripped", "Minimum"
-std::wstring BasisLabel(const std::wstring& basis);    // "folklore (repeated, no evidence)", ...
+// "folklore (repeated, no evidence)", ...; an owner-measured value with a condition is labelled by it (kb-audit
+// svcdrv-stock M1: a value Hadron read on this PC is not "measured by Hadron's author").
+std::wstring BasisLabel(const std::wstring& basis, const std::wstring& cond = L"");
 
 }  // namespace hx::services

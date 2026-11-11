@@ -267,7 +267,7 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
      `registryKey ...\Services\X` `Start` value (and `DelayedAutostart`); (3) a configuration-setting default
      (`<xsd:element default wcm:handler="regkey('...\Services\X')" wcm:legacyName="Start|DelayedAutostart">`).
      Two manifests with different values for a name are a conflict: no value. A per-user instance maps to its
-     template. The result is cached in the data folder as `sxs-<build>.<UBR>-<EditionID>.txt` (temp + rename, never
+     template. The result is cached in the data folder as `sxs-v<scanner version>-<build>.<UBR>-<EditionID>.txt` (temp + rename, never
      overwritten), only after `EnsureRoot` passes again on that worker (A1); an unusable cache is renamed aside and
      the manifests are read again. Basis: `owner-measured`, condition "read from this PC's WinSxS component
      manifests, Windows build N.UBR (edition)".
@@ -277,9 +277,14 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
     from the manifest (the KB source is named when it agrees). Only the KB has one: applied from the KB. They
     disagree, the tables disagree with each other, or only a setting default gives the manifest value (setting
     defaults can be Server values, e.g. Themes) and no KB value agrees: shown with both sources, never applied.
-    Services Windows sets at runtime from hardware or software (WlanSvc, stisvc, camsvc, IKEEXT, PolicyAgent,
-    iphlpsvc, ssh-agent, WinHttpAutoProxySvc; and BITS, WinRM, dcsvc, dmwappushservice, whose DelayedAutostart is
-    written at runtime) are always shown, never applied. Drivers take a manifest value only when their KB entry has
+    Services the probe flagged as changed after setup (a probe-session judgement, not a source: start type for
+    WlanSvc, stisvc, camsvc, IKEEXT, PolicyAgent, iphlpsvc, ssh-agent, WinHttpAutoProxySvc; DelayedAutostart for BITS,
+    WinRM, dcsvc, dmwappushservice) are always shown, never applied. So are manifest values from an incomplete scan
+    (failed or skipped manifests, a cut-short listing) and, when the edition file can't be read, values its settings
+    can set; such scans are never cached. While the pass runs the stock plan is empty ("still reading this PC's
+    component manifests") and can't be applied. An applied manifest row keeps rule 7's `owner-measured` kind but is
+    labelled "read on this PC by Hadron (component manifests, build N.UBR, edition)"; fixture rows say they come
+    from the test fixture's hand-written manifests. Drivers take a manifest value only when their KB entry has
     `sysok`; storage drivers never get one. On a build other than 19045 only the manifests give values.
   - Shown rows are unticked and can't be ticked ("Not applied: <why>"); the plan notes count them.
   - An explanation-only (`never`) KB entry doesn't block its stock row: `never` means not in a preset level.

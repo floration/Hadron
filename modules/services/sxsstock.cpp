@@ -67,20 +67,51 @@ std::wstring SxsSrcText(SxsValue::Src s) {
     return L"none";
 }
 
-bool SxsRuntimeDependent(const std::wstring& name) {
+bool SxsRuntimeStart(const std::wstring& name) {
     static const wchar_t* const kList[] = {L"wlansvc", L"stisvc", L"camsvc", L"ikeext", L"policyagent", L"iphlpsvc",
-                                           L"ssh-agent", L"winhttpautoproxysvc", L"bits", L"winrm", L"dcsvc",
-                                           L"dmwappushservice"};
+                                           L"ssh-agent", L"winhttpautoproxysvc"};
     std::wstring n = Lower(name);
     for (auto* k : kList) if (n == k) return true;
     return false;
 }
 
-const SxsValue* SxsStock::Find(const std::wstring& name) const {
+bool SxsRuntimeDelayed(const std::wstring& name) {
+    static const wchar_t* const kList[] = {L"bits", L"winrm", L"dcsvc", L"dmwappushservice"};
+    std::wstring n = Lower(name);
+    for (auto* k : kList) if (n == k) return true;
+    return false;
+}
+
+SxsWords SxsWordsFor(const SxsStock* s) {
+    SxsWords w;
+    const std::wstring b = s ? s->build : std::wstring();
+    const std::wstring ed = s && !s->edition.empty() ? s->edition : std::wstring(L"edition unknown");
+    if (s && s->fixture) {
+        w.who = L"the test fixture's manifests";
+        w.shortSrc = L"the test fixture's hand-written manifests, not a real PC, build " + b;
+        w.label = L"read from the test fixture's hand-written manifests (not a real PC), build " + b;
+        w.note = L"The start type the test fixture's hand-written manifests (not a real PC) give the service (build " + b;
+        w.uses = L"Test data only.";
+        w.reason = L"Start type the test fixture's manifests declare (build " + b + L")";
+        w.planSrc = L"the test fixture's hand-written manifests (not a real PC; build " + b + L", " + ed + L")";
+    } else {
+        w.who = L"this PC's manifests";
+        w.shortSrc = L"read on this PC by Hadron, component manifests, build " + b;
+        w.label = L"read on this PC by Hadron (component manifests, build " + b + L", " + ed + L")";
+        w.note = L"The start type this PC's WinSxS component manifests install the service with (read by Hadron on this PC, "
+                 L"Windows build " + b + L" " + ed;
+        w.uses = L"Hadron uses it as the Windows stock value.";
+        w.reason = L"Start type this PC's component manifests declare (build " + b + L")";
+        w.planSrc = L"this PC's own WinSxS component manifests (build " + b + L", " + ed + L")";
+    }
+    return w;
+}
+
+const SxsValue* SxsStock::Find(const std::wstring& name, bool instance) const {
     if (!ok) return nullptr;
     std::wstring n = Lower(name);
     auto it = byName.find(n);
-    if (it == byName.end()) {
+    if (it == byName.end() && instance) {
         // A per-user instance ("cdpusersvc_4f2a1") maps to its template: the suffix is hex after the last '_'.
         size_t u = n.rfind(L'_');
         if (u != std::wstring::npos && u + 1 < n.size() &&
@@ -299,6 +330,8 @@ void ScanManifestXml(const std::string& x, SxsScan* acc, const std::wstring& fil
             } else if (tag == "element") {   // a configuration setting (xsd:element)
                 std::string svc = HandlerService(get("handler"));
                 std::string legacy = LowerA(Trim(get("legacyname"))), setting = LowerA(Trim(get("name")));
+                // Owner's live run (MSDTC): an element named for its value ("DelayedAutostart") may have no legacyName.
+                if (legacy.empty()) legacy = setting;
                 if (svc.empty() || setting.empty() || (legacy != "start" && legacy != "delayedautostart")) return;
                 const bool isDelayed = legacy == "delayedautostart";
                 std::wstring w = Lower(FromUtf8(svc));
@@ -356,8 +389,9 @@ SxsStock ScanSxs(SxsReader& r, const std::function<bool()>& cancelled) {
     SxsStock s;
     s.build = r.BuildUbr();
     s.edition = r.Edition();
+    s.fixture = r.IsFixture();
     std::vector<std::wstring> names;
-    if (!r.List(&names, &s.err)) return s;
+    if (!r.List(&names, &s.truncated, &s.err)) return s;
     SxsScan acc;
     for (auto& nm : names) {
         if (cancelled && cancelled()) { s.err = L"Reading the component manifests was cancelled."; return s; }
@@ -378,6 +412,10 @@ SxsStock ScanSxs(SxsReader& r, const std::function<bool()>& cancelled) {
     if (r.ReadEdition(&ed, &e)) {
         s.editionRead = true;
         s.overrides = ApplyEditionXml(ed, &acc, s.edition + L"Edition.xml");
+    } else {
+        // Review F3: every service a mapped setting targets could be overridden there: shown, not applied.
+        s.editionErr = s.edition.empty() ? L"this PC's EditionID could not be read" : e.empty() ? L"unknown error" : e;
+        for (auto& kv : acc.settings) acc.byName[kv.second.first].editionUnread = true;
     }
     s.byName = std::move(acc.byName);
     s.ok = true;
@@ -404,10 +442,13 @@ std::string SxsDumpTsv(const SxsStock& s, unsigned long long elapsedMs) {
             case SxsValue::NONE: layer = "none"; break;
         }
         StartCfg c = v.Cfg();
-        bool conflict = v.conflict || !v.Usable();
+        // Owner's live run: conflict only when files disagree (a DelayedAutostart-only name has no start, not a conflict);
+        // delayed as the files give it, "-" when none does.
+        const bool conflict = v.conflict || (v.svcStart >= 0 && v.regStart >= 0 && v.svcStart != v.regStart);
+        const int d = v.RawDelayed();
         o += ToUtf8(kv.first) + "\t" + (v.StartSrc() == SxsValue::NONE ? std::string("-") : std::to_string(c.start)) + "\t" +
-             (c.start == 2 ? std::to_string(c.delayed) : std::string("-")) + "\t" + layer + "\t" + (conflict ? "1" : "0") +
-             "\t" + ToUtf8(v.StartFile()) + "\n";
+             (d >= 0 ? std::to_string(d) : std::string("-")) + "\t" + layer + "\t" + (conflict ? "1" : "0") + "\t" +
+             ToUtf8(v.StartFile()) + "\n";
     }
     return o;
 }
@@ -418,11 +459,11 @@ std::wstring SxsCacheName(const std::wstring& b, const std::wstring& ed) {
     for (wchar_t ch : b) if (!(iswdigit(ch) || ch == L'.')) return L"";
     for (wchar_t ch : ed)
         if (!((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9'))) return L"";
-    return L"sxs-" + b + L"-" + ed + L".txt";
+    return L"sxs-v" + std::to_wstring(kSxsScannerVersion) + L"-" + b + L"-" + ed + L".txt";
 }
 
 std::string WriteSxsCache(const SxsStock& s) {
-    std::string o = "HXSVC\t1\tsxsstock\n";
+    std::string o = "HXSVC\t1\tsxsstock\t" + std::to_string(kSxsScannerVersion) + "\n";
     o += "M\tbuild\t" + ToUtf8(s.build) + "\nM\tedition\t" + ToUtf8(s.edition) + "\n";
     o += "M\tmanifests\t" + std::to_string(s.manifests) + "\nM\tfailed\t" + std::to_string(s.failed) +
          "\nM\tskipped\t" + std::to_string(s.skipped) + "\nM\toverrides\t" + std::to_string(s.overrides) +
@@ -442,7 +483,11 @@ bool ParseSxsCache(const std::string& utf8, SxsStock* out, std::wstring* err) {
     *out = SxsStock{};
     if (utf8.size() > kMaxFile) { *err = L"larger than 16 MB"; return false; }
     std::vector<std::wstring> lines = Split(FromUtf8(utf8), L'\n');
-    if (lines.empty() || lines[0] != L"HXSVC\t1\tsxsstock") { *err = L"not a manifest cache"; return false; }
+    if (lines.empty() || lines[0].rfind(L"HXSVC\t1\tsxsstock", 0) != 0) { *err = L"not a manifest cache"; return false; }
+    if (lines[0] != L"HXSVC\t1\tsxsstock\t" + std::to_wstring(kSxsScannerVersion)) {
+        *err = L"written by another scanner version";
+        return false;
+    }
     bool end = false;
     auto num = [](const std::wstring& t, int lo, int hi, int* v) {
         if (t.empty() || t.size() > 10) return false;
@@ -527,29 +572,38 @@ bool ReadSmallFile(const std::wstring& path, std::string* out, bool* skipped, st
     return ok;
 }
 
-std::vector<std::wstring> ListFiles(const std::wstring& dir, const wchar_t* pattern) {
-    std::vector<std::wstring> v;
+// Review F4/F10: the FindFirstFileExW error is the caller's text; a listing that ends on anything but
+// ERROR_NO_MORE_FILES is marked truncated.
+bool ListFiles(const std::wstring& dir, const wchar_t* pattern, std::vector<std::wstring>* v, bool* truncated, std::wstring* err) {
+    v->clear();
+    *truncated = false;
     WIN32_FIND_DATAW fd;
     HANDLE f = FindFirstFileExW((dir + L"\\" + pattern).c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr,
                                 FIND_FIRST_EX_LARGE_FETCH);
-    if (f == INVALID_HANDLE_VALUE) return v;
+    if (f == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        *err = L"Could not list " + dir + L"\\" + pattern + L": " + sys::ErrorText(e);
+        return false;
+    }
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        v.push_back(fd.cFileName);
+        v->push_back(fd.cFileName);
     } while (FindNextFileW(f, &fd));
+    DWORD last = GetLastError();
     FindClose(f);
-    std::sort(v.begin(), v.end());
-    return v;
+    if (last != ERROR_NO_MORE_FILES) *truncated = true;
+    std::sort(v->begin(), v->end());
+    if (v->empty()) { *err = L"No files match " + dir + L"\\" + pattern; return false; }
+    return true;
 }
 
 class FakeSxsReader : public SxsReader {
 public:
     explicit FakeSxsReader(std::wstring dir) : dir_(std::move(dir)) {}
-    bool List(std::vector<std::wstring>* names, std::wstring* err) override {
-        *names = ListFiles(dir_, L"*.manifest");
-        if (names->empty()) { *err = L"no *.manifest fixtures in " + dir_; return false; }
-        return true;
+    bool List(std::vector<std::wstring>* names, bool* truncated, std::wstring* err) override {
+        return ListFiles(dir_, L"*.manifest", names, truncated, err);
     }
+    bool IsFixture() const override { return true; }
     bool ReadXml(const std::wstring& name, std::string* xml, bool* skipped, std::wstring* err) override {
         return ReadSmallFile(dir_ + L"\\" + name, xml, skipped, err);
     }
@@ -579,7 +633,13 @@ struct DeltaInput { const void* start; SIZE_T size; BOOL editable; };
 struct DeltaOutput { void* start; SIZE_T size; };
 typedef BOOL(WINAPI* ApplyDeltaBFn)(long long flags, DeltaInput source, DeltaInput delta, DeltaOutput* target);
 typedef BOOL(WINAPI* DeltaFreeFn)(void* mem);
-constexpr long long kDeltaApplyAllowPa19 = 4;   // DELTA_APPLY_FLAG_ALLOW_PA19
+// Review F8: the apply flags. The probe on the owner's PC (19045.2965) expanded all 18,883 manifests with 4, so that is
+// what Hadron passes first. This toolchain ships no msdelta.h. As far as I know the SDK's header defines
+// DELTA_APPLY_FLAG_ALLOW_PA19 as 0x00000001, not 4, so 4 is not called that here. A delta that fails with 4 is tried
+// once more with DELTA_APPLY_FLAG_ALLOW_PA19 (1). The owner's live run (--dump-stock-live) confirms which works.
+constexpr long long kDeltaApplyFlagsProbe = 4;          // the value the probe used; its SDK name is unconfirmed
+constexpr long long kDeltaApplyFlagAllowPa19 = 1;       // DELTA_APPLY_FLAG_ALLOW_PA19 (msdelta.h, from memory)
+constexpr SIZE_T kMaxManifestXml = 64u << 20;           // review F7: a larger expanded manifest is a failure
 
 // "amd64_microsoft-windows-servicingstack_31bf3856ad364e35_10.0.19041.2905_none_..." -> {10,0,19041,2905}
 std::vector<unsigned> FolderVersion(const std::wstring& name) {
@@ -599,7 +659,7 @@ public:
         if (wcp_) FreeLibrary(wcp_);
         if (delta_) FreeLibrary(delta_);
     }
-    bool List(std::vector<std::wstring>* names, std::wstring* err) override {
+    bool List(std::vector<std::wstring>* names, bool* truncated, std::wstring* err) override {
         wchar_t w[MAX_PATH];
         UINT n = GetSystemWindowsDirectoryW(w, MAX_PATH);
         if (!n || n >= MAX_PATH) { *err = L"Could not find the Windows folder: " + sys::ErrorText(GetLastError()); return false; }
@@ -640,9 +700,7 @@ public:
         dict_ = g ? LockResource(g) : nullptr;
         dictSize_ = r ? SizeofResource(wcp_, r) : 0;
         if (!dict_ || !dictSize_) { *err = L"wcp.dll has no manifest dictionary (resource 614): " + sys::ErrorText(GetLastError()); return false; }
-        *names = ListFiles(sxs_ + L"\\Manifests", L"*.manifest");
-        if (names->empty()) { *err = L"No component manifests in " + sxs_ + L"\\Manifests."; return false; }
-        return true;
+        return ListFiles(sxs_ + L"\\Manifests", L"*.manifest", names, truncated, err);
     }
     bool ReadXml(const std::wstring& name, std::string* xml, bool* skipped, std::wstring* err) override {
         std::string raw;
@@ -655,9 +713,23 @@ public:
         DeltaInput src{dict_, dictSize_, FALSE};
         DeltaInput del{raw.data() + 4, raw.size() - 4, FALSE};
         DeltaOutput o{nullptr, 0};
-        if (!apply_(kDeltaApplyAllowPa19, src, del, &o)) { *err = L"ApplyDeltaB: " + sys::ErrorText(GetLastError()); return false; }
-        xml->assign(static_cast<const char*>(o.start), o.size);
-        free_(o.start);
+        if (!apply_(kDeltaApplyFlagsProbe, src, del, &o)) {
+            DWORD e1 = GetLastError();
+            o = DeltaOutput{nullptr, 0};
+            if (!apply_(kDeltaApplyFlagAllowPa19, src, del, &o)) {
+                *err = L"ApplyDeltaB: " + sys::ErrorText(e1) + L" (flags 4); " + sys::ErrorText(GetLastError()) + L" (flags 1)";
+                return false;
+            }
+        }
+        // Review F7: DeltaFree on every path out.
+        struct Freer { DeltaFreeFn f; void* p; ~Freer() { if (p) f(p); } } guard{free_, o.start};
+        if (o.size > kMaxManifestXml) { *err = L"expanded manifest is larger than 64 MB"; return false; }
+        try {
+            xml->assign(static_cast<const char*>(o.start), o.size);
+        } catch (const std::exception&) {
+            *err = L"out of memory for an expanded manifest";
+            return false;
+        }
         return true;
     }
     std::wstring BuildUbr() override {

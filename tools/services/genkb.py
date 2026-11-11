@@ -244,7 +244,8 @@ def check_entry(e, kb, errors, warnings=None):
         if e.get('stock_basis') == 'published':
             note = e.get('stock_note', '')
             keys = B.KEY_RE.findall(note)
-            if keys and all(kb.SOURCES.get(k, '').startswith('https://learn.microsoft.com/') for k in keys):
+            # The value's source is the note's first @KEY; later keys may cite tables that disagree with it (s1).
+            if keys and kb.SOURCES.get(keys[0], '').startswith('https://learn.microsoft.com/'):
                 stock_src = 'microsoft'
             else:
                 stock_src = 'table'

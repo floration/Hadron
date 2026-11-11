@@ -1,6 +1,6 @@
 Plan: Stripped (Services)
 Source: preset:stripped:services
-Rows: 28 ticked, 21 unticked, 7 kept or protected; already set: 3
+Rows: 28 ticked, 21 unticked, 7 kept, protected or not applied; already set: 3
 Note: 1 row(s) need TrustedInstaller (Windows refuses the write to administrators): left out while the TrustedInstaller toggle is off.
 Note: 2 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
 Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.

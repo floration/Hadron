@@ -1,5 +1,5 @@
 Plan: Default: Windows stock (Drivers)
 Source: default-stock:drivers
-Rows: 0 ticked, 0 unticked, 0 kept or protected; already set: 0
-Note: Stock values come first from this PC's own WinSxS component manifests (build 19045.5737, Professional), cross-checked with Hadron's KB. Where they disagree, both are shown and nothing is applied.
+Rows: 0 ticked, 0 unticked, 0 kept, protected or not applied; already set: 0
+Note: Stock values come first from the test fixture's hand-written manifests (not a real PC; build 19045.5737, Professional), cross-checked with Hadron's KB. Where they disagree, both are shown and nothing is applied.
 Note: Hadron has no Windows stock value for any item on this tab: nothing will be changed.

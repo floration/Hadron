@@ -231,9 +231,10 @@ SxsStock LoadSxs(Backend* b, Store st, bool mayWrite, const std::function<bool()
         else { *note = L"The manifest cache " + name + L" was not usable (" + e + L") and could not be renamed aside: " + e2; useStore = false; }
     }
     SxsStock s = ScanSxs(*r, cancelled);
-    if (s.ok && useStore) {
+    if (s.ok && useStore && s.Cacheable()) {   // review F3/F4: an incomplete scan is never cached
         std::wstring e;
-        if (!st.WriteAtomicNew(name, WriteSxsCache(s), &e)) *note = L"Could not save the manifest cache: " + e;
+        // Review F11: another Hadron instance may have written it meanwhile: that is its cache, not an error.
+        if (!st.WriteAtomicNew(name, WriteSxsCache(s), &e) && !st.Exists(name)) *note = L"Could not save the manifest cache: " + e;
     }
     return s;
 }
@@ -249,6 +250,7 @@ struct PlanJob {
     std::wstring build, machine;
     bool tiOn = false;
     std::shared_ptr<const SxsStock> sxs;   // immutable once read: shared, never copied
+    bool sxsPending = false;
     Plan out;
 };
 
@@ -516,6 +518,9 @@ private:
     std::shared_ptr<SxsJob> sxsJob_;            // the running manifest pass
     std::shared_ptr<const SxsStock> sxs_;       // this PC's manifest values (null until read)
     bool sxsPending_ = false;
+    std::vector<std::wstring> sxsNotes_;        // the manifest pass's notices, kept across Refresh (review F11)
+    bool sxsReplan_ = false;                    // OnSxs rebuilt the stock plan: compare its ticks (review F2)
+    std::set<std::wstring> sxsReplanTicks_;
     std::shared_ptr<CompanyJob> companyJob_;   // the current Company pass (null: none since the last load)
     bool companyPending_ = false;              // the Company pass is still reading: the detail says so
     PlanJob planJob_;
@@ -813,6 +818,7 @@ void ServicesModule::OnLoaded() {
     loadW_.Join();
     LoadOut& o = loadOut_;
     notices_.clear();
+    for (auto& n : sxsNotes_) notices_.push_back(n);
     if (!o.ok) {
         loadErr_ = o.err;
         loaded_ = true;
@@ -908,16 +914,23 @@ void ServicesModule::OnSxs() {
     sxsW_.Join();
     sxsJob_.reset();
     sxsPending_ = false;
-    if (!job->note.empty()) notices_.push_back(job->note);
-    if (!job->out.ok) notices_.push_back(L"This PC's component manifests could not be read, so Windows-stock values come from Hadron's KB only: " + job->out.err);
-    else
+    sxsNotes_.clear();
+    if (!job->note.empty()) sxsNotes_.push_back(job->note);
+    if (!job->out.ok) sxsNotes_.push_back(L"This PC's component manifests could not be read, so Windows-stock values come from Hadron's KB only: " + job->out.err);
+    for (auto& n : sxsNotes_) notices_.push_back(n);
+    if (job->out.ok)
         Status(L"Services: read Windows-stock start types for " + std::to_wstring(job->out.Usable()) + L" items from " +
                (job->out.fromCache ? L"the cache of " : L"") + std::to_wstring(job->out.manifests) +
                L" component manifests (build " + job->out.build + L").");
     sxs_ = std::make_shared<const SxsStock>(std::move(job->out));
     PrepareCtx();
     Refilter();
-    if (mode_ == Mode::Plan && planReq_.type == PlanReq::Stock && !applyW_.Running()) OpenPlan(planReq_, true);
+    if (mode_ == Mode::Plan && planReq_.type == PlanReq::Stock && !applyW_.Running()) {
+        sxsReplanTicks_.clear();
+        for (auto& r : plan_.rows) if (r.include) sxsReplanTicks_.insert(Lower(r.name));
+        sxsReplan_ = true;   // OnPlanned says so when the ticked rows changed
+        OpenPlan(planReq_, true);
+    }
     Invalidate();
 }
 
@@ -971,6 +984,7 @@ void ServicesModule::PrepareCtx() {
     ctx_.machine = machine_;
     ctx_.tiOn = tiOn_;
     ctx_.sxs = sxs_.get();
+    ctx_.sxsPending = sxsPending_;
     ctx_.Prepare();
 }
 
@@ -1258,6 +1272,7 @@ bool ServicesModule::CanApply(std::wstring* why) const {
     if (!store_.Valid()) { *why = L"There is no data folder for the undo log."; return false; }
     if (storeRefused_) { *why = L"The data folder can't be used (see the banner)."; return false; }
     if (planBusy_) { *why = L"Reading the live state for this plan."; return false; }
+    if (planReq_.type == PlanReq::Stock && sxsPending_) { *why = L"Still reading this PC's component manifests."; return false; }
     if (applyW_.Running() || loadW_.Running()) { *why = L"Busy."; return false; }
     return true;
 }
@@ -1276,6 +1291,7 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
     c.machine = j.machine;
     c.tiOn = j.tiOn;
     c.sxs = j.sxs.get();
+    c.sxsPending = j.sxsPending;
     c.Prepare();
     const PlanReq& r = j.req;
     Plan p;
@@ -1333,6 +1349,7 @@ void ServicesModule::OpenPlan(const PlanReq& r, bool rebuild) {
     j.machine = machine_;
     j.tiOn = tiOn_;
     j.sxs = sxs_;
+    j.sxsPending = sxsPending_;
     const Kb* kb = kbOk_ ? &kb_ : nullptr;
     if (fake_ || !backend_) {   // the fake answers at once: build here
         plan_ = BuildFrom(j, fake_.get(), kb);
@@ -1366,6 +1383,14 @@ void ServicesModule::OnPlanned() {
     }
     if (mode_ != Mode::Plan) return;   // closed while it was being built
     ApplyUserTicks();
+    if (sxsReplan_) {   // review F2: the manifests arrived while the stock plan was open
+        sxsReplan_ = false;
+        std::set<std::wstring> now;
+        for (auto& r : plan_.rows) if (r.include) now.insert(Lower(r.name));
+        if (now != sxsReplanTicks_)
+            notices_.push_back(L"The Windows-stock plan changed now that this PC's component manifests are read: review its "
+                               L"rows before applying.");
+    }
     RefreshPlanList();
     // Start on the item selected in the list when the plan has it, so the row detail answers "what about this one?".
     int k0 = 0;
@@ -2208,7 +2233,7 @@ std::vector<Para> ServicesModule::PlanRowDoc(const PlanRow& r) const {
     }
     if (!r.blocked.empty()) d.push_back({P_TEXT, L"", r.blocked, p.text});   // kept or protected: left alone, not an error
     kv(L"Why", r.reason);
-    if (!r.basis.empty()) kv(L"Basis", BasisLabel(r.basis) + (r.basisNote.empty() ? L"" : L": " + r.basisNote), p.mute);
+    if (!r.basis.empty()) kv(L"Basis", BasisLabel(r.basis, r.basisCond) + (r.basisNote.empty() ? L"" : L": " + r.basisNote), p.mute);
     kv(L"Contested", r.contested, p.warnT);
     kv(L"Evidence", r.evidence);
     kv(L"Warning", r.warning, p.warnT);
@@ -2771,7 +2796,7 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     if (ctl) sum = std::to_wstring(n) + L" operation(s), in this order. Nothing happens until you press Run.";
     else
         sum = std::to_wstring(plan_.Included()) + L" ticked, " + std::to_wstring(plan_.Optional()) + L" unticked, " +
-              std::to_wstring(plan_.Blocked()) + L" kept or protected; " + std::to_wstring(plan_.alreadySet) +
+              std::to_wstring(plan_.Blocked()) + L" kept, protected or not applied; " + std::to_wstring(plan_.alreadySet) +
               L" already set. Nothing changes until you press Apply. Click [x] or press Space to tick or untick.";
     if (empty) sum = plan_.alreadySet ? std::to_wstring(plan_.alreadySet) + L" already set." : L"";
     for (auto& ln : WrapLines(dc, f.caption, sum, rc.right - 2 * pad, &lh)) {
@@ -3740,7 +3765,7 @@ void ServicesModule::PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom)
     if (ctl) sum = std::to_wstring(n) + L" operation(s), in this order. Nothing happens until you click Run.";
     else
         sum = std::to_wstring(plan_.Included()) + L" ticked, " + std::to_wstring(plan_.Optional()) + L" unticked, " +
-              std::to_wstring(plan_.Blocked()) + L" kept or protected; " + std::to_wstring(plan_.alreadySet) +
+              std::to_wstring(plan_.Blocked()) + L" kept, protected or not applied; " + std::to_wstring(plan_.alreadySet) +
               L" already set. Nothing changes until you click Apply. Space or a click on [x] ticks.";
     if (!can) sum += L"  (Apply is off. " + why + L")";
     if (empty) sum = plan_.alreadySet ? std::to_wstring(plan_.alreadySet) + L" already set." : L"";
@@ -4383,7 +4408,8 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
             if (IEq(s.name, L"PcaSvc"))
                 for (auto& para : m->ItemDoc(s))
                     if (para.label == L"Windows stock" &&
-                        para.text == L"Manual (this PC's component manifests, build 19045.5737; two agreeing third-party tables agree)")
+                        para.text == L"Manual (the test fixture's hand-written manifests, not a real PC, build 19045.5737; two agreeing "
+                                     L"third-party tables agree)")
                         pcaWords = true;
             if (IEq(s.name, L"WSearch"))
                 for (auto& para : m->ItemDoc(s))
@@ -4395,6 +4421,29 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
               L"tab; Services: no data for this item yet, or the value with its basis)");
         check(smWords && pcaWords, L"ui fix/svcdrv-stock: the detail names the stock source (manifests, tables) and says why a "
                                    L"value is not applied");
+        {   // review F2: the stock plan waits for the manifest pass, and its rebuild says so when the ticks change.
+            std::shared_ptr<const SxsStock> saved = m->sxs_;
+            m->sxs_.reset();
+            m->sxsPending_ = true;
+            m->PrepareCtx();
+            PlanReq r;
+            r.type = PlanReq::Stock;
+            r.tab = TAB_SERVICES;
+            m->OpenPlan(r);
+            bool waits = m->plan_.rows.empty() && m->plan_.emptyText == L"still reading this PC's component manifests";
+            auto job = std::make_shared<SxsJob>();
+            if (saved) job->out = *saved;
+            job->done.store(true);
+            m->sxsJob_ = job;
+            size_t n0 = m->notices_.size();
+            m->OnSxs();
+            bool noticed = false;
+            for (size_t i = n0; i < m->notices_.size(); i++)
+                if (m->notices_[i].find(L"The Windows-stock plan changed") == 0) noticed = true;
+            check(saved && waits && noticed && !m->plan_.rows.empty() && !m->sxsPending_,
+                  L"ui review F2: the stock plan waits for the manifests, and its rebuild shows a notice when the ticks change");
+            m->ClosePlan();
+        }
         // 14: "+t" when the Start type column can't hold "+trigger".
         SvcItem t;
         t.name = L"HxTrig";
