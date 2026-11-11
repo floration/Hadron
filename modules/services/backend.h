@@ -50,6 +50,8 @@ public:
 };
 
 std::unique_ptr<Backend> MakeLiveBackend();
+// The fake backend's process creation time for a pid (fixtures write the same value into T started records).
+inline uint64_t FakeProcStart(DWORD pid) { return pid ? 0x01DC000000000000ull + pid : 0; }
 // VERSIONINFO CompanyName of the item's image (ServiceDll for svchost services): the file's own claim. Only for a
 // local drive path whose attributes have no RECALL_ON_DATA_ACCESS / RECALL_ON_OPEN / OFFLINE bit (hard rule 1); a UNC
 // path, a network drive or a cloud placeholder gives "" without the file being opened.
@@ -65,6 +67,7 @@ struct FakeFaults {
     std::set<std::wstring> verifyMismatch;// SetStart "succeeds" but Windows keeps the old value
     std::set<std::wstring> startRace;     // a start request finds it already running (someone else started it first)
     std::set<std::wstring> stopFail;      // a stop request fails (the service keeps running)
+    std::set<std::wstring> startNoWait;   // our start request is accepted, but the wait for RUNNING fails (START_PENDING)
     std::map<std::wstring, int> stopPendingQueries;   // a STOP_PENDING item reads STOPPED after this many more Queries
     int setStartCalls = 0;
 };
@@ -77,7 +80,14 @@ public:
     void SetHw(const HwInfo& hw) { hw_ = hw; }
     void SetBuild(const std::wstring& b) { build_ = b; }
     const std::vector<SvcItem>& Items() const { return items_; }
-    void SetState(const std::wstring& name, DWORD state) { if (SvcItem* i = Find(name)) i->state = state; }   // "someone else" did it
+    // "Someone else" did it: a service that goes from stopped to running is a new process (new pid and creation time).
+    void SetState(const std::wstring& name, DWORD state) {
+        SvcItem* i = Find(name);
+        if (!i) return;
+        if (state == SERVICE_STOPPED) { i->pid = 0; i->pstart = 0; }
+        else if (i->state == SERVICE_STOPPED && state != SERVICE_STOP_PENDING) { i->pid = nextPid_++; i->pstart = FakeProcStart(i->pid); }
+        i->state = state;
+    }
     FakeFaults faults;
     std::vector<std::wstring> controlLog;   // "stop X", "start X"
 
@@ -98,6 +108,7 @@ private:
     std::vector<SvcItem> items_;
     HwInfo hw_;
     std::wstring build_ = L"19045", machine_ = L"fixture-machine";
+    DWORD nextPid_ = 9000;   // a service this backend starts gets a new process
 };
 
 }  // namespace hx::services

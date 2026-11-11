@@ -157,6 +157,12 @@ bool ReadOne(SC_HANDLE scm, const std::wstring& name, const SERVICE_STATUS_PROCE
     i.state = ssp.dwCurrentState ? ssp.dwCurrentState : SERVICE_STOPPED;
     i.controls = ssp.dwControlsAccepted;
     i.pid = ssp.dwProcessId;
+    if (i.pid) {   // the process's creation time: with the pid it names one process instance (TrustedInstaller claim, R4)
+        HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, i.pid);
+        FILETIME c{}, x{}, k{}, u{};
+        if (ph && GetProcessTimes(ph, &c, &x, &k, &u)) i.pstart = ((uint64_t)c.dwHighDateTime << 32) | c.dwLowDateTime;
+        if (ph) CloseHandle(ph);   // a process Hadron may not open (protected) keeps 0: never claimed
+    }
     i.kind = KindOf(i.type);
     *out = std::move(i);
     return true;

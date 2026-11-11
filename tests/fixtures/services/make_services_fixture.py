@@ -222,6 +222,14 @@ def row(name, display, typ, cfg, trigger, state, errctl, account, image, group, 
     return '\t'.join(f)
 
 
+PIDS = {}   # service name -> pid in the fixture pictures (the same in every picture: the order is fixed)
+
+
+def fake_pstart(pid):
+    """The fake backend's process creation time for a pid (backend.h FakeProcStart)."""
+    return 0x01DC000000000000 + pid
+
+
 def build_items(overrides=None):
     """Returns the snapshot lines (without header/meta) in item order."""
     overrides = overrides or {}
@@ -246,6 +254,8 @@ def build_items(overrides=None):
                 'bthserv', 'BTAGService', 'BthAvctpSvc', 'BluetoothUserService') else 'start on custom system state change'
             if name in ('bthserv', 'BTAGService', 'BthAvctpSvc', 'BluetoothUserService'):
                 ifaces = '{0850302a-b344-4fda-9be9-90576b8d46f0}'
+        if running:
+            PIDS[name] = pid
         out.append(row(name, display, typ, cfg, trig, state, 1, acct, image, '', deps, desc, start, PROTECT.get(name, 0),
                        controls, pid if running else 0, failure, triggers, ifaces, COMPANY.get(name, 'Microsoft Corporation')))
         if name in SYNTHETIC_ACL_TI:
@@ -336,7 +346,11 @@ def interrupted_log():
     out += record(['B', stamp, 'preset:bloat:services', str(len(rows)), META['machine'], '19045'])
     for k, (n, b, a) in enumerate(rows, 1):
         out += record(['P', str(k), n, 'start', b, a, 'admin'])
-    out += record(['T', 'started'])
+    # R4: Hadron claims TrustedInstaller only while it is the process it started (pid and creation time).
+    build_items()
+    tipid = PIDS['TrustedInstaller']
+    out += record(['T', 'starting'])
+    out += record(['T', 'started', str(tipid), '%016X' % fake_pstart(tipid)])
     out += record(['I', '1', '2/1', 'admin'])
     out += record(['D', '1', 'ok', '4/1', 'admin'])
     out += record(['I', '2', '3/-', 'admin'])

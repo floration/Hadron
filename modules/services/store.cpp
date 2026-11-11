@@ -162,8 +162,19 @@ bool ParseUndoLog(const std::string& utf8, UndoLog* out, std::wstring* err) {
                 if (f.size() >= 5) r->text = Unesc(f[4]);
             }
         } else if (k == L"T" && f.size() >= 2) {
-            if (f[1] == L"started") out->tiStarted = true;
+            if (f[1] == L"starting") out->tiStarting = true;
+            if (f[1] == L"started") {
+                out->tiStarted = true;
+                if (f.size() >= 4) {
+                    out->tiPid = (DWORD)wcstoul(f[2].c_str(), nullptr, 10);
+                    out->tiPstart = wcstoull(f[3].c_str(), nullptr, 16);
+                }
+            }
+            if (f[1] == L"notstarted") out->tiNotStarted = true;
             if (f[1] == L"stopped") out->tiStopped = true;
+            if (f[1] == L"stopfailed") { out->tiStopFailed = true; if (f.size() >= 3) out->tiStopNote = Unesc(f[2]); }
+        } else if (k == L"N" && f.size() >= 2) {
+            out->note = Unesc(f[1]);
         } else if (k == L"E") {
             out->hasE = true;
         }

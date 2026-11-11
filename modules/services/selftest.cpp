@@ -209,7 +209,7 @@ bool MakeJunction(const std::wstring& link, const std::wstring& target) {
 struct ServiceOnlyTi : TiProvider {
     TiService svc;
     explicit ServiceOnlyTi(Backend* b) : svc(b) {}
-    bool Acquire(std::wstring* err) override { SvcItem t; return svc.Ensure(&t, err); }
+    bool Acquire(const std::atomic<bool>* cancel, std::wstring* err) override { svc.cancel = cancel; SvcItem t; return svc.Ensure(&t, err); }
     bool StartedService() const override { return svc.Started(); }
     bool Impersonate(std::wstring* identity, std::wstring*) override { *identity = L"ti"; return true; }
     void Revert() override {}
@@ -350,7 +350,7 @@ struct FakeTi : TiProvider {
     Store* probe = nullptr;
     bool acquired = false, started = false, released = false, flagSeen = false, writeRefused = false;
     int impersonations = 0;
-    bool Acquire(std::wstring*) override { acquired = true; started = true; return true; }
+    bool Acquire(const std::atomic<bool>*, std::wstring*) override { acquired = true; started = true; return true; }
     bool StartedService() const override { return started; }
     bool Impersonate(std::wstring* identity, std::wstring*) override {
         impersonations++;
@@ -1311,8 +1311,11 @@ int RunSelftest(const std::vector<std::wstring>& args) {
     {
         std::vector<std::wstring> problems;
         auto logs = LoadLogs(Store(fixture + L"\\interrupted"), &problems);
-        check(logs.size() == 1 && FindInterrupted(logs) == 0 && TiLeftRunning(logs),
-              L"interrupted fixture: offers Undo/Resume and notices TrustedInstaller left running");
+        World iw;
+        std::wstring ie;
+        MakeWorld(fixture + L"\\interrupted", &kb, &iw, &ie);
+        check(logs.size() == 1 && FindInterrupted(logs) == 0 && TiLeftRunning(logs, iw.items),
+              L"interrupted fixture: offers Undo/Resume and notices TrustedInstaller left running (the same process)");
     }
 
     // ---- A4: undo and resume guards, foreign logs -------------------------------------------------------------
@@ -1705,7 +1708,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         ApplyEnv e3 = EnvFor(&b.fx.backend, &s2);
         e3.ti = &fti;
         e3.tiOn = true;
-        e3.failFlushAfter = 2 + (int)ApplyOrder(p3).size();   // header, B, every P: then the T record fails
+        e3.failFlushAfter = 3 + (int)ApplyOrder(p3).size();   // header, B, every P, T starting: then T started fails
         ApplyResult r3;
         bool ok3 = RunApply(p3, e3, &r3);
         check(!ok3 && r3.aborted && fti.acquired && fti.released && b.fx.backend.faults.setStartCalls == 0,
@@ -1737,7 +1740,11 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         check(FindInterrupted(v) < 0, L"an undo stamped earlier than its apply (clock change) still resolves it (logic M4)");
         std::vector<UndoLog> t2 = {mkLog(L"20261111-100000", L"preset:stripped:services", true, 1), mkLog(L"20261111-110000", L"preset:bloat:services", true, 2)};
         t2[0].tiStarted = true;
-        check(TiLeftRunning(t2), L"TiLeftRunning checks every log: a later apply doesn't hide a TrustedInstaller left running (win32 M15)");
+        t2[0].tiPid = 4242;
+        t2[0].tiPstart = FakeProcStart(4242);
+        SvcItem tiRun;
+        tiRun.name = L"TrustedInstaller"; tiRun.state = SERVICE_RUNNING; tiRun.pid = 4242; tiRun.pstart = FakeProcStart(4242);
+        check(TiLeftRunning(t2, {tiRun}), L"TiLeftRunning checks every log: a later apply doesn't hide a TrustedInstaller left running (win32 M15)");
         // The multi fixture: an interrupted apply A, then an interrupted undo of A.
         std::vector<std::wstring> probs;
         auto ml = LoadLogs(Store(fixture + L"\\multi"), &probs);
@@ -1757,6 +1764,235 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         done2.push_back(mkLog(L"20261110-230000", (L"undo:" + (ml.empty() ? std::wstring() : ml[0].stamp)).c_str(), true, 3));
         check(FindInterrupted(done) < 0 && FindInterrupted(done2) < 0,
               L"interrupted undo: a finished resume of the undo, or a finished undo of the apply, resolves both logs");
+    }
+
+    // ---- R4: TrustedInstaller claims by process (pid + creation time), resolutions; R14; R22 ------------------------
+    {
+        World a;
+        freshWorld(&a);
+        a.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        Store s(NewTempDir(L"ti-claim"));
+        s.fixedStamp = L"20261111-130000";
+        ServiceOnlyTi ti(&a.fx.backend);
+        Plan p = BuildPreset(LV_STRIPPED, TAB_SERVICES, a.items, a.ctx);
+        MarkTi(&p, a.fx.backend, true, a.items);
+        Tick(&p, L"dmwappushservice");
+        ApplyEnv env = EnvFor(&a.fx.backend, &s);
+        env.ti = &ti;
+        env.tiOn = true;
+        a.fx.backend.faults.stopFail.insert(L"trustedinstaller");   // the release fails: TI is left running
+        ApplyResult r1;
+        RunApply(p, env, &r1);
+        a.fx.backend.faults.stopFail.clear();
+        auto logs = LoadLogs(s, nullptr);
+        auto items = Folded(a.fx.backend);
+        const SvcItem* tiNow = ItemOf(items, L"TrustedInstaller");
+        bool rec = logs.size() == 1 && tiNow && tiNow->state == SERVICE_RUNNING && logs[0].tiStarting && logs[0].tiStarted &&
+                   logs[0].tiPid == tiNow->pid && logs[0].tiPid != 0 && logs[0].tiPstart == tiNow->pstart && logs[0].tiStopFailed &&
+                   !logs[0].tiStopped && !logs[0].tiStopNote.empty();
+        check(rec, L"R4: the log records T starting, the started process (pid and creation time) and the failed release (T stopfailed)");
+        std::wstring bt = TiLeftText(logs, items);
+        check(rec && TiLeftRunning(logs, items) && bt.find(L"process " + std::to_wstring(tiNow->pid)) != std::wstring::npos &&
+                  bt.find(L"20261111-130000 UTC") != std::wstring::npos && bt.find(L"Stripped") != std::wstring::npos &&
+                  bt.find(L"could not stop") != std::wstring::npos && bt.find(L"preset:") == std::wstring::npos,
+              L"R4: the banner claims TrustedInstaller while it is that process; its text (stamp, preset, start type, stop failure) comes from data");
+        // The banner's Stop it, while it is still that process: stopped, and the claim is closed by a ti-resolved log.
+        Plan sp = BuildControl(*tiNow, 1, a.fx.backend, items, a.ctx);
+        MarkTiStop(&sp, logs, items);
+        const PlanRow* sr = RowOf(sp, L"TrustedInstaller");
+        check(sp.source == L"ti-stop:20261111-130000" && sp.tiPid == tiNow->pid && sr && sr->blocked.empty() &&
+                  sr->reason.find(L"(" + std::to_wstring(tiNow->pid) + L")") != std::wstring::npos,
+              L"R4: Stop it plans the claimed process, with the reason from the log");
+        // Windows restarts TrustedInstaller between the plan and the click: a different process, never stopped by Hadron.
+        a.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        a.fx.backend.SetState(L"TrustedInstaller", SERVICE_RUNNING);
+        auto items2 = Folded(a.fx.backend);
+        size_t stopsBefore = 0;
+        for (auto& c : a.fx.backend.controlLog) if (c == L"stop TrustedInstaller") stopsBefore++;
+        check(!TiLeftRunning(logs, items2), L"R4: a different TrustedInstaller process (same service, new pid/creation time) is never claimed");
+        ApplyResult rc;
+        RunControl(sp, env, &rc);
+        size_t stopsAfter = 0;
+        for (auto& c : a.fx.backend.controlLog) if (c == L"stop TrustedInstaller") stopsAfter++;
+        auto logs2 = LoadLogs(s, nullptr);
+        bool resolved = false;
+        for (auto& l : logs2) if (l.source == L"ti-resolved:20261111-130000" && l.hasE && l.rows.empty() && !l.note.empty()) resolved = true;
+        check(stopsAfter == stopsBefore && rc.skipped == 1 && resolved && !TiLeftRunning(logs2, items) &&
+                  FindInterrupted(logs2) < 0,
+              L"R4: Stop it re-checks the process at run time; a new process is left to Windows and the claim is recorded as resolved");
+        // Same process at click time: stopped, and resolved.
+        World b;
+        freshWorld(&b);
+        b.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        Store s2(NewTempDir(L"ti-stopit"));
+        s2.fixedStamp = L"20261111-131000";
+        ServiceOnlyTi ti2(&b.fx.backend);
+        Plan p2 = BuildPreset(LV_STRIPPED, TAB_SERVICES, b.items, b.ctx);
+        MarkTi(&p2, b.fx.backend, true, b.items);
+        Tick(&p2, L"dmwappushservice");
+        ApplyEnv env2 = EnvFor(&b.fx.backend, &s2);
+        env2.ti = &ti2;
+        env2.tiOn = true;
+        b.fx.backend.faults.stopFail.insert(L"trustedinstaller");
+        ApplyResult r2;
+        RunApply(p2, env2, &r2);
+        b.fx.backend.faults.stopFail.clear();
+        auto bl = LoadLogs(s2, nullptr);
+        auto bi = Folded(b.fx.backend);
+        Plan sp2 = BuildControl(*ItemOf(bi, L"TrustedInstaller"), 1, b.fx.backend, bi, b.ctx);
+        MarkTiStop(&sp2, bl, bi);
+        ApplyResult rc2;
+        bool okc = RunControl(sp2, env2, &rc2);
+        auto bl2 = LoadLogs(s2, nullptr);
+        auto bi2 = Folded(b.fx.backend);
+        bool res2 = false;
+        for (auto& l : bl2) if (l.source == L"ti-resolved:20261111-131000") res2 = true;
+        check(okc && rc2.ok == 1 && ItemOf(bi2, L"TrustedInstaller")->state == SERVICE_STOPPED && res2,
+              L"R4: Stop it on the process Hadron started stops it and records the resolution");
+        // No live claim: every row of the Stop it plan is blocked.
+        Plan sp3 = BuildControl(*ItemOf(items2, L"TrustedInstaller"), 1, a.fx.backend, items2, a.ctx);
+        MarkTiStop(&sp3, logs, items2);
+        check(sp3.Included() == 0 && RowOf(sp3, L"TrustedInstaller") && !RowOf(sp3, L"TrustedInstaller")->blocked.empty(),
+              L"R4: with no live claim, Stop it plans nothing");
+        // Load time: a claim whose process is gone is closed once, and not while an apply holds the lock.
+        Store s3(NewTempDir(L"ti-stale"));
+        std::string t = "HXSVC\t1\tundo\n" + Record({L"B", L"20261111-132000", L"preset:bloat:services", L"0", a.ctx.machine, a.ctx.build, L"1"}) +
+                        Record({L"T", L"starting"}) + Record({L"T", L"started", L"4242", L"01DC000000001092"}) +
+                        Record({L"E", L"20261111-132000", L"0", L"0", L"0", L"done"});
+        std::wstring e;
+        s3.WriteNew(L"undo-20261111-132000.log", t, &e);
+        auto sl = LoadLogs(s3, nullptr);
+        ApplyLock busy;
+        busy.Acquire(LockName(), &e);
+        int nBusy = ResolveStaleTiClaims(s3, sl, items2, a.ctx.machine, a.ctx.build, LockName());
+        busy.Release();
+        int n1 = ResolveStaleTiClaims(s3, sl, items2, a.ctx.machine, a.ctx.build, LockName());
+        auto sl2 = LoadLogs(s3, nullptr);
+        int n2 = ResolveStaleTiClaims(s3, sl2, items2, a.ctx.machine, a.ctx.build, LockName());
+        check(nBusy == 0 && n1 == 1 && n2 == 0 && sl2.size() == 2 && sl2[1].source == L"ti-resolved:20261111-132000" &&
+                  sl2[1].note.find(L"different TrustedInstaller process") != std::wstring::npos && FindUndoable(sl2) < 0,
+              L"R4: load closes a claim whose process is gone with one ti-resolved log (not while the apply lock is busy)");
+        // An older log's T started without pid and creation time is never claimed, even with TrustedInstaller running.
+        UndoLog old;
+        old.hasB = true; old.hasE = true; old.stamp = L"20261101-000000"; old.source = L"single"; old.tiStarted = true;
+        check(!TiLeftRunning({old}, items2), L"R4: a T started record without the process identity is never shown as Hadron's");
+        // R14: our start request was accepted but the wait for RUNNING failed: still claimed, so the release stops it.
+        World c;
+        freshWorld(&c);
+        c.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        c.fx.backend.faults.startNoWait.insert(L"trustedinstaller");
+        TiService nw(&c.fx.backend);
+        SvcItem tt;
+        bool en = nw.Ensure(&tt, &e);
+        bool claimed = nw.Started();
+        std::wstring note;
+        bool stopped = nw.StopIfStarted(&note);
+        check(!en && claimed && stopped && c.fx.backend.controlLog.back() == L"stop TrustedInstaller",
+              L"R14: a TrustedInstaller start Hadron requested whose wait fails is still claimed and stopped by the release");
+        // R22: Cancel cuts the STOP_PENDING wait short instead of waiting it out.
+        World d;
+        freshWorld(&d);
+        d.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOP_PENDING);
+        d.fx.backend.faults.stopPendingQueries[L"trustedinstaller"] = 1000000;
+        std::atomic<bool> cancel{true};
+        TiService cw(&d.fx.backend);
+        cw.cancel = &cancel;
+        cw.waitMs = 60000;
+        cw.pollMs = 50;
+        ULONGLONG t0 = GetTickCount64();
+        std::wstring ce;
+        bool cen = cw.Ensure(&tt, &ce);
+        ULONGLONG dt = GetTickCount64() - t0;
+        check(!cen && !cw.Started() && dt < 5000 && ce.find(L"cancelled") != std::wstring::npos,
+              L"R22: TrustedInstaller's waits honour Cancel (no 30 s wait on a stuck service)");
+        // R22: T starting is flushed before the start, so a crash in between still leaves a trace.
+        World f;
+        freshWorld(&f);
+        f.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        Store s4(NewTempDir(L"ti-starting"));
+        Plan p4 = BuildPreset(LV_STRIPPED, TAB_SERVICES, f.items, f.ctx);
+        MarkTi(&p4, f.fx.backend, true, f.items);
+        Tick(&p4, L"dmwappushservice");
+        FakeTi fti;
+        ApplyEnv e4 = EnvFor(&f.fx.backend, &s4);
+        e4.ti = &fti;
+        e4.tiOn = true;
+        e4.failFlushAfter = 3 + (int)ApplyOrder(p4).size();   // header, B, every P, T starting: then T started fails
+        ApplyResult r4;
+        RunApply(p4, e4, &r4);
+        auto l4 = LoadLogs(s4, nullptr);
+        UndoLog crashed;   // power lost between T starting and T started
+        crashed.hasB = true; crashed.stamp = L"20261111-133000"; crashed.source = L"preset:bloat:services"; crashed.tiStarting = true;
+        check(fti.acquired && fti.released && l4.size() == 1 && l4[0].tiStarting && !l4[0].hasE &&
+                  InterruptedText({crashed}, 0).find(L"while starting TrustedInstaller") != std::wstring::npos,
+              L"R22: T starting is in the log before TrustedInstaller is started; the banner names a crash there");
+    }
+
+    // ---- R7, R8: resume chains in Undo; R9: Dismiss ---------------------------------------------------------------
+    {
+        World a;
+        freshWorld(&a);
+        std::wstring e;
+        auto wlog = [&](Store& st, const std::wstring& stamp, const std::wstring& src, int order,
+                        std::vector<std::vector<std::wstring>> rows, bool end) {
+            std::string t = "HXSVC\t1\tundo\n" + Record({L"B", stamp, Esc(src), std::to_wstring(rows.size()), a.ctx.machine, a.ctx.build,
+                                                         std::to_wstring(order)});
+            int k = 1;
+            for (auto& r : rows) t += Record({L"P", std::to_wstring(k++), r[0], L"start", r[1], r[2], L"admin"});
+            k = 1;
+            for (auto& r : rows) {
+                t += Record({L"I", std::to_wstring(k), r[1], L"admin"});
+                t += Record({L"D", std::to_wstring(k), L"ok", r[2], L"admin"});
+                k++;
+            }
+            if (end) t += Record({L"E", stamp, std::to_wstring(rows.size()), L"0", L"0", L"done"});
+            st.WriteNew(L"undo-" + stamp + L".log", t, &e);
+        };
+        // R7: apply A was interrupted after MapsBroker and lfsvc; its resume R changed MapsBroker again and RetailDemo.
+        Store s(NewTempDir(L"resume-chain"));
+        wlog(s, L"20261111-150000", L"preset:bloat:services", 1, {{L"MapsBroker", L"2/1", L"3/-"}, {L"lfsvc", L"3/-", L"4/-"}}, false);
+        wlog(s, L"20261111-150500", L"resume:20261111-150000", 2, {{L"MapsBroker", L"3/-", L"4/-"}, {L"RetailDemo", L"3/-", L"4/-"}}, true);
+        a.fx.backend.SetStart(L"MapsBroker", WriteOp{4, 0}, Identity::Admin, &e);
+        a.fx.backend.SetStart(L"lfsvc", WriteOp{4, -1}, Identity::Admin, &e);
+        a.fx.backend.SetStart(L"RetailDemo", WriteOp{4, -1}, Identity::Admin, &e);
+        a.items = Folded(a.fx.backend);
+        auto logs = LoadLogs(s, nullptr);
+        int u = FindUndoable(logs);
+        Plan up = u >= 0 ? BuildUndo(logs[u], a.fx.backend, a.items, a.ctx) : Plan{};
+        const PlanRow* mb = RowOf(up, L"MapsBroker");
+        const PlanRow* lf = RowOf(up, L"lfsvc");
+        const PlanRow* rd = RowOf(up, L"RetailDemo");
+        bool note = false;
+        for (auto& n : up.notes) if (n.find(L"resumed 20261111-150000") != std::wstring::npos) note = true;
+        check(FindInterrupted(logs) < 0 && u == 1 && mb && mb->after.start == 2 && mb->after.delayed == 1 && lf && lf->after.start == 3 &&
+                  rd && rd->after.start == 3 && note,
+              L"R7: the undo of a resume also puts back what the interrupted apply had changed (MapsBroker to its value before A)");
+        // R8: apply X finished; its undo U was interrupted; a resume of U finished. Nothing is left to undo, and an
+        // Undo from the resume starts from X.
+        Store s2(NewTempDir(L"undo-resume"));
+        wlog(s2, L"20261111-160000", L"preset:bloat:services", 1, {{L"lfsvc", L"3/-", L"4/-"}}, true);
+        wlog(s2, L"20261111-160500", L"undo:20261111-160000", 2, {{L"lfsvc", L"4/-", L"3/-"}}, false);
+        wlog(s2, L"20261111-161000", L"resume:20261111-160500", 3, {}, true);
+        auto l2 = LoadLogs(s2, nullptr);
+        check(l2.size() == 3 && FindUndoable(l2) < 0 && UndoBase(l2, 2) == 0 && UndoBase(l2, 1) == 0 && FindInterrupted(l2) < 0,
+              L"R8: a resume of an undo is never offered for Undo, and Undo from it starts from the original apply");
+        // R9: Dismiss records a dismiss log; the banner goes, the log and its rows stay.
+        Store s3(NewTempDir(L"dismiss"));
+        wlog(s3, L"20261111-170000", L"preset:stripped:services", 1, {{L"lfsvc", L"3/-", L"4/-"}}, false);
+        auto l3 = LoadLogs(s3, nullptr);
+        std::wstring bt = l3.empty() ? L"" : InterruptedText(l3, 0);
+        ApplyLock busy;
+        busy.Acquire(LockName(), &e);
+        std::wstring be;
+        bool dBusy = !l3.empty() && DismissInterrupted(s3, l3[0], a.ctx.machine, a.ctx.build, LockName(), &be);
+        busy.Release();
+        bool dOk = !l3.empty() && DismissInterrupted(s3, l3[0], a.ctx.machine, a.ctx.build, LockName(), &e);
+        auto l4 = LoadLogs(s3, nullptr);
+        check(FindInterrupted(l3) == 0 && !dBusy && dOk && l4.size() == 2 && FindInterrupted(l4) < 0 &&
+                  l4[1].source == L"dismiss:20261111-170000" && l4[1].hasE && l4[1].rows.empty() && l4[0].rows.size() == 1 &&
+                  bt.find(L"Dismiss") != std::wstring::npos && bt.find(L"Stripped (Services)") != std::wstring::npos &&
+                  bt.find(L"preset:") == std::wstring::npos,
+              L"R9: Dismiss writes a dismiss log under the apply lock; the banner goes and the apply's log stays");
     }
 
     // ---- A5: the data folder is never followed through a link, and is owned by Administrators or SYSTEM -----------

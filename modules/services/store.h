@@ -30,12 +30,18 @@ bool ParseSnapshot(const std::string& utf8, Snapshot* out, std::wstring* err);
 // HXSVC 1 undo
 // B  stamp  source  count  machine  build  order   (begin; order: 1 + the highest order of the logs before it)
 // P  seq  name  start  before  after  identity     (every plan row, up front)
-// T  started|stopped                               (TrustedInstaller service started / stopped by Hadron)
+// T  starting                                      (flushed BEFORE Hadron may start the TrustedInstaller service)
+// T  started  pid  pstart                          (Hadron's own request started it: its pid and process creation time)
+// T  notstarted                                    (it was running already, or someone else started it: not Hadron's)
+// T  stopped | stopfailed  text                    (Hadron stopped it again / could not)
 // I  seq  observed  identity-verified              (flushed BEFORE the SCM call)
 // D  seq  ok|skip|fail  observed-after  text       (flushed after the call and a re-read)
+// N  text                                          (a resolution record: what happened, in words)
 // E  stamp  ok  skipped  failed                    (end)
 // Every record ends with a TAB and the CRC-32 (hex) of the text before it. A record with a bad or
 // missing CRC (a torn last write) is ignored and counted.
+// A resolution log has no rows: B with source "dismiss:<stamp>" (the user dismissed that interrupted apply) or
+// "ti-resolved:<stamp>" (that log's TrustedInstaller claim is closed), one N, then E. Logs are never appended to.
 struct UndoRow {
     int seq = 0;
     std::wstring name, identity;
@@ -45,10 +51,19 @@ struct UndoRow {
     std::wstring result, text, iIdentity;
 };
 struct UndoLog {
-    std::wstring file, stamp, source, machine, build;
+    std::wstring file, stamp, source, machine, build, note;
     int count = 0, badRecords = 0, order = 0;
-    bool hasB = false, hasE = false, tiStarted = false, tiStopped = false;
+    bool hasB = false, hasE = false;
+    // TrustedInstaller records (R4): starting (written before a possible start), started (with pid and process
+    // creation time when the record has them), notstarted, stopped, stopfailed (with Hadron's note).
+    bool tiStarting = false, tiStarted = false, tiNotStarted = false, tiStopped = false, tiStopFailed = false;
+    DWORD tiPid = 0;
+    uint64_t tiPstart = 0;
+    std::wstring tiStopNote;
     std::vector<UndoRow> rows;
+    // Filled by LoadLogs for a "resume:X" log: X (and what X resumed), oldest first, without their own chains. Undo
+    // of a resume puts back the rows its interrupted apply had already written too (Review R7).
+    std::vector<UndoLog> chain;
     UndoRow* Row(int seq);
 };
 bool ParseUndoLog(const std::string& utf8, UndoLog* out, std::wstring* err);

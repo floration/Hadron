@@ -71,6 +71,8 @@ struct Plan {
     std::vector<std::wstring> notes;
     bool restartNeeded = true;         // start-type changes act at the next restart
     int what = -1;                     // control plans: 0 start, 1 stop, 2 restart
+    DWORD tiPid = 0;                   // "ti-stop:" plans: the TrustedInstaller process Hadron started (R4)
+    uint64_t tiPstart = 0;
     int Included() const;
     int Optional() const;
     int Blocked() const;
@@ -114,7 +116,8 @@ std::vector<size_t> ApplyOrder(const Plan& p);
 class TiProvider {
 public:
     virtual ~TiProvider() = default;
-    virtual bool Acquire(std::wstring* err) = 0;        // once per apply: SeDebug, SYSTEM, TI token
+    // Once per apply: SeDebug, SYSTEM, TI token. cancel (may be null) is honoured by every wait, Release's included.
+    virtual bool Acquire(const std::atomic<bool>* cancel, std::wstring* err) = 0;
     virtual bool StartedService() const = 0;            // Acquire started the TrustedInstaller service
     virtual bool Impersonate(std::wstring* identity, std::wstring* err) = 0;   // verified TI identity text
     virtual void Revert() = 0;
@@ -150,11 +153,44 @@ bool RunControl(const Plan& p, const ApplyEnv& env, ApplyResult* r);
 // ---- logs, interrupted applies, drift ------------------------------------------------------------------
 std::vector<UndoLog> LoadLogs(const Store& s, std::vector<std::wstring>* problems);
 int FindInterrupted(const std::vector<UndoLog>& logs);   // newest B-without-E log not resolved by a finished undo/resume
-// The log an Undo of logs[k] should start from: for an interrupted "undo:X" log that is X itself (undoing the
-// undo would re-apply X), otherwise k.
+// The log an Undo of logs[k] should start from: for an interrupted "undo:X" log, or a resume of one, that is X itself
+// (undoing the undo would re-apply X), otherwise k.
 int UndoBase(const std::vector<UndoLog>& logs, int k);
-int FindUndoable(const std::vector<UndoLog>& logs);      // newest finished log with changes, not undone yet
-bool TiLeftRunning(const std::vector<UndoLog>& logs);    // a log says Hadron started TI and never stopped it
+// Newest finished log with changes, not undone yet. Never an undo's log or a resume of one (R8). A "resume:X" log is
+// offered with X's rows (UndoLog::chain, R7).
+int FindUndoable(const std::vector<UndoLog>& logs);
+// "Stripped (Services)", "the undo of 20261110-213012 UTC": a log source in words, never a raw preset id.
+std::wstring SourceLabel(const std::wstring& source);
+// The interrupted-apply banner's text for logs[k] (stamp in UTC, source in words, a crash while starting TI noted).
+std::wstring InterruptedText(const std::vector<UndoLog>& logs, int k);
+// The user's Dismiss of an interrupted apply (R9): a resolution log "dismiss:<stamp>" (B, N, E; no rows), under the
+// apply lock. FindInterrupted no longer returns that log. Nothing else changes; its log and recovery folder stay.
+bool DismissInterrupted(Store& st, const UndoLog& log, const std::wstring& machine, const std::wstring& build,
+                        const std::wstring& lockName, std::wstring* err);
+
+// TrustedInstaller left running (R4). A log claims "Hadron started TrustedInstaller" when it has T started (or a
+// T starting with no outcome after a crash) and no T stopped, and no "ti-resolved:<stamp>" log closes it. The claim is
+// shown and acted on only while the running TrustedInstaller is that same process (pid and creation time from the
+// T started record); a T started without them (older logs, or a start whose process couldn't be read) is never shown.
+struct TiClaim {
+    int log = -1;                 // index into logs; -1 = none
+    std::wstring stamp, source, stopNote;
+    bool finished = false;        // the apply has its E record
+    bool verified = false;        // pid and creation time are recorded
+    DWORD pid = 0;
+    uint64_t pstart = 0;
+};
+TiClaim LiveTiClaim(const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);
+bool TiLeftRunning(const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);
+std::wstring TiLeftText(const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);   // the banner, from data
+// The banner's "Stop it": a control plan (BuildControl, stop TrustedInstaller) gets source "ti-stop:<stamp>", the
+// claimed process and a reason from data; with no live claim every row is blocked. RunControl stops it only while it
+// is still that process, then writes "ti-resolved:<stamp>".
+void MarkTiStop(Plan* p, const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items);
+// Load time: closes every open claim whose process is gone (TrustedInstaller stopped, or another process running) with
+// a "ti-resolved:<stamp>" log. Returns how many it wrote; 0 when the apply lock is busy (the next load tries again).
+int ResolveStaleTiClaims(Store& st, const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items, const std::wstring& machine,
+                         const std::wstring& build, const std::wstring& lockName = L"Global\\Hadron.services.apply");
 // name (lower case) -> the value Hadron last wrote and verified, from finished logs in order.
 std::map<std::wstring, StartCfg> LastApplied(const std::vector<UndoLog>& logs);
 

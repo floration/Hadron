@@ -55,7 +55,7 @@ const wchar_t* const kAppTitle = L"Services and drivers";
 
 enum ClickId {
     ID_NONE = 0, ID_REFRESH, ID_UNDO_LAST, ID_TAB_SVC, ID_TAB_DRV, ID_TI, ID_SEARCH,
-    ID_APPLY, ID_CANCEL_PLAN, ID_CANCEL_APPLY, ID_INT_UNDO, ID_INT_RESUME, ID_RESULT_UNDO, ID_DISMISS, ID_TI_STOP,
+    ID_APPLY, ID_CANCEL_PLAN, ID_CANCEL_APPLY, ID_INT_UNDO, ID_INT_RESUME, ID_RESULT_UNDO, ID_DISMISS, ID_TI_STOP, ID_INT_DISMISS,
     ID_PRESET = 100,   // + 0 first snapshot, 1 Windows stock, 2 bloat, 3 stripped, 4 minimum
     ID_SET = 200,      // + start type 2..4, + 5 for Auto (delayed)
     ID_CTL = 300,      // + 0 start, 1 stop, 2 restart
@@ -353,6 +353,7 @@ private:
     std::vector<UndoLog> logs_;
     int interrupted_ = -1, undoable_ = -1;
     bool tiLeft_ = false;
+    std::wstring dismissStamp_;   // R9: the interrupted log the user dismissed; the next load records it
     std::map<std::wstring, StartCfg> lastApplied_;
     std::set<std::wstring> drift_;
     services::Ctx ctx_;
@@ -595,7 +596,9 @@ void ServicesModule::StartLoad() {
     LoadOut* out = &loadOut_;
     const Kb* kb = kbOk_ ? &kb_ : nullptr;
     sys::Worker* w = &loadW_;
-    bool started = loadW_.Start(hwnd_, WM_SVC_LOADED, [b, st, mayWrite, out, kb, w]() mutable {
+    std::wstring dismiss = std::move(dismissStamp_);
+    dismissStamp_.clear();
+    bool started = loadW_.Start(hwnd_, WM_SVC_LOADED, [b, st, mayWrite, out, kb, w, dismiss]() mutable {
         *out = LoadOut{};
         std::wstring err;
         auto cancelled = [&]() { if (w->Cancelled()) { out->err = L"Loading was cancelled."; return true; } return false; };
@@ -640,6 +643,19 @@ void ServicesModule::StartLoad() {
             }
             if (cancelled()) return;
             out->logs = LoadLogs(st, &out->logProblems);
+            if (mayWrite) {
+                bool reload = false;
+                for (auto& l : out->logs)   // R9: the user's Dismiss, recorded as a "dismiss:<stamp>" log
+                    if (!dismiss.empty() && l.stamp == dismiss) {
+                        std::wstring e;
+                        if (DismissInterrupted(st, l, out->machine, out->build, L"Global\\Hadron.services.apply", &e)) reload = true;
+                        else out->storeErr = L"Could not record the Dismiss: " + e;
+                        break;
+                    }
+                // R4: claims whose TrustedInstaller process is gone are closed with a "ti-resolved:<stamp>" log.
+                if (ResolveStaleTiClaims(st, out->logs, out->items, out->machine, out->build) > 0) reload = true;
+                if (reload) { out->logProblems.clear(); out->logs = LoadLogs(st, &out->logProblems); }
+            }
         }
         out->ok = true;
     });
@@ -692,18 +708,13 @@ void ServicesModule::TakeData(std::vector<SvcItem> items, const HwInfo& hw, std:
     loaded_ = true;
     interrupted_ = FindInterrupted(logs_);
     undoable_ = FindUndoable(logs_);
-    tiLeft_ = TiLeftRunning(logs_);
+    tiLeft_ = TiLeftRunning(logs_, items_);   // only while the running TrustedInstaller is the process Hadron started
     lastApplied_ = LastApplied(logs_);
     writeAccess_.clear();
     drift_.clear();
     for (auto& s : items_) {
         auto it = lastApplied_.find(Lower(s.name));
         if (it != lastApplied_.end() && !s.cfg.SameEffect(it->second)) drift_.insert(Lower(s.name));
-    }
-    if (tiLeft_) {   // only worth a banner while TrustedInstaller is actually running
-        bool running = false;
-        for (auto& s : items_) if (IEq(s.name, L"TrustedInstaller")) running = s.state == SERVICE_RUNNING;
-        tiLeft_ = running;
     }
     PrepareCtx();
     Refilter();
@@ -1025,11 +1036,7 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
         case PlanReq::None: break;
     }
     if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, j.tiOn, j.items);   // re-runs the dependency check
-    if (r.tiStop)   // BuildControl's generic "stop" says nothing about why this one is offered
-        for (auto& row : p.rows)
-            if (row.ctl == Op::Stop && IEq(row.name, L"TrustedInstaller") && row.blocked.empty())
-                row.reason = L"Hadron started it for an apply that did not finish, and nothing stopped it. It is a Manual "
-                             L"(on-demand) service: Windows starts it again when it next installs updates or features.";
+    if (r.tiStop) MarkTiStop(&p, j.logs, j.items);   // R4: the claimed process, and the reason from data
     return p;
 }
 
@@ -1241,6 +1248,12 @@ void ServicesModule::OnClickId(int id) {
         return;
     }
     if (id == ID_DISMISS) { haveResult_ = false; notices_.clear(); return; }
+    if (id == ID_INT_DISMISS) {   // R9: recorded in a log by the next load, never only hidden
+        if (fixture_ || interrupted_ < 0 || interrupted_ >= (int)logs_.size()) { Status(L"Services: Dismiss is off in fixture mode."); return; }
+        dismissStamp_ = logs_[interrupted_].stamp;
+        StartLoad();
+        return;
+    }
     if (id == ID_TI_STOP) {
         PlanReq r;
         r.type = PlanReq::Control;
@@ -1495,24 +1508,12 @@ std::vector<Banner> ServicesModule::Banners() const {
         v.push_back({t, 0, {{ID_CANCEL_APPLY, L"Cancel"}}});
     }
     if (interrupted_ >= 0 && interrupted_ < (int)logs_.size()) {
-        const UndoLog& lg = logs_[interrupted_];
-        int done = 0, begun = 0;
-        for (auto& r : lg.rows) { if (r.hasD) done++; if (r.hasI) begun++; }
-        bool undoOf = lg.source.rfind(L"undo:", 0) == 0;
-        std::wstring t = std::wstring(undoOf ? L"An undo did not finish (" : L"An apply did not finish (") + lg.stamp + L", " +
-                         Unesc(lg.source) + L"): " + std::to_wstring(done) + L" of " + std::to_wstring(lg.count) +
-                         L" changes were recorded as done" + (begun > done ? L" and 1 was in progress" : L"") +
-                         (undoOf ? L". Undo and Resume both finish undoing " + lg.source.substr(5) + L": Undo from that apply's log, "
-                                   L"Resume from this one."
-                                 : L". Undo puts back what it changed; Resume re-plans the rest against the live state.");
-        if (lg.badRecords) t += L" " + std::to_wstring(lg.badRecords) + L" record(s) in its log failed their check and were ignored.";
+        std::wstring t = InterruptedText(logs_, interrupted_);
         bool can = !fixture_ && elevated_ && !readOnly_ && store_.Valid();
-        if (can || fixture_) v.push_back({t, 1, {{ID_INT_UNDO, L"Undo"}, {ID_INT_RESUME, L"Resume"}}});
+        if (can || fixture_) v.push_back({t, 1, {{ID_INT_UNDO, L"Undo"}, {ID_INT_RESUME, L"Resume"}, {ID_INT_DISMISS, L"Dismiss"}}});
         else v.push_back({t, 1, {}});
     }
-    if (tiLeft_)
-        v.push_back({L"Hadron started TrustedInstaller during an apply that did not finish, and it is still running. "
-                     L"Windows stops it on its own when idle; you can also stop it now.", 1, {{ID_TI_STOP, L"Stop it"}}});
+    if (tiLeft_) v.push_back({TiLeftText(logs_, items_), 1, {{ID_TI_STOP, L"Stop it"}}});
     if (haveResult_ && !applyW_.Running()) {
         const ApplyResult& r = result_;
         std::wstring t;
@@ -1581,7 +1582,7 @@ int ServicesModule::PaintBanners(HDC dc, const RECT& rc, int y0) {
             int bw = TextW(dc, it->second, f.caption) + Sc(26);
             RECT ar{ax - bw, y + (h - bh) / 2, ax, y + (h - bh) / 2 + bh};
             bool hot = hoverId_ == it->first;
-            bool primary = it->first != ID_DISMISS;
+            bool primary = it->first != ID_DISMISS && it->first != ID_INT_DISMISS;
             COLORREF fill = primary ? (hot ? Mix(p.acc, RGB(255, 255, 255), 0.18) : p.acc) : (hot ? p.chipHot : p.chip);
             RoundFill(dc, ar, Sc(6), fill);
             ui::DrawText(dc, it->second, ar, f.caption, primary ? p.onAcc : p.text, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
@@ -2535,7 +2536,7 @@ int ServicesModule::PaintConsoleBanners(HDC dc, const RECT& rc, int y0) {
         for (auto it = b.actions.rbegin(); it != b.actions.rend(); ++it) {
             int bw = TextW(dc, it->second, f.caption) + Sc(14);
             ax -= bw;
-            ConButton(dc, ax, y + (h - Sc(18)) / 2, it->second, it->first, false, true, it->first != ID_DISMISS);
+            ConButton(dc, ax, y + (h - Sc(18)) / 2, it->second, it->first, false, true, it->first != ID_DISMISS && it->first != ID_INT_DISMISS);
             ax -= Sc(6);
         }
         y += h + Sc(3);
