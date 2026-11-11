@@ -40,6 +40,8 @@
 #include <objbase.h>
 #include <shobjidl.h>
 #include <commdlg.h>
+#include <aclapi.h>
+#include <sddl.h>
 #include <algorithm>
 #include <climits>
 #include <cstdio>
@@ -2555,14 +2557,53 @@ std::string ReadSmall(const std::wstring& path) {
 struct ExecRun {
     MockBackend* m;
     const Plan* p;
-    std::wstring root, stamp;
+    std::wstring root, stamp, lockName;
     ExecResult r;
     bool ok = false;
 };
 DWORD WINAPI ExecRunThread(LPVOID a) {
     ExecRun* x = static_cast<ExecRun*>(a);
-    x->ok = Execute(*x->m, *x->p, x->root, {}, {}, &x->r, ExecOptions{x->stamp});
+    ExecOptions o;
+    o.stamp = x->stamp;
+    o.lockName = x->lockName;
+    x->ok = Execute(*x->m, *x->p, x->root, {}, {}, &x->r, o);
     return 0;
+}
+// Takes the named mutex and ends without releasing it: the mutex is then abandoned (the caller keeps
+// its own handle open so the mutex outlives this thread).
+DWORD WINAPI AbandonLockThread(LPVOID a) {
+    HANDLE m = CreateMutexW(nullptr, FALSE, static_cast<const wchar_t*>(a));
+    DWORD r = m && WaitForSingleObject(m, 0) == WAIT_OBJECT_0 ? 1 : 0;
+    if (m) CloseHandle(m);   // closing doesn't release ownership
+    return r;
+}
+
+// The selftest's own admin-only descriptor (kBackupSddl), for fixtures it plants by hand.
+struct TestSd {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    SECURITY_ATTRIBUTES sa{};
+    explicit TestSd(const wchar_t* sddl = kBackupSddl) {
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr)) {
+            sa.nLength = sizeof(sa);
+            sa.lpSecurityDescriptor = sd;
+        } else {
+            sd = nullptr;
+        }
+    }
+    ~TestSd() { if (sd) LocalFree(sd); }
+    TestSd(const TestSd&) = delete;
+    TestSd& operator=(const TestSd&) = delete;
+};
+// Replaces a selftest fixture file's DACL (and optionally owner) from SDDL; ERROR_SUCCESS or the error.
+DWORD SetFixtureSd(const std::wstring& path, const wchar_t* sddl) {
+    TestSd t(sddl);
+    if (!t.sd) return GetLastError();
+    PACL dacl = nullptr;
+    BOOL present = FALSE, def = FALSE;
+    if (!GetSecurityDescriptorDacl(t.sd, &present, &dacl, &def)) return GetLastError();
+    std::wstring x = sys::ToExtended(path);
+    return SetNamedSecurityInfoW(&x[0], SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                 nullptr, nullptr, dacl, nullptr);
 }
 
 // Removes the folder tree this selftest run created (its own fixtures, hard rule 1 doesn't cover them).
@@ -2630,6 +2671,87 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
     };
     const PlanGate open{true, true, true};
     std::wstring why;
+    // Every Execute here takes this run's own lock, never the real Global\Hadron.bios.fwwrite.
+    const std::wstring lockName = L"Local\\Hadron.bios.fwwrite.selftest-" + std::to_wstring(GetCurrentProcessId());
+    auto XO = [&](const std::wstring& stamp) {
+        ExecOptions o;
+        o.stamp = stamp;
+        o.lockName = lockName;
+        return o;
+    };
+    check(std::wstring(kWriteMutexName) == L"Global\\Hadron.bios.fwwrite" && lockName != kWriteMutexName,
+          L"lock: the write lock is Global\\Hadron.bios.fwwrite (firmware is machine-wide); this selftest uses its own");
+
+    // --- trust policy, on descriptors built in memory ---
+    {
+        auto judge = [&](const wchar_t* sddl, std::wstring* w) {
+            TestSd t(sddl);
+            return t.sd && SdTrusted(t.sd, w);
+        };
+        std::wstring w1, w2, w3, w4, w5, w6, w7, w8, w9, w10;
+        bool adminOnly = judge(kBackupSddl, &w1);
+        bool extraRead = judge(L"O:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;WD)(D;;FA;;;AN)", &w2);
+        bool usersWrite = !judge(L"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;FW;;;BU)", &w3);
+        bool everyone = !judge(L"O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;WD)", &w4);
+        bool nullDacl = false;
+        {
+            // Built in code: Wine's SDDL parser turns NO_ACCESS_CONTROL into an empty DACL, not a NULL one.
+            SECURITY_DESCRIPTOR nd;
+            BYTE ba[SECURITY_MAX_SID_SIZE];
+            DWORD n = sizeof(ba);
+            nullDacl = InitializeSecurityDescriptor(&nd, SECURITY_DESCRIPTOR_REVISION) &&
+                       CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, ba, &n) &&
+                       SetSecurityDescriptorOwner(&nd, ba, FALSE) && SetSecurityDescriptorDacl(&nd, TRUE, nullptr, FALSE) &&
+                       !SdTrusted(&nd, &w5);
+        }
+        bool noDacl = !judge(L"O:BA", &w6);
+        bool userOwner = !judge(L"O:S-1-5-21-1-2-3-1001D:P(A;;FA;;;SY)(A;;FA;;;BA)", &w7);
+        bool genAll = !judge(L"O:BAD:P(A;;FA;;;BA)(A;IO;GA;;;AU)", &w8);   // inherit-only counts too
+        bool del = !judge(L"O:BAD:P(A;;FA;;;BA)(A;;SD;;;AU)", &w9);
+        bool dac = !judge(L"O:BAD:P(A;;FA;;;BA)(A;;WD;;;S-1-5-21-1-2-3-1001)", &w10);
+        check(adminOnly && extraRead, L"trust: admin-only (and admin-only plus read for others) passes" +
+              (adminOnly ? L"" : L" (" + w1 + L")") + (extraRead ? L"" : L" (" + w2 + L")"));
+        check(usersWrite && everyone && nullDacl && noDacl && userOwner,
+              L"trust: Users:write, Everyone:full, a NULL DACL, no DACL and a user owner are each refused (" + w3 + L"; " + w4 +
+              L"; " + w5 + L"; " + w6 + L"; " + w7 + L")");
+        check(genAll && del && dac, L"trust: GENERIC_ALL (inherit-only), DELETE and WRITE_DAC to others are refused (" + w8 + L"; " +
+              w9 + L"; " + w10 + L")");
+    }
+    // On disk: Windows applies the descriptor; Wine may keep only part of it. The selftest probes once
+    // and, where the OS doesn't keep ACLs, judges paths with an injected check that refuses only the
+    // paths a test marks, so the rest of the restore logic still runs.
+    std::set<std::wstring> distrusted;
+    bool realAcl = false;
+    {
+        std::wstring pd, w, e;
+        TestSd t;
+        realAcl = PrepareBackupRoot(root, &e) && PathTrusted(root, &w);
+        if (realAcl) {
+            std::wstring f = root + L"\\acl-probe.txt";
+            realAcl = WriteNewFile(f, "x", &e, &t.sa) && PathTrusted(f, &w) && SetFixtureSd(f, L"D:P(A;;FA;;;WD)") == ERROR_SUCCESS &&
+                      !PathTrusted(f, &w);
+            DeleteFileW(sys::ToExtended(f).c_str());
+        }
+        check(true, std::wstring(L"trust: this OS ") + (realAcl ? L"keeps file ACLs; the restore tests use the real check"
+                                                                : L"doesn't keep file ACLs (Wine); the restore tests inject the check (" + w + e + L")"));
+    }
+    TrustFn trust;   // empty = the real PathTrusted
+    if (!realAcl)
+        trust = [&distrusted](const std::wstring& p, std::wstring* w) {
+            std::wstring s = sys::ToShell(sys::ToExtended(p));
+            for (auto& d : distrusted)   // the marked path itself, or anything inside it
+                if (s.size() >= d.size() && CompareStringOrdinal(s.c_str(), (int)d.size(), d.c_str(), (int)d.size(), TRUE) == CSTR_EQUAL &&
+                    (s.size() == d.size() || s[d.size()] == L'\\')) {
+                    *w = s + L": marked writable by the selftest";
+                    return false;
+                }
+            return true;
+        };
+    // Makes path writable by Everyone (really, or by marking it for the injected check).
+    auto makeWritable = [&](const std::wstring& path) {
+        if (!realAcl) { distrusted.insert(sys::ToShell(sys::ToExtended(path))); return true; }
+        return SetFixtureSd(path, L"D:P(A;OICI;FA;;;WD)") == ERROR_SUCCESS;
+    };
 
     // --- ValidateValue ---
     check(ValidateValue(d.S[0], 1, &why) && ValidateValue(d.S[0], 0, &why) && !ValidateValue(d.S[0], 2, &why),
@@ -2743,7 +2865,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         Plan pl;
         bool planned = BuildPlan(d, {{0, 1}, {2, 1}, {3, 50000}}, liveOf(*m), open, &pl, &why);
         ExecResult r;
-        bool ok = planned && Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000000"});
+        bool ok = planned && Execute(*m, pl, root, {}, {}, &r, XO(L"20260101-000000"));
         happyDir = r.backupDir;
         std::string j = ReadSmall(r.backupDir + L"\\journal.txt");
         check(ok && r.written == 2 && j == "BEGIN Setup g1\r\nOK Setup\r\nBEGIN CpuSetup g2\r\nOK CpuSetup\r\nEND\r\n",
@@ -2769,7 +2891,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         Plan p2;
         ExecResult r2;
         bool ok2 = BuildPlan(d, {{0, 1}}, liveOf(*m2), open, &p2, &why) &&
-                   Execute(*m2, p2, root, {}, {}, &r2, ExecOptions{L"20260101-000000"});
+                   Execute(*m2, p2, root, {}, {}, &r2, XO(L"20260101-000000"));
         check(ok2 && r2.backupDir == r.backupDir + L"-2", L"Execute: same stamp twice -> \"-2\" folder (" + r2.backupDir + L")");
         std::vector<std::wstring> open1;
         check(!JournalIncomplete(j, &open1), L"Execute: a complete journal is not flagged");
@@ -2781,7 +2903,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         BuildPlan(d, {{0, 1}}, liveOf(*m), open, &pl, &why);
         m->vars[MakeVarKey(L"Setup", L"g1")].data[7] ^= 1;
         ExecResult r;
-        bool ok = Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000001"});
+        bool ok = Execute(*m, pl, root, {}, {}, &r, XO(L"20260101-000001"));
         check(!ok && m->writes == 0 && !r.started && r.error.find(L"changed since it was read") != std::wstring::npos,
               L"Execute: drift in an unplanned byte -> nothing written, no backup session");
     }
@@ -2791,17 +2913,17 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         BuildPlan(d, {{0, 1}}, liveOf(*m), open, &pl, &why);
         m->smbios.biosVersion = L"A.H0";
         ExecResult r;
-        bool mis = !Execute(*m, pl, root, {}, {}, &r) && m->writes == 0;
+        bool mis = !Execute(*m, pl, root, {}, {}, &r, XO(L"")) && m->writes == 0;
         m->smbios.biosVersion = L"A.F0";
         m->smbiosErr = ERROR_INVALID_DATA;
-        bool noSmb = !Execute(*m, pl, root, {}, {}, &r) && m->writes == 0;
+        bool noSmb = !Execute(*m, pl, root, {}, {}, &r, XO(L"")) && m->writes == 0;
         check(mis && noSmb, L"Execute: SMBIOS mismatch or unreadable -> nothing written");
         m->smbiosErr = 0;
         m->privilege = false;
-        bool noPriv = !Execute(*m, pl, root, {}, {}, &r) && m->writes == 0 && r.error.find(L"SeSystemEnvironmentPrivilege") == 0;
+        bool noPriv = !Execute(*m, pl, root, {}, {}, &r, XO(L"")) && m->writes == 0 && r.error.find(L"SeSystemEnvironmentPrivilege") == 0;
         check(noPriv, L"Execute: without the thread privilege -> nothing written");
         m->privilege = true;
-        bool cancelled = !Execute(*m, pl, root, [] { return true; }, {}, &r) && m->writes == 0;
+        bool cancelled = !Execute(*m, pl, root, [] { return true; }, {}, &r, XO(L"")) && m->writes == 0;
         check(cancelled, L"Execute: cancelled before writing -> nothing written");
     }
     {
@@ -2812,7 +2934,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         m->failWriteOf = L"CpuSetup";
         m->failWriteErr = ERROR_WRITE_PROTECT;
         ExecResult r;
-        bool ok = Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000002"});
+        bool ok = Execute(*m, pl, root, {}, {}, &r, XO(L"20260101-000002"));
         bool states = planned && r.vars.size() == 3 && r.vars[0].state == VarState::Written &&
                       r.vars[1].state == VarState::Failed && r.vars[1].err == ERROR_WRITE_PROTECT &&
                       r.vars[2].state == VarState::NotAttempted;
@@ -2831,7 +2953,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         BuildPlan(d, {{0, 1}, {3, 5}}, liveOf(*m), open, &pl, &why);
         m->corruptWriteOf = L"Setup";
         ExecResult r;
-        bool ok = Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000003"});
+        bool ok = Execute(*m, pl, root, {}, {}, &r, XO(L"20260101-000003"));
         std::string j = ReadSmall(r.backupDir + L"\\journal.txt");
         check(!ok && r.vars[0].state == VarState::Restored && m->vars[MakeVarKey(L"Setup", L"g1")].data == setupOld &&
               r.vars[1].state == VarState::NotAttempted && m->writes == 2,
@@ -2844,17 +2966,18 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         Plan pl;
         ExecResult r;
         BuildPlan(d, {{0, 1}, {2, 1}, {3, 50000}}, liveOf(*m), open, &pl, &why);
-        Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000004"});   // m now holds the new values
+        Execute(*m, pl, root, {}, {}, &r, XO(L"20260101-000004"));   // m now holds the new values
         std::string man = ReadSmall(r.backupDir + L"\\manifest.txt");
         std::wstring shaOld;
         Sha256Hex(setupOld, &shaOld, &err);
-        check(man.find("Hadron BIOS backup manifest 1\r\nSetup\tg1\t8\t00000007\t" + ToUtf8(shaOld) + "\r\n") == 0,
+        check(man.find("Hadron BIOS backup manifest 2\r\nboard\tPRO Z790-P WIFI (MS-7E06)\r\nbios\tA.F0\r\nSetup\tg1\t8\t00000007\t" +
+                       ToUtf8(shaOld) + "\r\n") == 0,
               L"Restore: the session's manifest.txt lists name, guid, size, attributes and SHA-256");
         std::wstring shaAbc;
         check(Sha256Hex({'a', 'b', 'c'}, &shaAbc, &err) &&
               shaAbc == L"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", L"SHA-256(\"abc\") is the FIPS 180-2 vector");
         SnapLoad bl;
-        bool loaded = LoadBackupSession(root, r.backupDir, &bl);
+        bool loaded = LoadBackupSession(root, r.backupDir, &bl, trust);
         check(loaded, L"Restore: a genuine session under the backup root loads" + (loaded ? L"" : L": " + bl.error));
         Plan rp;
         bool planned = loaded && BuildRestorePlan(d, bl.vars, bl.label, bl.sysBoard, bl.sysBios, liveOf(*m), open, &rp, &why);
@@ -2876,7 +2999,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
                   L"Restore: same gate as writes (switch off -> refused)");
         }
         ExecResult rr;
-        bool restored = planned && Execute(*m, rp, root, {}, {}, &rr, ExecOptions{L"20260101-000005"});
+        bool restored = planned && Execute(*m, rp, root, {}, {}, &rr, XO(L"20260101-000005"));
         check(restored && m->vars[MakeVarKey(L"Setup", L"g1")].data == setupOld && m->vars[MakeVarKey(L"CpuSetup", L"g2")].data == cpuOld,
               L"Restore: execute puts the backup's bytes back (with its own backup session first)" +
               (restored ? L"" : L": " + rr.error));
@@ -2891,7 +3014,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
             Plan p3;
             ExecResult r3;
             bool made = BuildPlan(d, {{0, 1}}, liveOf(*m3), open, &p3, &why) &&
-                        Execute(*m3, p3, root, {}, {}, &r3, ExecOptions{L"20260101-000006"});
+                        Execute(*m3, p3, root, {}, {}, &r3, XO(L"20260101-000006"));
             bool edited = false;
             WIN32_FIND_DATAW fd;
             HANDLE fh = made ? FindFirstFileW(sys::ToExtended(r3.backupDir + L"\\vars\\0001_*.bin").c_str(), &fd) : INVALID_HANDLE_VALUE;
@@ -2907,7 +3030,7 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
                 }
             }
             SnapLoad s3;
-            bool refused = edited && !LoadBackupSession(root, r3.backupDir, &s3) && s3.error.find(L"SHA-256") != std::wstring::npos &&
+            bool refused = edited && !LoadBackupSession(root, r3.backupDir, &s3, trust) && s3.error.find(L"SHA-256") != std::wstring::npos &&
                            s3.vars.empty();
             check(refused, L"Restore: a hand-edited .bin is refused (" + s3.error + L")");
         }
@@ -2916,10 +3039,10 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
             Plan p4;
             ExecResult r4;
             bool made = BuildPlan(d, {{0, 1}}, liveOf(*m4), open, &p4, &why) &&
-                        Execute(*m4, p4, root + L"\\elsewhere", {}, {}, &r4, ExecOptions{L"20260101-000007"});
+                        Execute(*m4, p4, root + L"\\elsewhere", {}, {}, &r4, XO(L"20260101-000007"));
             SnapLoad s4, s5;
-            bool outside = made && !LoadBackupSession(root, r4.backupDir, &s4) && s4.error.find(L"directly inside") != std::wstring::npos;
-            bool rootItself = !LoadBackupSession(root, root, &s5) && !s5.error.empty();
+            bool outside = made && !LoadBackupSession(root, r4.backupDir, &s4, trust) && s4.error.find(L"directly inside") != std::wstring::npos;
+            bool rootItself = !LoadBackupSession(root, root, &s5, trust) && !s5.error.empty();
             check(outside && rootItself, L"Restore: a genuine session outside the backup root (and the root itself) is refused (" + s4.error + L")");
         }
         {
@@ -2931,9 +3054,58 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
             bool saved = SaveSnapshot(root, liveOf(*m5), smb, &sr);
             SnapLoad s6, s7;
             bool plainLoads = saved && LoadSnapshot(sr.folder, &s7);
-            bool refused = saved && !LoadBackupSession(root, sr.folder, &s6) && s6.error.find(L"isn't a Hadron write backup") != std::wstring::npos;
+            bool refused = saved && !LoadBackupSession(root, sr.folder, &s6, trust) && (s6.error.find(L"isn't a Hadron write backup") != std::wstring::npos || s6.error.find(L"isn't trusted") != std::wstring::npos);
             check(plainLoads && refused, L"Restore: a plain Save snapshot folder under the root loads as a snapshot but is refused as a backup (" +
                   s6.error + L")");
+        }
+        // The guard's board/BIOS come from the hashed manifest; a system.txt edited to another BIOS is refused.
+        {
+            auto m6 = freshMock();
+            Plan p6;
+            ExecResult r6;
+            bool made = BuildPlan(d, {{0, 1}}, liveOf(*m6), open, &p6, &why) &&
+                        Execute(*m6, p6, root, {}, {}, &r6, XO(L"20260101-000012"));
+            std::string man6 = ReadSmall(r6.backupDir + L"\\manifest.txt");
+            SnapLoad g6, e6;
+            bool v2 = man6.find("Hadron BIOS backup manifest 2\r\nboard\tPRO Z790-P WIFI (MS-7E06)\r\nbios\tA.F0\r\n") == 0;
+            bool fromManifest = made && LoadBackupSession(root, r6.backupDir, &g6, trust) && g6.sysBoard == L"PRO Z790-P WIFI (MS-7E06)" &&
+                                g6.sysBios == L"A.F0";
+            check(v2 && fromManifest, L"Restore: manifest v2 carries the board/BIOS read at backup time; the load takes them from it" +
+                  (fromManifest ? L"" : L" (" + g6.error + L")"));
+            std::string sys6 = ReadSmall(r6.backupDir + L"\\system.txt");
+            size_t at = sys6.find("A.F0");
+            bool edited = false;
+            if (at != std::string::npos) {
+                sys6.replace(at, 4, "A.H0");   // this selftest's own fixture, rewritten in place (its ACL stays)
+                HANDLE f = CreateFileW(sys::ToExtended(r6.backupDir + L"\\system.txt").c_str(), GENERIC_WRITE, 0, nullptr,
+                                       TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (f != INVALID_HANDLE_VALUE) {
+                    DWORD put = 0;
+                    edited = WriteFile(f, sys6.data(), (DWORD)sys6.size(), &put, nullptr) && put == sys6.size();
+                    CloseHandle(f);
+                }
+            }
+            bool refused = edited && !LoadBackupSession(root, r6.backupDir, &e6, trust) &&
+                           e6.error.find(L"system.txt doesn't match manifest.txt") == 0 && e6.vars.empty();
+            check(refused, L"Restore: system.txt edited to another BIOS is refused (" + e6.error + L")");
+        }
+        // Admin-only: a session with any file a standard user could have changed is refused.
+        {
+            auto m7 = freshMock();
+            Plan p7;
+            ExecResult r7;
+            bool made = BuildPlan(d, {{0, 1}}, liveOf(*m7), open, &p7, &why) &&
+                        Execute(*m7, p7, root, {}, {}, &r7, XO(L"20260101-000013"));
+            std::wstring w7;
+            bool selfTrusted = made && (!realAcl || (PathTrusted(r7.backupDir, &w7) && PathTrusted(r7.backupDir + L"\\manifest.txt", &w7) &&
+                                                     PathTrusted(r7.backupDir + L"\\journal.txt", &w7)));
+            check(selfTrusted, std::wstring(L"trust: a session Execute writes is admin-only (owner Administrators, protected DACL)") +
+                  (realAcl ? L"" : L" [not checkable here: the OS doesn't keep ACLs]") + (selfTrusted ? L"" : L" (" + w7 + L")"));
+            SnapLoad s8;
+            bool opened = made && makeWritable(r7.backupDir + L"\\manifest.txt");
+            bool refused = opened && !LoadBackupSession(root, r7.backupDir, &s8, trust) &&
+                           s8.error.find(L"This backup folder can be changed without admin rights, so it isn't trusted") == 0;
+            check(refused, L"Restore: a session whose manifest.txt a non-admin can change is refused (" + s8.error + L")");
         }
     }
     // --- the write lock (one writer across Hadron windows) ---
@@ -2949,21 +3121,37 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         auto m = freshMock();
         Plan pl;
         bool planned = BuildPlan(d, {{0, 1}}, liveOf(*m), open, &pl, &why);
-        HANDLE mx = CreateMutexW(nullptr, FALSE, kWriteMutexName);
+        HANDLE mx = CreateMutexW(nullptr, FALSE, lockName.c_str());
         bool held = mx && WaitForSingleObject(mx, 0) == WAIT_OBJECT_0;
-        Run busy{m.get(), &pl, root, L"20260101-000008", ExecResult{}, false};
+        Run busy{m.get(), &pl, root, L"20260101-000008", lockName, ExecResult{}, false};
         bool ran = planned && held && onThread(&busy);
         if (held) ReleaseMutex(mx);
         check(ran && !busy.ok && m->writes == 0 && !busy.r.started &&
               busy.r.error == L"Another Hadron window is writing BIOS settings. Nothing was written.",
-              L"lock: Execute refuses while another thread holds " + std::wstring(kWriteMutexName) + L" (" + busy.r.error + L")");
-        Run good{m.get(), &pl, root, L"20260101-000009", ExecResult{}, false};
+              L"lock: Execute refuses while another thread holds the lock (" + busy.r.error + L")");
+        Run good{m.get(), &pl, root, L"20260101-000009", lockName, ExecResult{}, false};
         bool ran2 = planned && onThread(&good);
         // Released by RAII when Execute returned: the thread has exited, so a mutex it still held would
         // come back WAIT_ABANDONED here.
         DWORD w = mx ? WaitForSingleObject(mx, 0) : WAIT_FAILED;
         if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) ReleaseMutex(mx);
         check(ran2 && good.ok && m->writes == 1 && w == WAIT_OBJECT_0, L"lock: after the lock is free Execute writes and releases it on return");
+        // A holder that ended without releasing (a crash mid-write): refuse, release, and the next run writes.
+        auto m2 = freshMock();
+        Plan p2;
+        bool planned2 = BuildPlan(d, {{0, 1}}, liveOf(*m2), open, &p2, &why);
+        HANDLE at = CreateThread(nullptr, 0, AbandonLockThread, (LPVOID)lockName.c_str(), 0, nullptr);
+        DWORD took = 0;
+        if (at) { WaitForSingleObject(at, INFINITE); GetExitCodeThread(at, &took); CloseHandle(at); }
+        Run after{m2.get(), &p2, root, L"20260101-000010", lockName, ExecResult{}, false};
+        bool ran3 = planned2 && took == 1 && onThread(&after);
+        check(ran3 && !after.ok && m2->writes == 0 && !after.r.started &&
+              after.r.error == L"Another Hadron window stopped in the middle of a BIOS write. Nothing was written. Check its backup.",
+              L"lock: an abandoned lock (holder ended mid-write) refuses the write (" + after.r.error + L")");
+        Run next{m2.get(), &p2, root, L"20260101-000011", lockName, ExecResult{}, false};
+        bool ran4 = planned2 && onThread(&next);
+        check(ran4 && next.ok && m2->writes == 1, L"lock: the refusing run released it; the next write goes ahead" +
+              (next.ok ? L"" : L" (" + next.r.error + L")"));
         if (mx) CloseHandle(mx);
     }
     // --- Incomplete sessions ---
@@ -2976,24 +3164,41 @@ void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstrin
         check(!JournalIncomplete("BEGIN Setup g1\r\nOK Setup\r\nEND\r\n", nullptr) && !JournalIncomplete("", nullptr),
               L"journal: complete and empty journals are not");
         IncompleteSession is;
-        bool none = !FindIncompleteSession(root, &is);   // the newest session so far completed
+        TestSd psd;   // planted by hand with the same admin-only descriptor Execute uses
+        bool none = !FindIncompleteSession(root, &is, 8, trust);   // the newest session so far completed
         std::wstring dir;
         bool made = CreateBackupSession(root, L"29991231-235959", &dir, &err) &&
-                    WriteNewFile(dir + L"\\journal.txt", "BEGIN Setup g1\r\n", &err);
-        bool found = made && FindIncompleteSession(root, &is) && is.stamp == L"29991231-235959" && is.vars.size() == 1;
+                    WriteNewFile(dir + L"\\journal.txt", "BEGIN Setup g1\r\n", &err, &psd.sa);
+        bool found = made && FindIncompleteSession(root, &is, 8, trust) && is.stamp == L"29991231-235959" && is.vars.size() == 1;
         check(none && found, L"journal: the newest session's unfinished journal is found on start; a completed one isn't");
         // "Newest" is the folder's creation time, not its name: a session created later under a name that
         // sorts first (the clock went back) and completed hides the older unfinished one.
         Sleep(50);
         std::wstring dir2;
         bool made2 = CreateBackupSession(root, L"00000101-000000", &dir2, &err) &&
-                     WriteNewFile(dir2 + L"\\journal.txt", "BEGIN Setup g1\r\nOK Setup\r\nEND\r\n", &err);
+                     WriteNewFile(dir2 + L"\\journal.txt", "BEGIN Setup g1\r\nOK Setup\r\nEND\r\n", &err, &psd.sa);
         WIN32_FILE_ATTRIBUTE_DATA a1{}, a2{};
         bool times = GetFileAttributesExW(sys::ToExtended(dir).c_str(), GetFileExInfoStandard, &a1) &&
                      GetFileAttributesExW(sys::ToExtended(dir2).c_str(), GetFileExInfoStandard, &a2) &&
                      CompareFileTime(&a2.ftCreationTime, &a1.ftCreationTime) > 0;
-        check(made2 && times && !FindIncompleteSession(root, &is),
+        check(made2 && times && !FindIncompleteSession(root, &is, 8, trust),
               L"journal: the newest session is picked by folder creation time, not by name");
+        // An unfinished journal a standard user could have written never raises the banner.
+        Sleep(50);
+        std::wstring dir3;
+        bool made3 = CreateBackupSession(root, L"29991231-235960", &dir3, &err) &&
+                     WriteNewFile(dir3 + L"\\journal.txt", "BEGIN Setup g1\r\n", &err, &psd.sa);
+        bool shown = made3 && FindIncompleteSession(root, &is, 8, trust) && is.stamp == L"29991231-235960";
+        bool open3 = made3 && makeWritable(dir3 + L"\\journal.txt");
+        bool hidden = open3 && !(FindIncompleteSession(root, &is, 8, trust) && is.stamp == L"29991231-235960");
+        check(shown && hidden, L"journal: an unfinished session whose journal a non-admin can change is ignored (no banner)");
+        bool rootOpen = makeWritable(root);
+        bool noneAtAll = rootOpen && !FindIncompleteSession(root, &is, 8, trust);
+        std::wstring pe;
+        distrusted.erase(sys::ToShell(sys::ToExtended(root)));
+        bool fixed = PrepareBackupRoot(root, &pe) && (!realAcl || PathTrusted(root, &pe));
+        check(noneAtAll && fixed, L"journal: nothing is reported when the backup root itself isn't admin-only; preparing it again "
+                                  L"makes it admin-only" + (fixed ? L"" : L" (" + pe + L")"));
     }
     // --- latch ---
     {

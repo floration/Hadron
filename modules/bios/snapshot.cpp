@@ -296,8 +296,8 @@ bool LoadSnapshot(const std::wstring& path, SnapLoad* out) {
 }
 
 // ---- save ---------------------------------------------------------------------------------------
-bool WriteNewFile(const std::wstring& path, const std::string& data, std::wstring* err) {
-    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+bool WriteNewFile(const std::wstring& path, const std::string& data, std::wstring* err, SECURITY_ATTRIBUTES* sa) {
+    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, 0, sa, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) { if (err) *err = sys::ToShell(path) + L": " + sys::ErrorText(GetLastError()); return false; }
     size_t done = 0;
@@ -352,12 +352,12 @@ bool SaveSnapshot(const std::wstring& parent, const std::vector<FwVar>& vars, co
 }
 
 bool WriteSnapshotFiles(const std::wstring& folder, const std::vector<FwVar>& vars, const SmbiosInfo& smb,
-                        const std::wstring& savedBy, SaveResult* out) {
+                        const std::wstring& savedBy, SaveResult* out, SECURITY_ATTRIBUTES* sa) {
     out->ok = false;
     out->found = out->read = 0;
     SYSTEMTIME st;
     GetLocalTime(&st);
-    if (!CreateDirectoryW(sys::ToExtended(folder + L"\\vars").c_str(), nullptr)) {
+    if (!CreateDirectoryW(sys::ToExtended(folder + L"\\vars").c_str(), sa)) {
         out->error = L"Can't create the vars folder: " + sys::ErrorText(GetLastError());
         return false;
     }
@@ -370,7 +370,7 @@ bool WriteSnapshotFiles(const std::wstring& folder, const std::vector<FwVar>& va
         if (v.err == 0 && !v.data.empty()) {
             file = SnapFileName(idx, v.name, v.guid);
             std::wstring err;
-            if (!WriteNewFile(folder + L"\\vars\\" + file, std::string(v.data.begin(), v.data.end()), &err)) {
+            if (!WriteNewFile(folder + L"\\vars\\" + file, std::string(v.data.begin(), v.data.end()), &err, sa)) {
                 out->error = L"Writing a variable failed: " + err;
                 return false;
             }
@@ -383,7 +383,7 @@ bool WriteSnapshotFiles(const std::wstring& folder, const std::vector<FwVar>& va
                CsvQuote(std::to_wstring(v.err)) + L"," + CsvQuote(file) + L"\r\n";
     }
     std::wstring err;
-    if (!WriteNewFile(folder + L"\\index.csv", "\xEF\xBB\xBF" + ToUtf8(csv), &err)) { out->error = err; return false; }
+    if (!WriteNewFile(folder + L"\\index.csv", "\xEF\xBB\xBF" + ToUtf8(csv), &err, sa)) { out->error = err; return false; }
     wchar_t when[32];
     swprintf(when, 32, L"%04u-%02u-%02u %02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
     std::wstring txt = std::wstring(L"Dumped: ") + when + L"\r\n" +
@@ -392,7 +392,7 @@ bool WriteSnapshotFiles(const std::wstring& folder, const std::vector<FwVar>& va
                        L"CPU: " + CpuName() + L"\r\n" +
                        L"Variables: " + std::to_wstring(out->found) + L" found, " + std::to_wstring(out->read) +
                        L" read\r\n" + L"Saved by: " + savedBy + L"\r\n";
-    if (!WriteNewFile(folder + L"\\system.txt", "\xEF\xBB\xBF" + ToUtf8(txt), &err)) { out->error = err; return false; }
+    if (!WriteNewFile(folder + L"\\system.txt", "\xEF\xBB\xBF" + ToUtf8(txt), &err, sa)) { out->error = err; return false; }
     out->ok = true;
     return true;
 }

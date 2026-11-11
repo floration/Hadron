@@ -4,6 +4,8 @@
 #include "core/sys/log.h"
 #include "core/sys/sys.h"
 #include <shlobj.h>
+#include <aclapi.h>
+#include <sddl.h>
 #include <bcrypt.h>
 #include <algorithm>
 #include <cstdio>
@@ -133,8 +135,8 @@ std::vector<uint8_t> Slice(const std::vector<uint8_t>& d, int off, int w) {
 class Journal {
 public:
     ~Journal() { if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_); }
-    bool Open(const std::wstring& path, std::wstring* err) {
-        h_ = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
+    bool Open(const std::wstring& path, SECURITY_ATTRIBUTES* sa, std::wstring* err) {
+        h_ = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, FILE_SHARE_READ, sa, CREATE_NEW,
                          FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h_ == INVALID_HANDLE_VALUE) { *err = L"Can't create the journal: " + sys::ErrorText(GetLastError()); return false; }
         return true;
@@ -165,22 +167,28 @@ bool EnsureDir(const std::wstring& path, int depth = 0) {
     return GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
-// Holds kWriteMutexName from Take() until destruction. A mutex left by a crashed holder
-// (WAIT_ABANDONED) is taken: the crashed run's journal is what the "didn't finish" banner reads.
+// Holds the write-lock mutex from Take() until destruction (released whenever it was acquired, the
+// abandoned case included).
 class WriteLock {
 public:
     ~WriteLock() {
         if (owned_) ReleaseMutex(h_);
         if (h_) CloseHandle(h_);
     }
-    bool Take(std::wstring* err) {
-        h_ = CreateMutexW(nullptr, FALSE, kWriteMutexName);
-        if (!h_) { *err = L"Couldn't create the write lock: " + sys::ErrorText(GetLastError()) + L" Nothing was written."; return false; }
+    bool Take(const std::wstring& name, std::wstring* err) {
+        h_ = CreateMutexW(nullptr, FALSE, name.c_str());
+        if (!h_) {
+            *err = L"Couldn't create or open the write lock " + name + L": " + sys::ErrorText(GetLastError()) + L" Nothing was written.";
+            return false;
+        }
         DWORD w = WaitForSingleObject(h_, 0);
-        if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) {
+        if (w == WAIT_OBJECT_0) { owned_ = true; return true; }
+        if (w == WAIT_ABANDONED) {
+            // Its last holder ended mid-run: a write may have stopped between BEGIN and OK. Don't write
+            // over that; the "didn't finish" banner offers its backup.
             owned_ = true;
-            if (w == WAIT_ABANDONED) LogLine(LogLevel::Warn, L"the write lock was abandoned by a run that ended without releasing it");
-            return true;
+            *err = L"Another Hadron window stopped in the middle of a BIOS write. Nothing was written. Check its backup.";
+            return false;
         }
         if (w == WAIT_TIMEOUT) { *err = L"Another Hadron window is writing BIOS settings. Nothing was written."; return false; }
         *err = L"Couldn't take the write lock: " + sys::ErrorText(GetLastError()) + L" Nothing was written.";
@@ -236,7 +244,75 @@ bool SamePath(const std::wstring& a, const std::wstring& b) {
     return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
 }
 
-constexpr const char* kManifestHeader = "Hadron BIOS backup manifest 1";
+constexpr const char* kManifestHeader = "Hadron BIOS backup manifest 2";
+
+// kBackupSddl as a self-relative descriptor plus the SECURITY_ATTRIBUTES that carry it.
+class BackupSd {
+public:
+    ~BackupSd() { if (sd_) LocalFree(sd_); }
+    bool Make(std::wstring* err) {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kBackupSddl, SDDL_REVISION_1, &sd_, nullptr)) {
+            sd_ = nullptr;
+            *err = L"Couldn't build the backup folder's security descriptor: " + sys::ErrorText(GetLastError());
+            return false;
+        }
+        sa_.nLength = sizeof(sa_);
+        sa_.lpSecurityDescriptor = sd_;
+        sa_.bInheritHandle = FALSE;
+        return true;
+    }
+    PSECURITY_DESCRIPTOR Sd() const { return sd_; }
+    SECURITY_ATTRIBUTES* Sa() { return &sa_; }
+private:
+    PSECURITY_DESCRIPTOR sd_ = nullptr;
+    SECURITY_ATTRIBUTES sa_{};
+};
+
+bool IsWellKnown(PSID sid, WELL_KNOWN_SID_TYPE type) {
+    BYTE buf[SECURITY_MAX_SID_SIZE];
+    DWORD n = sizeof(buf);
+    if (!CreateWellKnownSid(type, nullptr, buf, &n)) return false;
+    return EqualSid(sid, buf) != 0;
+}
+bool IsAdminOrSystem(PSID sid) {
+    return sid && IsValidSid(sid) && (IsWellKnown(sid, WinBuiltinAdministratorsSid) || IsWellKnown(sid, WinLocalSystemSid));
+}
+std::wstring SidText(PSID sid) {
+    LPWSTR s = nullptr;
+    if (!sid || !ConvertSidToStringSidW(sid, &s) || !s) return L"(unreadable SID)";
+    std::wstring r = s;
+    LocalFree(s);
+    return r;
+}
+
+std::wstring TrimLine(std::wstring s) {   // the same trimming as snapshot.cpp's system.txt reader
+    while (!s.empty() && (s.back() == L' ' || s.back() == L'\r' || s.back() == L'\t')) s.pop_back();
+    size_t a = 0;
+    while (a < s.size() && (s[a] == L' ' || s[a] == L'\t' || s[a] == 0xFEFF)) a++;
+    return s.substr(a);
+}
+
+// Every folder and file under dir (dir itself too) passes trust; links are refused, never followed.
+bool TreeTrusted(const std::wstring& dir, const TrustFn& trust, std::wstring* why, int depth = 0) {
+    if (depth > 4) { *why = L"the backup folder is nested too deeply"; return false; }
+    if (!trust(dir, why)) return false;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(sys::ToExtended(dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) { *why = sys::ToShell(dir) + L": " + sys::ErrorText(GetLastError()); return false; }
+    bool ok = true;
+    do {
+        std::wstring n = fd.cFileName;
+        if (n == L"." || n == L"..") continue;
+        std::wstring p = dir + L"\\" + n;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { *why = sys::ToShell(p) + L" is a link"; ok = false; break; }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = TreeTrusted(p, trust, why, depth + 1);
+        else ok = trust(p, why);
+    } while (ok && FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+const wchar_t* kUntrusted = L"This backup folder can be changed without admin rights, so it isn't trusted";
 
 }  // namespace
 
@@ -624,14 +700,108 @@ std::wstring DefaultBackupRoot() {
     return r;
 }
 
-bool CreateBackupSession(const std::wstring& root, const std::wstring& stamp, std::wstring* dir, std::wstring* err) {
+bool SdTrusted(PSECURITY_DESCRIPTOR sd, std::wstring* why) {
+    std::wstring dummy;
+    if (!why) why = &dummy;
+    if (!sd || !IsValidSecurityDescriptor(sd)) { *why = L"no valid security descriptor"; return false; }
+    PSID owner = nullptr;
+    BOOL ownerDef = FALSE;
+    if (!GetSecurityDescriptorOwner(sd, &owner, &ownerDef)) { *why = L"the owner can't be read: " + sys::ErrorText(GetLastError()); return false; }
+    if (!owner) { *why = L"it has no owner"; return false; }
+    if (!IsAdminOrSystem(owner)) { *why = L"it is owned by " + SidText(owner) + L", not Administrators or SYSTEM"; return false; }
+    BOOL present = FALSE, daclDef = FALSE;
+    PACL dacl = nullptr;
+    if (!GetSecurityDescriptorDacl(sd, &present, &dacl, &daclDef)) { *why = L"the DACL can't be read: " + sys::ErrorText(GetLastError()); return false; }
+    if (!present || !dacl) { *why = L"it has no DACL (everyone has full access)"; return false; }
+    // Every right that changes, adds, removes or re-permissions something.
+    const ACCESS_MASK kWrite = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD |
+                               DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED;
+    ACL_SIZE_INFORMATION info{};
+    if (!GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation)) { *why = L"the DACL can't be read: " + sys::ErrorText(GetLastError()); return false; }
+    for (DWORD i = 0; i < info.AceCount; i++) {
+        void* p = nullptr;
+        if (!GetAce(dacl, i, &p) || !p) { *why = L"an ACE can't be read"; return false; }
+        const ACE_HEADER* h = static_cast<const ACE_HEADER*>(p);
+        const BYTE t = h->AceType;
+        const bool allowed = t == ACCESS_ALLOWED_ACE_TYPE || t == ACCESS_ALLOWED_CALLBACK_ACE_TYPE ||
+                             t == ACCESS_ALLOWED_OBJECT_ACE_TYPE || t == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE ||
+                             t == ACCESS_ALLOWED_COMPOUND_ACE_TYPE;
+        if (!allowed) continue;   // deny and audit ACEs can't grant anything
+        // Every allowed ACE layout has the mask right after the header.
+        ACCESS_MASK mask = *reinterpret_cast<const ACCESS_MASK*>(static_cast<const BYTE*>(p) + sizeof(ACE_HEADER));
+        if (!(mask & kWrite)) continue;
+        if (t == ACCESS_ALLOWED_ACE_TYPE || t == ACCESS_ALLOWED_CALLBACK_ACE_TYPE) {
+            PSID sid = (PSID)&static_cast<ACCESS_ALLOWED_ACE*>(p)->SidStart;
+            if (IsAdminOrSystem(sid)) continue;
+            *why = L"it lets " + SidText(sid) + L" change it (access mask " + Hex(mask, 8) + L")";
+            return false;
+        }
+        *why = L"an object or compound ACE grants write access (access mask " + Hex(mask, 8) + L")";
+        return false;
+    }
+    return true;
+}
+
+bool PathTrusted(const std::wstring& path, std::wstring* why) {
+    std::wstring dummy;
+    if (!why) why = &dummy;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    std::wstring x = sys::ToExtended(path);
+    DWORD e = GetNamedSecurityInfoW(&x[0], SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                    nullptr, nullptr, nullptr, nullptr, &sd);
+    if (e != ERROR_SUCCESS) { *why = sys::ToShell(x) + L": its permissions can't be read (" + sys::ErrorText(e) + L")"; return false; }
+    bool ok = SdTrusted(sd, why);
+    LocalFree(sd);
+    if (!ok) *why = sys::ToShell(x) + L": " + *why;
+    return ok;
+}
+
+bool PrepareBackupRoot(const std::wstring& root, std::wstring* err) {
     if (root.empty()) { *err = L"No backup folder (the local app data folder couldn't be resolved)."; return false; }
-    if (!EnsureDir(root)) { *err = L"Can't create " + sys::ToShell(root) + L": " + sys::ErrorText(GetLastError()); return false; }
+    std::wstring r = root;
+    while (r.size() > 1 && (r.back() == L'\\' || r.back() == L'/')) r.pop_back();
+    BackupSd sd;
+    if (!sd.Make(err)) return false;
+    size_t k = r.find_last_of(L"\\/");
+    if (k != std::wstring::npos && k > 0 && !EnsureDir(r.substr(0, k))) {
+        *err = L"Can't create " + sys::ToShell(r.substr(0, k)) + L": " + sys::ErrorText(GetLastError());
+        return false;
+    }
+    std::wstring x = sys::ToExtended(r);
+    if (CreateDirectoryW(x.c_str(), sd.Sa())) return true;
+    DWORD e = GetLastError();
+    if (e != ERROR_ALREADY_EXISTS) { *err = L"Can't create " + sys::ToShell(x) + L": " + sys::ErrorText(e); return false; }
+    // It exists: it must be a real folder, and it gets our owner and protected DACL again.
+    DWORD a = GetFileAttributesW(x.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES) { *err = L"Can't open " + sys::ToShell(x) + L": " + sys::ErrorText(GetLastError()); return false; }
+    if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { *err = sys::ToShell(x) + L" is a file, not the backup folder."; return false; }
+    if (a & FILE_ATTRIBUTE_REPARSE_POINT) { *err = sys::ToShell(x) + L" is a link; the backup folder must be a real folder."; return false; }
+    PSID owner = nullptr;
+    PACL dacl = nullptr;
+    BOOL def = FALSE, present = FALSE;
+    if (!GetSecurityDescriptorOwner(sd.Sd(), &owner, &def) || !GetSecurityDescriptorDacl(sd.Sd(), &present, &dacl, &def) || !owner || !dacl) {
+        *err = L"The backup folder's security descriptor is incomplete: " + sys::ErrorText(GetLastError());
+        return false;
+    }
+    e = SetNamedSecurityInfoW(&x[0], SE_FILE_OBJECT,
+                              OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                              owner, nullptr, dacl, nullptr);
+    if (e != ERROR_SUCCESS) {
+        *err = L"Can't make " + sys::ToShell(x) + L" admin-only: " + sys::ErrorText(e);
+        return false;
+    }
+    return true;
+}
+
+bool CreateBackupSession(const std::wstring& root, const std::wstring& stamp, std::wstring* dir, std::wstring* err) {
+    if (!PrepareBackupRoot(root, err)) return false;
+    BackupSd sd;
+    if (!sd.Make(err)) return false;
     std::wstring base = root;
     if (base.back() != L'\\') base += L'\\';
     for (int n = 1; n < 1000; n++) {
         std::wstring cand = base + stamp + (n > 1 ? L"-" + std::to_wstring(n) : L"");
-        if (CreateDirectoryW(sys::ToExtended(cand).c_str(), nullptr)) { *dir = cand; return true; }
+        if (CreateDirectoryW(sys::ToExtended(cand).c_str(), sd.Sa())) { *dir = cand; return true; }
         DWORD e = GetLastError();
         if (e != ERROR_ALREADY_EXISTS) { *err = L"Can't create " + sys::ToShell(cand) + L": " + sys::ErrorText(e); return false; }
     }
@@ -663,8 +833,18 @@ bool Sha256Hex(const std::vector<uint8_t>& data, std::wstring* hex, std::wstring
     return true;
 }
 
-bool ManifestText(const std::vector<FwVar>& vars, std::string* text, std::wstring* err) {
-    std::wstring t = FromUtf8(kManifestHeader) + L"\r\n";
+std::wstring SmbiosBoardLine(const SmbiosInfo& smb) { return TrimLine(smb.boardMaker + L" " + smb.boardProduct); }
+std::wstring SmbiosBiosLine(const SmbiosInfo& smb) {
+    return TrimLine(smb.biosVendor + L" " + smb.biosVersion + L" " + smb.biosDate);
+}
+
+bool ManifestText(const std::vector<FwVar>& vars, const SmbiosInfo& smb, std::string* text, std::wstring* err) {
+    auto oneLine = [](std::wstring s) {
+        for (auto& c : s) if (c == L'\r' || c == L'\n') c = L' ';
+        return s;
+    };
+    std::wstring t = FromUtf8(kManifestHeader) + L"\r\n" + L"board\t" + oneLine(SmbiosBoardLine(smb)) + L"\r\n" +
+                     L"bios\t" + oneLine(SmbiosBiosLine(smb)) + L"\r\n";
     for (auto& v : vars) {
         std::wstring sha;
         if (!Sha256Hex(v.data, &sha, err)) return false;
@@ -676,7 +856,8 @@ bool ManifestText(const std::vector<FwVar>& vars, std::string* text, std::wstrin
     return true;
 }
 
-bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, SnapLoad* out) {
+bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, SnapLoad* out, const TrustFn& trust) {
+    const TrustFn check = trust ? trust : TrustFn(PathTrusted);
     *out = SnapLoad{};
     out->label = sys::ToShell(sys::ToExtended(dir));
     auto refuse = [&](const std::wstring& why) {
@@ -699,6 +880,9 @@ bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, 
     if (cut == std::wstring::npos || !SamePath(dirFinal.substr(0, cut), rootFinal))
         return refuse(L"Only Hadron's own backup sessions can be restored: choose a folder directly inside " +
                       sys::ToShell(rootFinal) + L".");
+    // Admin-only, all the way down, before anything is read: a standard user can't have planted or
+    // changed any of it (and can't change it after this check).
+    if (!check(backupRoot, &e) || !TreeTrusted(dir, check, &e)) return refuse(std::wstring(kUntrusted) + L" (" + e + L").");
     if (GetFileAttributesW(sys::ToExtended(dir + L"\\journal.txt").c_str()) == INVALID_FILE_ATTRIBUTES)
         return refuse(L"This folder has no journal.txt, so it isn't a Hadron write backup.");
     std::string man;
@@ -718,9 +902,19 @@ bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, 
         while (!l.empty() && l.back() == L'\r') l.pop_back();
         if (!l.empty()) lines.push_back(l);
     }
-    if (lines.empty() || lines[0] != FromUtf8(kManifestHeader)) return refuse(L"manifest.txt isn't a Hadron backup manifest.");
+    if (lines.empty() || lines[0] != FromUtf8(kManifestHeader))
+        return refuse(L"manifest.txt isn't a version 2 Hadron backup manifest (\"" + FromUtf8(kManifestHeader) + L"\").");
+    auto keyed = [&](size_t i, const wchar_t* key, std::wstring* v) {
+        if (i >= lines.size()) return false;
+        size_t tab = lines[i].find(L'\t');
+        if (tab == std::wstring::npos || lines[i].substr(0, tab) != key) return false;
+        *v = lines[i].substr(tab + 1);
+        return true;
+    };
+    std::wstring mBoard, mBios;
+    if (!keyed(1, L"board", &mBoard) || !keyed(2, L"bios", &mBios)) return refuse(L"manifest.txt has no board/BIOS lines.");
     std::set<VarKey> seen;
-    for (size_t i = 1; i < lines.size(); i++) {
+    for (size_t i = 3; i < lines.size(); i++) {
         std::vector<std::wstring> f;
         for (size_t p = 0;;) {
             size_t q = lines[i].find(L'\t', p);
@@ -748,6 +942,12 @@ bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, 
     }
     if (seen.size() != out->vars.size()) return refuse(L"The backup holds variables manifest.txt doesn't list.");
     if (seen.empty()) return refuse(L"manifest.txt lists no variables.");
+    // The guard reads the verified manifest; system.txt must agree with it.
+    if (!out->hasSystem || out->sysBoard != mBoard || out->sysBios != mBios)
+        return refuse(L"system.txt doesn't match manifest.txt (board \"" + out->sysBoard + L"\" / BIOS \"" + out->sysBios +
+                      L"\" against \"" + mBoard + L"\" / \"" + mBios + L"\"): the file was changed.");
+    out->sysBoard = mBoard;
+    out->sysBios = mBios;
     return true;
 }
 
@@ -777,7 +977,7 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
     // One writer at a time across every Hadron process in this session, for the whole run.
     WriteLock lock;
     std::wstring lockErr;
-    if (!lock.Take(&lockErr)) return stop(lockErr);
+    if (!lock.Take(opt.lockName.empty() ? std::wstring(kWriteMutexName) : opt.lockName, &lockErr)) return stop(lockErr);
     if (plan.vars.empty()) return stop(L"The plan is empty.");
     // Static checks again (defence in depth): same size, never 0, attributes exactly NV|BS|RT, only
     // the planned bytes change.
@@ -827,6 +1027,10 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
         stamp = b;
     }
     std::wstring dir, e;
+    // Every folder and file of the session gets the admin-only descriptor (owner Administrators), so a
+    // restore and the start-up banner can trust it.
+    BackupSd sd;
+    if (!sd.Make(&e)) return stop(L"Backup failed: " + e + L" Nothing was written.");
     if (!CreateBackupSession(backupRoot, stamp, &dir, &e)) return stop(L"Backup failed: " + e + L" Nothing was written.");
     out->backupDir = sys::ToShell(sys::ToExtended(dir));
     out->started = true;
@@ -834,9 +1038,9 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
     sr.folder = out->backupDir;
     if (!WriteSnapshotFiles(dir, current, smb,
                             plan.restore ? L"Hadron BIOS module (backup before a restore)" : L"Hadron BIOS module (backup before a write)",
-                            &sr))
+                            &sr, sd.Sa()))
         return stop(L"Backup failed: " + sr.error + L" Nothing was written.");
-    if (!WriteNewFile(dir + L"\\plan.txt", "\xEF\xBB\xBF" + ToUtf8(plan.Text()), &e))
+    if (!WriteNewFile(dir + L"\\plan.txt", "\xEF\xBB\xBF" + ToUtf8(plan.Text()), &e, sd.Sa()))
         return stop(L"Backup failed: " + e + L" Nothing was written.");
     {
         SnapLoad chk;
@@ -850,11 +1054,11 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
     // manifest.txt marks the folder as Hadron's own session; a restore checks every byte against it.
     {
         std::string man;
-        if (!ManifestText(current, &man, &e) || !WriteNewFile(dir + L"\\manifest.txt", man, &e))
+        if (!ManifestText(current, smb, &man, &e) || !WriteNewFile(dir + L"\\manifest.txt", man, &e, sd.Sa()))
             return stop(L"Backup failed: " + e + L" Nothing was written.");
     }
     Journal j;
-    if (!j.Open(dir + L"\\journal.txt", &e)) return stop(e + L" Nothing was written.");
+    if (!j.Open(dir + L"\\journal.txt", sd.Sa(), &e)) return stop(e + L" Nothing was written.");
     LogLine(LogLevel::Info, L"backup saved to " + out->backupDir + L"\r\n" + plan.Text());
 
     // 4-6, per variable, stopping at the first failure.
@@ -959,9 +1163,16 @@ bool JournalIncomplete(const std::string& journal, std::vector<std::wstring>* va
     return !open.empty();
 }
 
-bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int newest) {
+bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int newest, const TrustFn& trust) {
     *out = IncompleteSession{};
     if (root.empty()) return false;
+    if (GetFileAttributesW(sys::ToExtended(root).c_str()) == INVALID_FILE_ATTRIBUTES) return false;   // no backups yet
+    const TrustFn check = trust ? trust : TrustFn(PathTrusted);
+    std::wstring why;
+    if (!check(root, &why)) {
+        LogLine(LogLevel::Warn, L"unfinished-write check skipped: the backup folder isn't admin-only (" + why + L")");
+        return false;
+    }
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(sys::ToExtended(root + L"\\*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -983,9 +1194,16 @@ bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int
     for (auto& s : sessions) names.push_back(s.second);
     for (int i = 0; i < (int)names.size() && i < newest; i++) {
         std::wstring dir = root + L"\\" + names[(size_t)i];
-        HANDLE f = CreateFileW(sys::ToExtended(dir + L"\\journal.txt").c_str(), GENERIC_READ,
+        const std::wstring jp = dir + L"\\journal.txt";
+        if (GetFileAttributesW(sys::ToExtended(jp).c_str()) == INVALID_FILE_ATTRIBUTES) continue;   // stopped before writing
+        if (!check(dir, &why) || !check(jp, &why)) {
+            // Not one of Hadron's own sessions (or changed without admin rights): never a banner.
+            LogLine(LogLevel::Warn, L"ignored " + sys::ToShell(sys::ToExtended(dir)) + L": " + kUntrusted + L" (" + why + L")");
+            continue;
+        }
+        HANDLE f = CreateFileW(sys::ToExtended(jp).c_str(), GENERIC_READ,
                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (f == INVALID_HANDLE_VALUE) continue;   // a session that stopped before writing has no journal
+        if (f == INVALID_HANDLE_VALUE) continue;
         std::string text(64 * 1024, '\0');
         DWORD got = 0;
         BOOL r = ReadFile(f, &text[0], (DWORD)text.size(), &got, nullptr);

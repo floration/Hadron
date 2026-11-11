@@ -153,33 +153,62 @@ struct ExecResult {
 };
 struct ExecOptions {
     std::wstring stamp;                     // backup folder name; empty = local time yyyyMMdd-HHmmss
+    std::wstring lockName;                  // write-lock mutex; empty = kWriteMutexName (selftests use their own)
 };
 using ProgressFn = std::function<void(int done, int total, const std::wstring& what)>;
 
-// Creates <root>\<stamp>[-N]\ (never reuses a folder: -2, -3 ... on ERROR_ALREADY_EXISTS), creating
-// root first if needed. *dir gets the full path.
+// ---- trust: the backup folders are admin-only ------------------------------------------------------
+// The restore and the "didn't finish" banner trust only folders and files a non-elevated process can't
+// have changed: otherwise a standard user could plant a "backup" (with a matching manifest) and have the
+// elevated Hadron write its bytes. The policy (SdTrusted): the owner is BUILTIN\Administrators or
+// SYSTEM; there is a DACL and it isn't NULL; no access-allowed ACE (any allowed type, inherit-only ones
+// included) grants a write, append, attribute/EA write, delete, delete-child, WRITE_DAC, WRITE_OWNER,
+// GENERIC_WRITE, GENERIC_ALL or MAXIMUM_ALLOWED right to any SID other than SYSTEM or Administrators.
+bool SdTrusted(PSECURITY_DESCRIPTOR sd, std::wstring* why);
+// Reads path's owner and DACL (GetNamedSecurityInfoW) and applies SdTrusted.
+bool PathTrusted(const std::wstring& path, std::wstring* why);
+// What LoadBackupSession / FindIncompleteSession use to judge a path; empty = PathTrusted.
+using TrustFn = std::function<bool(const std::wstring& path, std::wstring* why)>;
+// The descriptor every backup folder and file is created with: owner Administrators, a protected DACL
+// with SYSTEM and Administrators full control and Authenticated Users read/execute, inherited by children.
+constexpr const wchar_t* kBackupSddl = L"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)";
+// Creates root's parents (plain) and root itself with kBackupSddl; if root already exists (a folder, not
+// a link), re-applies that owner and protected DACL to it (SetNamedSecurityInfoW).
+bool PrepareBackupRoot(const std::wstring& root, std::wstring* err);
+
+// Creates <root>\<stamp>[-N]\ with kBackupSddl (never reuses a folder: -2, -3 ... on ERROR_ALREADY_EXISTS),
+// preparing root first (PrepareBackupRoot). *dir gets the full path.
 bool CreateBackupSession(const std::wstring& root, const std::wstring& stamp, std::wstring* dir, std::wstring* err);
 
 // SHA-256 (BCrypt) as 64 lowercase hex digits. false + *err when BCrypt fails.
 bool Sha256Hex(const std::vector<uint8_t>& data, std::wstring* hex, std::wstring* err);
-// manifest.txt of a backup session: a "Hadron BIOS backup manifest 1" line, then one line per variable,
-// tab-separated: name, guid, size, attributes (hex), SHA-256 of the bytes. Written CREATE_NEW + flushed
-// by Execute before the journal opens, so only Hadron's own sessions have one.
-bool ManifestText(const std::vector<FwVar>& vars, std::string* text, std::wstring* err);
+// The board / BIOS strings a snapshot's system.txt carries for this SMBIOS read (what SnapLoad's
+// sysBoard / sysBios come back as).
+std::wstring SmbiosBoardLine(const SmbiosInfo& smb);
+std::wstring SmbiosBiosLine(const SmbiosInfo& smb);
+// manifest.txt of a backup session, tab-separated lines: "Hadron BIOS backup manifest 2"; "board", the
+// board line; "bios", the BIOS line (both from the SMBIOS read at backup time); then one line per
+// variable: name, guid, size, attributes (hex), SHA-256 of the bytes. Written CREATE_NEW + flushed by
+// Execute before the journal opens, so only Hadron's own sessions have one.
+bool ManifestText(const std::vector<FwVar>& vars, const SmbiosInfo& smb, std::string* text, std::wstring* err);
 
-// Loads a backup session for a restore, refusing (false + out->error) unless it is one of Hadron's own:
-// dir is a folder (not a link) directly under backupRoot (both resolved with GetFinalPathNameByHandleW),
-// it has manifest.txt and journal.txt, it loads as a snapshot, and its variables are exactly the
-// manifest's, each with the manifest's size, NV|BS|RT attributes and SHA-256. The board/BIOS check on
-// system.txt stays with BuildRestorePlan. Worker thread: reads files only.
-bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, SnapLoad* out);
+// Loads a backup session for a restore, refusing (false + out->error, no vars) unless it is one of
+// Hadron's own: dir is a folder (not a link) directly under backupRoot (both resolved with
+// GetFinalPathNameByHandleW); the root, the session folder and everything in it pass trust (no links);
+// it has manifest.txt (v2) and journal.txt; it loads as a snapshot; its variables are exactly the
+// manifest's, each with the manifest's size, NV|BS|RT attributes and SHA-256; and system.txt agrees with
+// the manifest's board/BIOS lines. sysBoard/sysBios come from the manifest, for BuildRestorePlan's guard.
+// Worker thread: reads files only.
+bool LoadBackupSession(const std::wstring& backupRoot, const std::wstring& dir, SnapLoad* out, const TrustFn& trust = {});
 
-// The named mutex Execute holds for its whole run, so two Hadron windows (suite and standalone, or two
-// copies) never write firmware at the same time.
-constexpr const wchar_t* kWriteMutexName = L"Local\\Hadron.bios.fwwrite";
+// The named mutex Execute holds for its whole run. Global: firmware is machine-wide, so two Hadron
+// windows in any session (suite and standalone, two copies, two users) never write at the same time.
+constexpr const wchar_t* kWriteMutexName = L"Global\\Hadron.bios.fwwrite";
 
-// Runs on the Worker. Holds kWriteMutexName for the whole run and refuses when another process or thread
-// holds it. Holds SeSystemEnvironmentPrivilege on this thread only (ThreadPrivilege) and
+// Runs on the Worker. Holds the write lock (opt.lockName, or kWriteMutexName) for the whole run and
+// refuses when it can't be created or opened (access denied, say), when another thread or process holds
+// it, or when its last holder ended without releasing it (WAIT_ABANDONED: a write stopped midway).
+// Holds SeSystemEnvironmentPrivilege on this thread only (ThreadPrivilege) and
 // refuses without it. Steps 1-3 (SMBIOS guard, drift check, backup of every planned variable) run for
 // all variables before the first write; then per variable: journal BEGIN, re-check drift, write,
 // read back, journal OK, or restore and stop. cancelled() is polled before each variable only.
@@ -191,10 +220,11 @@ bool Execute(FwBackend& be, const Plan& plan, const std::wstring& backupRoot, co
 // (a write that may not have finished, or a restore that failed). *vars gets those variable names.
 bool JournalIncomplete(const std::string& journal, std::vector<std::wstring>* vars);
 struct IncompleteSession { std::wstring dir, stamp; std::vector<std::wstring> vars; };
-// Looks at the newest session under root (by the folder's creation time, name breaking ties, among the
-// newest `newest`) that has a journal and reports it when that journal is incomplete. UI thread: reads
-// one small file.
-bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int newest = 8);
+// Looks at the newest trusted session under root (by the folder's creation time, name breaking ties,
+// among the newest `newest`) that has a journal and reports it when that journal is incomplete. Nothing
+// is reported when the root fails trust; a session folder or journal that fails trust is skipped and
+// logged. UI thread: reads one small file.
+bool FindIncompleteSession(const std::wstring& root, IncompleteSession* out, int newest = 8, const TrustFn& trust = {});
 
 // %LOCALAPPDATA%\Hadron\bios-backups (not created here). Empty when the folder can't be resolved.
 std::wstring DefaultBackupRoot();
