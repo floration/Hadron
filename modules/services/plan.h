@@ -49,6 +49,7 @@ struct PlanRow {
     StartCfg before, after;
     WriteOp op;
     std::vector<std::wstring> deps;    // the item's DependOnService, for ordering
+    std::wstring group;                // the item's load-order group: a "+group" dependency orders it too (R17)
     bool include = true, canToggle = true;
     std::wstring blocked;              // non-empty: shown for information, never applied
     std::wstring reason, basis, basisNote, evidence, warning, contested;
@@ -73,13 +74,20 @@ struct Plan {
     int what = -1;                     // control plans: 0 start, 1 stop, 2 restart
     DWORD tiPid = 0;                   // "ti-stop:" plans: the TrustedInstaller process Hadron started (R4)
     uint64_t tiPstart = 0;
+    // What the plan screen shows instead of a bare "Nothing to change." when the plan has no rows for a reason the
+    // user must see (R20: no Windows-stock data for this build). Also in notes.
+    std::wstring emptyText;
     int Included() const;
     int Optional() const;
     int Blocked() const;
 };
 
 Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ctx& c);
+// stock: Windows stock values from the KB (R20: an empty plan says Hadron has no data for the build). Else "as first
+// seen": first.txt, only when it is from this PC (machine GUID) and this Windows build (R11).
 Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const Ctx& c);
+// "10.0.19045.5737" and "19045" -> "19045": the build number alone, for comparing builds.
+std::wstring BuildNumber(const std::wstring& build);
 Plan BuildSingle(const SvcItem& item, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c);
 // Stop / Start / Restart a service (spec §5.2): dependents that will stop are listed first.
 // Never-touch items (and anything whose stop would stop one as a dependent) come back with every row blocked (R5).
@@ -136,6 +144,9 @@ struct ApplyEnv {
     std::wstring build, machine;
     int crashAfterBegin = -1;   // selftest: stop dead after the I record and the write of this seq
     int failFlushAfter = -1;    // selftest: the undo log's flush fails after this many records
+    // R12: every plan but an Undo is refused while the data folder has no first.txt (it failed to write, or was
+    // removed): a change with no record of the state before Hadron is never made. The selftest's fixtures turn it off.
+    bool requireFirst = true;
 };
 
 struct ApplyResult {

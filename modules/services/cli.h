@@ -32,7 +32,8 @@ int RunSelftest(const std::vector<std::wstring>& args);    // exit 0 = every che
 // --dump-plan <bloat|stripped|minimum|default|stock> --tab <services|drivers> --fixture <dir> [--out <file>]
 int RunDumpPlan(const std::vector<std::wstring>& args);
 // --live-test <HadronTest*> [--ti] [--data-dir <dir>]: plan, apply, verify, undo, verify on one dummy
-// service that the CI script created. Refuses any other name.
+// service that the CI script created. Refuses any other name. Only in a -DHADRON_SERVICES_TEST_HOOKS=ON build (R25):
+// a release build prints that it is not in this build and returns 2.
 int RunLiveTest(const std::vector<std::wstring>& args);
 
 // Preset level from its CLI name: 0..2 for the KB levels, LEVEL_DEFAULT for "default" (first snapshot),

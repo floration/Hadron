@@ -44,7 +44,7 @@ wswait
 
 echo "== golden plans"
 for tab in services drivers; do
-    for lvl in default bloat stripped minimum; do
+    for lvl in default bloat stripped minimum stock; do
         wine "$BUILD/HadronServices.exe" --dump-plan "$lvl" --tab "$tab" --fixture "$FIX" --out "$TMP/plan-$tab-$lvl.txt"
         cmp "$TMP/plan-$tab-$lvl.txt" "$HERE/tests/golden/services/plan-$tab-$lvl.txt"
     done
@@ -52,7 +52,7 @@ done
 # A7 regression: a lingering DelayedAutostart=1 under Manual, restored to plain Auto.
 wine "$BUILD/HadronServices.exe" --dump-plan default --tab services --fixture "$FIX/delayedlinger" --out "$TMP/plan-delayedlinger.txt"
 cmp "$TMP/plan-delayedlinger.txt" "$HERE/tests/golden/services/plan-services-default-delayedlinger.txt"
-echo "ok: 8 plans and the delayedlinger plan match tests/golden/services"
+echo "ok: 10 plans and the delayedlinger plan match tests/golden/services"
 wswait
 
 shot() {   # name exe args...

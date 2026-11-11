@@ -272,6 +272,7 @@ std::wstring DepViolation(const Plan& p, const std::vector<SvcItem>& items, int 
 PlanRow Lower4(const SvcItem& s, bool include = true) {
     PlanRow r;
     r.name = s.name;
+    r.group = s.group;
     r.before = s.cfg;
     r.after = StartCfg{4, s.cfg.delayed};
     r.op = WriteOp{4, -1};
@@ -375,6 +376,7 @@ ApplyEnv EnvFor(Backend* b, Store* s) {
     e.lockName = LockName();
     e.build = L"19045";
     e.machine = L"6f1c2a4e-fixture-0000-0000-000000000001";
+    e.requireFirst = false;   // most temp data dirs have no first.txt; the R12 check turns it back on
     return e;
 }
 
@@ -790,6 +792,11 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         const PlanRow* ud = RowOf(st, L"SSDPSRV");
         check(ud && ud->blocked.empty() && !ud->include && ud->canToggle && ud->evidence.rfind(L"use cannot be detected", 0) == 0,
               L"Stripped: a row whose use cannot be detected is offered unticked, with the reason");
+        const PlanRow* um = RowOf(mn, L"SSDPSRV");
+        const PlanRow* fm = RowOf(mn, L"FrameServer");
+        check(um && um->blocked.empty() && um->include && um->evidence.find(L"ticked at Minimum") != std::wstring::npos &&
+                  fm && !fm->include,
+              L"R18: at Minimum a row whose use cannot be detected is ticked and says so; a hot-plug class stays unticked");
         const PlanRow* fs = RowOf(st, L"FrameServer");
         check(fs && fs->blocked.empty() && !fs->include && fs->evidence.find(L"hot-plug") != std::wstring::npos,
               L"Stripped: a never-seen hot-plug class (camera) is offered unticked");
@@ -806,7 +813,9 @@ int RunSelftest(const std::vector<std::wstring>& args) {
               L"Minimum adds the contested items and keeps Bloat's (cumulative)");
         check(RowOf(dv, L"igfxn") && RowOf(dv, L"igfxn")->include && RowOf(dv, L"BTHUSB") && !RowOf(dv, L"BTHUSB")->blocked.empty(),
               L"Drivers Stripped: igfxn (absent) ticked, BTHUSB (radio present) kept");
-        check(db.Included() == 0, L"Drivers Bloat: near-empty, and the plan says so");
+        bool dbNote = false;
+        for (auto& n : db.notes) if (n.find(L"Pure bloat removal has no drivers") == 0) dbNote = true;
+        check(db.rows.empty() && dbNote, L"Drivers Bloat: empty, and the plan says why");
         bool noFloor = true;
         for (auto* p : {&bl, &st, &mn, &dv})
             for (auto& r : p->rows)
@@ -884,13 +893,13 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         Ctx co = w.ctx;
         co.build = L"22631";
         Plan so = BuildDefault(true, TAB_SERVICES, w.items, co);
-        check(so.rows.empty() && !so.notes.empty() && so.notes[0].find(L"19045") != std::wstring::npos,
+        check(so.rows.empty() && !so.notes.empty() && so.notes[0].find(L"no Windows-stock data for build 22631") != std::wstring::npos,
               L"Windows stock on another build: refused with the reason");
         // Goldens: every level x tab.
-        const wchar_t* lv[] = {L"default", L"bloat", L"stripped", L"minimum"};
+        const wchar_t* lv[] = {L"default", L"bloat", L"stripped", L"minimum", L"stock"};
         const wchar_t* tb[] = {L"services", L"drivers"};
         for (int t = 0; t < 2; t++)
-            for (int l = 0; l < 4; l++) {
+            for (int l = 0; l < 5; l++) {
                 std::string got = DumpPlan(PlanFor(LevelFromName(lv[l]), t, w));
                 std::wstring gp = golden + L"\\plan-" + tb[t] + L"-" + lv[l] + L".txt";
                 if (update) { check(WriteAll(gp, got), L"wrote golden " + gp); continue; }
@@ -1794,8 +1803,8 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         std::wstring bt = TiLeftText(logs, items);
         check(rec && TiLeftRunning(logs, items) && bt.find(L"process " + std::to_wstring(tiNow->pid)) != std::wstring::npos &&
                   bt.find(L"20261111-130000 UTC") != std::wstring::npos && bt.find(L"Stripped") != std::wstring::npos &&
-                  bt.find(L"could not stop") != std::wstring::npos && bt.find(L"preset:") == std::wstring::npos,
-              L"R4: the banner claims TrustedInstaller while it is that process; its text (stamp, preset, start type, stop failure) comes from data");
+                  bt.find(L"its stop failed") != std::wstring::npos && bt.find(L"preset:") == std::wstring::npos,
+              L"R4: the banner claims TrustedInstaller while it is that process; its text (process, stamp, preset, stop failure) comes from data");
         // The banner's Stop it, while it is still that process: stopped, and the claim is closed by a ti-resolved log.
         Plan sp = BuildControl(*tiNow, 1, a.fx.backend, items, a.ctx);
         MarkTiStop(&sp, logs, items);
@@ -1995,6 +2004,139 @@ int RunSelftest(const std::vector<std::wstring>& args) {
               L"R9: Dismiss writes a dismiss log under the apply lock; the banner goes and the apply's log stays");
     }
 
+    // ---- R11 and Q3: Default (as first seen); R12: first.txt missing, recovery retried, applies refused -------------
+    {
+        World a;
+        freshWorld(&a);
+        std::wstring e;
+        Plan d0 = BuildDefault(false, TAB_SERVICES, a.items, a.ctx);
+        check(d0.title == L"Default: as first seen (Services)" && !d0.notes.empty() &&
+                  d0.notes[0] == L"Start types as Hadron first saw this PC on 2026-11-01. This is not Windows' default.",
+              L"Q3: Default (as first seen) is titled so and says first what it is, and that it is not Windows' default");
+        Snapshot up = *a.ctx.first;
+        up.meta[L"build"] = L"10.0.19044.1288";   // taken before an in-place upgrade
+        Ctx cu = a.ctx;
+        cu.first = &up;
+        Plan d1 = BuildDefault(false, TAB_SERVICES, a.items, cu);
+        Snapshot nm = *a.ctx.first;
+        nm.meta.erase(L"machine");
+        Ctx cn = a.ctx;
+        cn.first = &nm;
+        Plan d2 = BuildDefault(false, TAB_SERVICES, a.items, cn);
+        Ctx cm = a.ctx;
+        cm.machine.clear();
+        Plan d3 = BuildDefault(false, TAB_SERVICES, a.items, cm);
+        check(d1.rows.empty() && !d1.notes.empty() && d1.notes[0].find(L"build 10.0.19044.1288") != std::wstring::npos &&
+                  d2.rows.empty() && d2.notes[0].find(L"no machine GUID") != std::wstring::npos && d3.rows.empty() &&
+                  BuildNumber(L"10.0.19045.5737") == L"19045" && BuildNumber(L"19045") == L"19045",
+              L"R11: Default (as first seen) refuses a snapshot from another Windows build, or with no machine GUID on either side");
+        // R12: undo logs but no first.txt -> a baseline, labelled so.
+        Store s(NewTempDir(L"first-missing"));
+        std::string lg = "HXSVC\t1\tundo\n" + Record({L"B", L"20261111-090000", L"single", L"0", a.ctx.machine, a.ctx.build, L"1"}) +
+                         Record({L"E", L"20261111-090000", L"0", L"0", L"0", L"done"});
+        s.WriteNew(L"undo-20261111-090000.log", lg, &e);
+        Snapshot bf;
+        FirstRunResult fr = EnsureFirstSnapshot(s, a.items, a.ctx, &bf);
+        Ctx cb = a.ctx;
+        cb.first = &bf;
+        Plan db = BuildDefault(false, TAB_SERVICES, a.items, cb);
+        check(fr.wrote && bf.meta[L"kind"] == L"baseline (not first run)" && fr.note.find(L"baseline") != std::wstring::npos &&
+                  !db.notes.empty() && db.notes[0].find(L"not how Hadron first saw this PC") != std::wstring::npos,
+              L"R12: first.txt missing while undo logs exist -> recorded as a baseline, and Default says so");
+        // R12: recovery\first without its zip (an earlier failed try) -> written again as first-2; complete -> left alone.
+        Store s2(NewTempDir(L"first-retry"));
+        Snapshot f2;
+        EnsureFirstSnapshot(s2, a.items, a.ctx, &f2);
+        bool firstOk = s2.Exists(L"recovery\\first\\restore.cmd") && s2.Exists(L"recovery-first.zip");
+        std::wstring aside;
+        bool moved = s2.RenameAside(L"recovery-first.zip", &aside, &e);
+        FirstRunResult r2 = EnsureFirstSnapshot(s2, a.items, a.ctx, &f2);
+        FirstRunResult r3 = EnsureFirstSnapshot(s2, a.items, a.ctx, &f2);
+        std::string rd2;
+        s2.Read(L"recovery\\first-2\\README.txt", &rd2, &e);
+        check(firstOk && moved && r2.existed && r2.error.empty() && s2.Exists(L"recovery\\first-2\\restore.cmd") &&
+                  s2.Exists(L"recovery-first-2.zip") && r2.note.find(L"first-2") != std::wstring::npos && r3.note.empty() &&
+                  !s2.Exists(L"recovery\\first-3") && rd2.find("Default: as first seen") != std::string::npos,
+              L"R12: a recovery\\first left without its zip is written again as first-2 (the old one kept), once");
+        // R12: no first.txt -> every apply but an Undo is refused, before anything is written.
+        Store s3(NewTempDir(L"first-required"));
+        Plan p = BuildSingle(*ItemOf(a.items, L"MapsBroker"), StartCfg{3, -1}, a.items, a.ctx);
+        ApplyEnv env = EnvFor(&a.fx.backend, &s3);
+        env.requireFirst = true;
+        ApplyResult ar;
+        bool ok = RunApply(p, env, &ar);
+        Plan u = p;
+        u.kind = PlanKind::Undo;
+        ApplyResult ur;
+        bool uok = RunApply(u, env, &ur);
+        check(!ok && ar.aborted && ar.error.find(L"first.txt") != std::wstring::npos && s3.List(L"snap-*.txt").size() == 1 && uok,
+              L"R12: with no first.txt an apply is refused before any write; an Undo still runs");
+    }
+
+    // ---- R20: Windows stock with no data; R17: a +group dependent whose write failed -------------------------------
+    {
+        World a;
+        freshWorld(&a);
+        Plan s0 = PlanFor(-2, TAB_SERVICES, a);
+        Ctx co = a.ctx;
+        co.build = L"22631";
+        Plan s1 = BuildDefault(true, TAB_DRIVERS, a.items, co);
+        const std::wstring want0 = L"Hadron has no Windows-stock data for build 19045 yet: nothing will be changed.";
+        check(s0.rows.empty() && s0.emptyText == want0 && s0.notes.size() == 1 && s0.notes[0] == want0 &&
+                  s1.emptyText == L"Hadron has no Windows-stock data for build 22631 yet: nothing will be changed.",
+              L"R20: Windows stock with no data says so (never a bare \"Nothing to change.\"), on any build");
+        std::vector<SvcItem> gi = {Mk(L"gmem", 3, {}), Mk(L"gdep", 3, {L"+grp"})};
+        gi[0].group = L"GRP";
+        FakeBackend fb;
+        fb.SetItems(gi);
+        fb.faults.deny = {L"gdep"};
+        Plan pg;
+        pg.rows = {Lower4(gi[1]), Lower4(gi[0])};
+        Store s(NewTempDir(L"group-dep"));
+        ApplyResult ar;
+        RunApply(pg, EnvFor(&fb, &s), &ar);
+        int memStart = -1;
+        for (auto& i : fb.Items()) if (i.name == L"gmem") memStart = i.cfg.start;
+        bool skipped = false;
+        for (auto& l : ar.lines) if (l.rfind(L"skip gmem", 0) == 0 && l.find(L"gdep") != std::wstring::npos) skipped = true;
+        std::vector<size_t> go = ApplyOrder(pg);
+        check(go.size() == 2 && pg.rows[go[0]].name == L"gdep",
+              L"R17: apply order puts a dependent on +group before the group's members when lowering");
+        check(skipped && memStart == 3, L"R17: a dependent on +group whose write failed keeps every member of the group from being lowered");
+    }
+
+    // ---- R16 and the recovery README (cat 6) -----------------------------------------------------------------------
+    {
+        std::vector<RestoreRow> rows = {{L"DiagTrack", {3, -1}, false}, {L"Evil\r\nreg add HKLM\\X", {4, -1}, false},
+                                        {L"Br]acket", {3, -1}, false}, {L"D\u00e9mo", {3, -1}, false}};
+        std::string cmd = RestoreCmd(L"20261111-101500", L"t\r\necho pwned", rows);
+        std::string reg = UnicodeReg(rows, 1);
+        std::wstring regW;
+        for (size_t i = 2; i + 1 < reg.size(); i += 2) regW += (wchar_t)((unsigned char)reg[i] | ((unsigned char)reg[i + 1] << 8));
+        std::string rd = ReadmeTxt(L"20261111-101500", L"C:\\ProgramData\\Hadron\\services\\recovery\\20261111-101500", L"t", rows);
+        bool oneLineTitle = cmd.find("t echo pwned") != std::string::npos && cmd.find("\r\necho pwned") == std::string::npos;
+        check(oneLineTitle && regW.find(L"Evil") == std::wstring::npos && regW.find(L"Br]acket") == std::wstring::npos &&
+                  regW.find(L"D\u00e9mo") != std::wstring::npos && rd.find("Evil  reg add") != std::string::npos &&
+                  rd.find("can't go in a .reg file either") != std::string::npos && rd.find("\nreg add") == std::string::npos &&
+                  !RegSafeName(L"a\nb") && !RegSafeName(L"a]b") && RegSafeName(L"Intel(R) X"),
+              L"R16: CR/LF and other control characters never start a line in restore.cmd, the .reg files or README.txt");
+        check(rd.find("While Windows runs, this folder is C:\\ProgramData\\Hadron\\services\\recovery\\20261111-101500") != std::string::npos &&
+                  rd.find("     D:\\ProgramData\\Hadron\\services\\recovery\\20261111-101500\\restore.cmd D:") != std::string::npos &&
+                  rd.find("     C:\\ProgramData\\Hadron\\services\\recovery-20261111-101500.zip") != std::string::npos &&
+                  rd.find("dir D:\\ProgramData\\Hadron\\services\\recovery") != std::string::npos &&
+                  rd.find("Repair your computer") != std::string::npos && rd.find("Run the newest folder first") != std::string::npos &&
+                  rd.find("WinRE has no Explorer to open a .zip (reasoning)") != std::string::npos &&
+                  rd.find("use Undo.") != std::string::npos && rd.find("WinRE can't open") == std::string::npos,
+              L"README: the folder with its drive, the zip's real path, how to choose a folder, the install-media fallback");
+        std::string ru = ReadmeTxt(L"20261111-101500", L"\\\\nas\\share\\hadron\\recovery\\20261111-101500", L"t", rows);
+        check(ru.find("on a network share") != std::string::npos && ru.find("D:\\\\nas") == std::string::npos &&
+                  ru.find("Run the copy on the USB stick") != std::string::npos,
+              L"README: a data folder on a UNC share says to copy it to a USB stick (no D:\\\\server path)");
+        std::string nw = RestoreCmd(L"x", L"t", rows);
+        check(nw.find("BitLocker-locked drive shows no Windows folder") != std::string::npos,
+              L"restore.cmd: the no-Windows message names a BitLocker-locked drive");
+    }
+
     // ---- A5: the data folder is never followed through a link, and is owned by Administrators or SYSTEM -----------
     {
         std::wstring base = NewTempDir(L"root");
@@ -2143,6 +2285,13 @@ int RunDumpPlan(const std::vector<std::wstring>& args) {
 // ============================================================================================
 // --live-test: CI only, on a dummy service the workflow created with sc.exe (HadronTest*). Anything else is refused.
 int RunLiveTest(const std::vector<std::wstring>& args) {
+#ifndef HX_SERVICES_TEST_HOOKS
+    // R25: a release build has no command-line write path. CI's live test uses a -DHADRON_SERVICES_TEST_HOOKS=ON build.
+    (void)args;
+    wprintf(L"--live-test is not in this build (it exists only in a -DHADRON_SERVICES_TEST_HOOKS=ON test build)\n");
+    fflush(stdout);
+    return 2;
+#else
     std::wstring name = ArgValue(args, L"--live-test");
     bool useTi = HasArg(args, L"--ti");
     wprintf(L"services live test: %ls%ls\n", name.c_str(), useTi ? L" (TrustedInstaller)" : L"");
@@ -2166,6 +2315,11 @@ int RunLiveTest(const std::vector<std::wstring>& args) {
     c.build = b->Build();
     c.machine = b->MachineGuid();
     c.tiOn = useTi;
+    {   // R12: an apply needs first.txt, as in the module (here it records the dummy service only)
+        Snapshot first;
+        FirstRunResult fr = EnsureFirstSnapshot(st, {item}, c, &first);
+        if (!fr.error.empty()) { wprintf(L"FAIL: first.txt: %ls\n", fr.error.c_str()); return 1; }
+    }
     const StartCfg original = item.cfg;
     int fails = 0;
     auto run = [&](const Plan& p, const wchar_t* what) {
@@ -2211,6 +2365,7 @@ int RunLiveTest(const std::vector<std::wstring>& args) {
     wprintf(L"services live test: %ls\n", fails ? L"FAIL" : L"PASS");
     fflush(stdout);
     return fails ? 1 : 0;
+#endif
 }
 
 }  // namespace hx::services

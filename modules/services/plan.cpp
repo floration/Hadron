@@ -248,7 +248,7 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
         r.before = s.cfg;
         r.after = StartCfg{t, s.cfg.delayed};
         r.op = WriteOp{t, -1};
-        r.deps = s.deps;
+        r.deps = s.deps; r.group = s.group;
         r.reason = e->WhyAt(level);
         r.basis = e->pbasis;
         r.basisNote = e->pbasisNote;
@@ -268,9 +268,15 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
             else if (h == 2) r.include = false;
         } else if (r.blocked.empty() && e->JoinLevel() == LV_STRIPPED) {
             // Spec 5.3: Stripped applies only where hardware or use is absent with evidence shown. Use without a
-            // hardware hint cannot be detected, so the row is offered unticked, like a hot-plug class.
-            r.evidence = L"use cannot be detected: tick if you don't use it";
-            r.include = false;
+            // hardware hint cannot be detected, so at Stripped the row is offered unticked, like a hot-plug class.
+            // R18 (proxy Q1): Minimum is "only what is needed to boot, network, play games and run Hadron", so there
+            // the same row is ticked and says so; plan, confirm and undo still gate it.
+            if (level == LV_STRIPPED) {
+                r.evidence = L"use cannot be detected: tick if you don't use it";
+                r.include = false;
+            } else {
+                r.evidence = L"use cannot be detected: ticked at Minimum, untick if you use it";
+            }
         }
         if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
         p.rows.push_back(std::move(r));
@@ -278,8 +284,8 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
     DependencyCheck(&p, items);
     SortRows(&p);
     if (tab == TAB_DRIVERS && level == LV_BLOAT)
-        p.notes.push_back(L"Pure bloat removal on the Drivers tab is expected to be near-empty: Hadron found no Microsoft source that names a "
-                          L"stock driver as safe to disable.");
+        p.notes.push_back(L"Pure bloat removal has no drivers: Hadron found no Microsoft source that names a stock driver as safe to "
+                          L"disable.");
     if (p.unknown)
         p.notes.push_back(std::to_wstring(p.unknown) + L" item(s) on this tab have no KB entry (third-party or unknown): never in a preset.");
     if (unreadable) p.notes.push_back(UnreadableNote(unreadable));
@@ -293,21 +299,44 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
     return p;
 }
 
+std::wstring BuildNumber(const std::wstring& build) {
+    auto parts = Split(build, L'.');
+    return parts.size() >= 3 ? parts[2] : build;
+}
+
 Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const Ctx& c) {
     Plan p;
     p.kind = PlanKind::Preset;
     p.level = LEVEL_DEFAULT;
     p.tab = tab;
     p.stock = stock;
-    p.title = std::wstring(stock ? L"Default: Windows stock" : L"Default: restore first snapshot") + L" (" + TabName(tab) + L")";
+    p.title = std::wstring(stock ? L"Default: Windows stock" : L"Default: as first seen") + L" (" + TabName(tab) + L")";
     p.source = std::wstring(stock ? L"default-stock:" : L"default-first:") + (tab == TAB_DRIVERS ? L"drivers" : L"services");
     if (!stock) {
         if (!c.first) { p.notes.push_back(L"No first-run snapshot yet: it is written the first time live data loads."); return p; }
-        auto m = c.first->meta.find(L"machine");
-        if (m != c.first->meta.end() && !c.machine.empty() && m->second != c.machine) {
-            p.notes.push_back(L"The first-run snapshot is from another PC (machine GUID differs): nothing to restore.");
+        auto meta = [&](const wchar_t* k) { auto it = c.first->meta.find(k); return it == c.first->meta.end() ? std::wstring() : it->second; };
+        const std::wstring fm = meta(L"machine"), fb = meta(L"build"), created = meta(L"created"), kind = meta(L"kind");
+        // R11: only a snapshot provably from this PC and this Windows build: an in-place upgrade sets new start types,
+        // and writing the old build's back is what Undo and Resume already refuse.
+        if (fm.empty() || c.machine.empty() || fm != c.machine) {
+            p.notes.push_back(fm.empty() ? L"The first-run snapshot records no machine GUID, so Hadron can't tell it is from this PC: nothing to restore."
+                              : c.machine.empty() ? L"This PC's machine GUID could not be read, so Hadron can't tell the first-run snapshot is from this PC: nothing to restore."
+                                                  : L"The first-run snapshot is from another PC (machine GUID differs): nothing to restore.");
             return p;
         }
+        if (BuildNumber(fb).empty() || BuildNumber(fb) != BuildNumber(c.build)) {
+            p.notes.push_back(L"The first-run snapshot was taken on Windows build " + (fb.empty() ? std::wstring(L"(missing)") : fb) +
+                              L"; this PC runs build " + (c.build.empty() ? std::wstring(L"(unknown)") : c.build) +
+                              L". Windows sets new start types when it upgrades, so nothing from the snapshot is offered.");
+            return p;
+        }
+        // Q3: say what this is, before anything else.
+        const std::wstring date = created.empty() ? std::wstring(L"an unknown date") : created.substr(0, 10);
+        if (kind == L"first")
+            p.notes.push_back(L"Start types as Hadron first saw this PC on " + date + L". This is not Windows' default.");
+        else
+            p.notes.push_back(L"Start types as Hadron recorded them on " + date + L", after earlier changes by Hadron: not how Hadron "
+                              L"first saw this PC. This is not Windows' default.");
         int added = 0, unreadable = 0;
         for (auto& s : items) {
             if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
@@ -318,7 +347,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (SameStart(s.cfg, f->cfg)) { p.alreadySet++; continue; }
             PlanRow r;
             r.name = s.name; r.display = s.display; r.driver = IsDriverType(s.type);
-            r.before = s.cfg; r.deps = s.deps;
+            r.before = s.cfg; r.deps = s.deps; r.group = s.group;
             r.op = OpTo(s.cfg, f->cfg);
             r.after = AfterOf(s.cfg, r.op);
             auto cr = c.first->meta.find(L"created");
@@ -339,9 +368,12 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
         if (added) p.notes.push_back(std::to_wstring(added) + L" item(s) are new since the first-run snapshot: left alone.");
         if (unreadable) p.notes.push_back(UnreadableNote(unreadable));
     } else {
+        // R20 (proxy Q2): never a bare "Nothing to change." that reads as "already at stock".
+        const std::wstring none = L"Hadron has no Windows-stock data for build " + (c.build.empty() ? std::wstring(L"(unknown)") : c.build) +
+                                  L" yet: nothing will be changed.";
         if (c.build != L"19045") {
-            p.notes.push_back(L"Windows stock values exist only for Windows 10 22H2 (build 19045); this PC is build " +
-                              (c.build.empty() ? std::wstring(L"unknown") : c.build) + L". Use Restore first snapshot instead.");
+            p.notes.push_back(none);
+            p.emptyText = none;
             return p;
         }
         int withStock = 0, total = 0;
@@ -356,7 +388,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (SameStart(s.cfg, t)) { p.alreadySet++; continue; }
             PlanRow r;
             r.name = s.name; r.display = s.display; r.driver = IsDriverType(s.type);
-            r.before = s.cfg; r.deps = s.deps;
+            r.before = s.cfg; r.deps = s.deps; r.group = s.group;
             r.op = OpTo(s.cfg, t);
             r.after = AfterOf(s.cfg, r.op);
             r.reason = L"Windows stock start type for build 19045";
@@ -369,6 +401,11 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
                 r.blocked = kSysStartKept + std::wstring(L" (its start type now)");
             if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
             p.rows.push_back(std::move(r));
+        }
+        if (withStock == 0) {
+            p.notes.push_back(none);
+            p.emptyText = none;
+            return p;
         }
         p.notes.push_back(std::to_wstring(withStock) + L" of " + std::to_wstring(total) +
                           L" items have a Windows stock value with a measured or published basis in Hadron's KB; the rest are left alone. "
@@ -389,7 +426,7 @@ Plan BuildSingle(const SvcItem& s, StartCfg target, const std::vector<SvcItem>& 
     p.title = L"Change start type: " + s.name;
     PlanRow r;
     r.name = s.name; r.display = s.display; r.driver = IsDriverType(s.type);
-    r.before = s.cfg; r.deps = s.deps;
+    r.before = s.cfg; r.deps = s.deps; r.group = s.group;
     r.after = StartCfg{target.start, s.cfg.delayed};
     r.op = WriteOp{target.start, -1};
     if (target.start == 2) {
@@ -520,7 +557,7 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items
             p.rows.push_back(r);
             continue;
         }
-        r.display = live.display; r.driver = IsDriverType(live.type); r.deps = live.deps;
+        r.display = live.display; r.driver = IsDriverType(live.type); r.deps = live.deps; r.group = live.group;
         r.before = live.cfg;
         if (SameStart(live.cfg, u0.before)) { p.alreadySet++; continue; }
         r.op = OpTo(live.cfg, u0.before);
@@ -564,7 +601,7 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
             p.rows.push_back(r);
             continue;
         }
-        r.display = live.display; r.driver = IsDriverType(live.type); r.deps = live.deps;
+        r.display = live.display; r.driver = IsDriverType(live.type); r.deps = live.deps; r.group = live.group;
         r.before = live.cfg;
         if (SameStart(live.cfg, u.after)) { p.alreadySet++; continue; }
         r.op = OpTo(live.cfg, u.after);
@@ -766,13 +803,22 @@ std::vector<size_t> ApplyOrder(const Plan& p) {
     // depends on; for raising, the reverse.
     auto order = [&](const std::vector<size_t>& set, bool dependentsFirst) {
         std::map<std::wstring, size_t> byName;
-        for (size_t i : set) byName[Lower(p.rows[i].name)] = i;
+        std::map<std::wstring, std::vector<size_t>> byGroup;   // R17: "+group" depends on every member of the group
+        for (size_t i : set) {
+            byName[Lower(p.rows[i].name)] = i;
+            if (!p.rows[i].group.empty()) byGroup[Lower(p.rows[i].group)].push_back(i);
+        }
         std::vector<size_t> out;
         std::set<size_t> done, active;
         std::function<void(size_t)> visit = [&](size_t i) {   // emits dependencies first
             if (done.count(i) || active.count(i)) return;
             active.insert(i);
             for (auto& d : p.rows[i].deps) {
+                if (d.size() > 1 && d[0] == L'+') {
+                    auto g = byGroup.find(Lower(d.substr(1)));
+                    if (g != byGroup.end()) for (size_t m : g->second) visit(m);
+                    continue;
+                }
                 auto it = byName.find(Lower(d));
                 if (it != byName.end()) visit(it->second);
             }
@@ -852,6 +898,12 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     ApplyLock lock;
     if (!lock.Acquire(env.lockName, &err)) { r->aborted = true; r->error = err; return false; }
     if (!st.EnsureRoot(true, &err)) { r->aborted = true; r->error = err; return false; }
+    if (env.requireFirst && p.kind != PlanKind::Undo && !st.Exists(L"first.txt")) {
+        r->aborted = true;
+        r->error = L"Hadron has no first-run snapshot (first.txt) in its data folder, so nothing was changed. It is written when "
+                   L"Hadron reads the live services: press Refresh, and read the notice if it fails again.";
+        return false;
+    }
     r->stamp = st.NewStamp();
     int order1 = 1;   // the B record's sequence number: the log order that does not depend on the clock
     for (auto& l : LoadLogs(st, nullptr)) order1 = std::max(order1, std::min(l.order, 1000000) + 1);   // a forged order can't overflow
@@ -869,7 +921,8 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     r->snapPath = st.Path(snapRel);
 
     // 3. The recovery folder and zip for this apply's "before" values. Any failure: change nothing.
-    if (!WriteRecovery(st, r->stamp, p.title, RowsFor(p, order), &r->recoveryDir, &r->zipPath, &err)) {
+    if (!WriteRecovery(st, r->stamp, L"start types as they were before " + p.title + L", applied " + r->stamp + L" UTC",
+                       RowsFor(p, order), &r->recoveryDir, &r->zipPath, &err)) {
         r->aborted = true;
         r->error = L"Could not write the recovery files, so nothing was changed: " + err;
         return false;
@@ -958,7 +1011,10 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
             std::wstring blocker;
             for (auto& o : p.rows)
                 if (failedLowering.count(Lower(o.name)))
-                    for (auto& d : o.deps) if (IEq(d, row.name)) blocker = o.name;
+                    for (auto& d : o.deps)
+                        // R17: a +group dependency protects every member of that group, like a named one.
+                        if (IEq(d, row.name) || (d.size() > 1 && d[0] == L'+' && !live.group.empty() && IEq(d.substr(1), live.group)))
+                            blocker = o.name;
             if (!blocker.empty()) {
                 failedLowering.insert(Lower(row.name));   // stays enabled, so it protects its own dependencies too
                 if (!done(L"skip", live.cfg, L"its dependent " + blocker + L" could not be changed")) return false;
@@ -1322,13 +1378,11 @@ std::wstring TiLeftText(const std::vector<UndoLog>& logs, const std::vector<SvcI
     TiClaim c = LiveTiClaim(logs, items);
     const SvcItem* ti = TiItem(items);
     if (c.log < 0 || !ti) return L"";
-    std::wstring t = L"Hadron started TrustedInstaller (process " + std::to_wstring(c.pid) + L") for " +
-                     (c.finished ? L"the apply of " : L"an apply that did not finish, ") + c.stamp + L" UTC (" +
-                     SourceLabel(c.source) + L"), and that same process is still running: the log has no record of stopping it" +
-                     (c.stopNote.empty() ? L"" : L" (" + c.stopNote + L")") + L". Its start type is " +
-                     StartLabel(ti->cfg, ti->trigger) +
-                     L". Windows starts it to install updates or features and stops it when idle (reasoning); you can also stop it now.";
-    return t;
+    // Two banner lines: the start type and the stop error are in the Stop it plan and the log.
+    return L"Hadron started TrustedInstaller (process " + std::to_wstring(c.pid) + L") for " + SourceLabel(c.source) + L", " +
+           c.stamp + L" UTC" + (c.finished ? L"" : L", which did not finish") + L", and " +
+           (c.stopNote.empty() ? L"has no record of stopping it" : L"its stop failed") +
+           L". That process is still running. Windows stops it when idle (reasoning); you can also stop it now.";
 }
 
 void MarkTiStop(Plan* p, const std::vector<UndoLog>& logs, const std::vector<SvcItem>& items) {
@@ -1413,6 +1467,37 @@ std::vector<RestoreRow> FirstRestoreRows(const Snapshot& first, const Ctx& c, st
     return v;
 }
 
+namespace {
+// R12: recovery\first and its zip, written again under first-2, first-3, ... when an earlier try left either one
+// missing. A partial folder is kept as it is (never overwritten or deleted).
+void EnsureFirstRecovery(Store& s, const Snapshot& first, const Ctx& c, FirstRunResult* r) {
+    std::vector<std::wstring> stamps = {L"first"};
+    for (int k = 2; k <= 9; k++) stamps.push_back(L"first-" + std::to_wstring(k));
+    for (auto& st : stamps)
+        if (s.Exists(L"recovery\\" + st) && s.Exists(L"recovery-" + st + L".zip")) return;   // one complete copy is enough
+    auto kind = first.meta.find(L"kind");
+    const bool isFirst = kind == first.meta.end() || kind->second == L"first";
+    for (auto& st : stamps) {
+        if (s.Exists(L"recovery\\" + st) || s.Exists(L"recovery-" + st + L".zip")) continue;
+        std::vector<std::wstring> skipped;
+        std::vector<RestoreRow> rows = FirstRestoreRows(first, c, &skipped);
+        std::wstring dir, zip, err;
+        if (!WriteRecovery(s, st, isFirst ? L"start types as recorded when Hadron first ran"
+                                          : L"start types as recorded in first.txt (a baseline after earlier Hadron changes)",
+                           rows, &dir, &zip, &err, skipped)) {
+            if (!r->error.empty()) r->error += L" ";
+            r->error += L"first.txt is in place, but its recovery folder failed: " + err;
+        } else if (st != L"first") {
+            r->note += (r->note.empty() ? L"" : L" ") + std::wstring(L"An earlier recovery folder for first.txt was incomplete, so it was "
+                                                                      L"written again as recovery\\") + st + L".";
+        }
+        return;
+    }
+    if (!r->error.empty()) r->error += L" ";
+    r->error += L"first.txt is in place, but none of 9 tries left a complete recovery folder for it.";
+}
+}  // namespace
+
 FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, const Ctx& c, Snapshot* first) {
     const std::wstring& build = c.build;
     const std::wstring& machine = c.machine;
@@ -1425,8 +1510,9 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
             auto m = first->meta.find(L"machine");
             if (m != first->meta.end() && !machine.empty() && m->second != machine) {
                 r.foreign = true;
-                r.note = L"first.txt is from another PC (machine GUID differs): Restore first snapshot is off.";
+                r.note = L"first.txt is from another PC (machine GUID differs): Default: as first seen is off.";
             }
+            if (!r.foreign) EnsureFirstRecovery(s, *first, c, &r);
             return r;
         }
         // Corrupt: renamed aside, never overwritten or deleted. A new first.txt is written below.
@@ -1437,12 +1523,20 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
         if (!s.List(L"undo-*.log").empty())
             r.note += L" Hadron changed services before, so the new snapshot is not the true first state.";
     }
+    // R12: with no first.txt but undo logs present, Hadron has changed this PC before: what is recorded now is a
+    // baseline, not the first state, and Default says so.
+    bool baseline = r.corrupt;
+    if (!r.corrupt && !s.List(L"undo-*.log").empty()) {
+        baseline = true;
+        r.note = L"first.txt is missing, but Hadron's undo logs show it changed services before: the new first.txt is a baseline "
+                 L"of today's start types, not how Hadron first saw this PC.";
+    }
     Snapshot snap;
     SYSTEMTIME t;
     GetLocalTime(&t);
     wchar_t when[40];
     swprintf(when, 40, L"%04u-%02u-%02u %02u:%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute);
-    snap.meta[L"kind"] = r.corrupt ? L"baseline (not first run)" : L"first";
+    snap.meta[L"kind"] = baseline ? L"baseline (not first run)" : L"first";
     snap.meta[L"created"] = when;
     snap.meta[L"build"] = build;
     snap.meta[L"machine"] = machine;
@@ -1456,7 +1550,7 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
     }
     if (unreadable)
         r.note += (r.note.empty() ? L"" : L" ") + std::to_wstring(unreadable) +
-                  L" item(s) could not be read and are not in first.txt, so Default (first snapshot) leaves them alone.";
+                  L" item(s) could not be read and are not in first.txt, so Default: as first seen leaves them alone.";
     std::string text = WriteSnapshot(snap);
     if (!s.WriteAtomicNew(L"first.txt", text, &r.error)) return r;
     std::string back;
@@ -1467,13 +1561,7 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
     }
     *first = parsed;
     r.wrote = true;
-    std::wstring dir, zip;
-    if (!s.Exists(L"recovery\\first")) {
-        std::vector<std::wstring> skipped;
-        std::vector<RestoreRow> rows = FirstRestoreRows(parsed, c, &skipped);
-        if (!WriteRecovery(s, L"first", L"start types as recorded when Hadron first ran", rows, &dir, &zip, &err, skipped))
-            r.error = L"first.txt was written, but its recovery folder failed: " + err;
-    }
+    EnsureFirstRecovery(s, parsed, c, &r);
     return r;
 }
 

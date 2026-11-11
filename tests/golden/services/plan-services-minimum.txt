@@ -1,6 +1,6 @@
 Plan: Minimum (Services)
 Source: preset:minimum:services
-Rows: 36 ticked, 23 unticked, 7 kept or protected; already set: 3
+Rows: 52 ticked, 7 unticked, 7 kept or protected; already set: 3
 Note: 1 row(s) need TrustedInstaller (Windows refuses the write to administrators): left out while the TrustedInstaller toggle is off.
 Note: 21 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
 Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
@@ -10,6 +10,14 @@ Note: Start types only. Changes take effect at the next restart; Hadron never re
 [x] BcastDVRUserService  Manual -> Disabled  (3/- -> 4/-)
     why: Game Bar recording and broadcasting
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
+[x] CDPSvc  Auto (delayed) -> Disabled  (2/1 -> 4/1)
+    why: cross-device features (Phone Link, Nearby sharing)
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise, meaning useful to some devices but not all; Hadron adds it only where the hardware or use is absent. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) gives No guidance (Server 2016: leave at default). Microsoft's Windows 10 2004 VDI guide (archived) (https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/rds-vdi-recommendations-2004) lists it as a VDI candidate.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
+[x] CDPUserSvc  Auto -> Disabled  (2/- -> 4/-)
+    why: cross-device features (Phone Link, Nearby sharing)
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] cphs  Manual -> Disabled  (3/- -> 4/-)
     why: Intel integrated graphics only; kept when the Intel graphics driver has a device
     basis: reasoning -- The hardware it serves (Intel integrated graphics) is absent when no devnode for igfxn was ever seen.
@@ -40,18 +48,49 @@ Note: Start types only. Changes take effect at the next restart; Hadron never re
 [x] lfsvc  Manual -> Disabled  (3/- -> 4/-)
     why: location for apps; a desktop rarely needs it
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
+[x] lltdsvc  Manual -> Disabled  (3/- -> 4/-)
+    why: network map
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] MapsBroker  Auto (delayed) -> Disabled  (2/1 -> 4/1)
     why: offline maps for the Maps app
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
 [x] MessagingService  Manual -> Disabled  (3/- -> 4/-)
     why: text messaging over a cellular modem
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
+[x] NcbService  Manual -> Disabled  (3/- -> 4/-)
+    why: network triggers for Store apps
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) rate it OK to disable (Windows 10/11 IoT Enterprise, Windows Server 2016).
+[x] OneSyncSvc  Auto (delayed) -> Disabled  (2/1 -> 4/1)
+    why: Mail/Calendar/People sync; leave unticked if you use those apps
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent. Microsoft's Windows 10 2004 VDI guide (archived) (https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/rds-vdi-recommendations-2004) lists it as a VDI candidate.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
+[x] PcaSvc  Auto -> Disabled  (2/- -> 4/-)
+    why: compatibility prompts for old programs
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] PhoneSvc  Manual -> Disabled  (3/- -> 4/-)
     why: Windows telephony state for cellular or VoIP apps
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise (a device-maker page, not a desktop page); no Microsoft source Hadron checked says to keep it. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) also rates it OK to disable.
+[x] PimIndexMaintenanceSvc  Manual -> Disabled  (3/- -> 4/-)
+    why: contact indexing for the People and Mail apps
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
+[x] QWAVE  Manual -> Disabled  (3/- -> 4/-)
+    why: home-network streaming QoS
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
+[x] RasAuto  Manual -> Disabled  (3/- -> 4/-)
+    why: dial-up and on-demand VPN connections
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise, meaning useful to some devices but not all; Hadron adds it only where the hardware or use is absent. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) gives No guidance (Server 2016: leave at default). Test it if you use the built-in Windows VPN client.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] RetailDemo  Manual -> Disabled  (3/- -> 4/-)
     why: shop-display demo mode only
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise (a device-maker page, not a desktop page); no Microsoft source Hadron checked says to keep it.
+[x] RmSvc  Manual -> Disabled  (3/- -> 4/-)
+    why: airplane mode; a desktop rarely uses it
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent. Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] SEMgrSvc  Manual -> Disabled  (3/- -> 4/-)
     why: NFC payments
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
@@ -67,13 +106,32 @@ Note: Start types only. Changes take effect at the next restart; Hadron never re
     why: sensors; kept when a sensor device was ever seen
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
     evidence: no devnode for class Sensor ever seen
+[x] SharedAccess  Manual -> Disabled  (3/- -> 4/-)
+    why: connection sharing, hotspot and Miracast
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
+[x] ShellHWDetection  Auto -> Disabled  (2/- -> 4/-)
+    why: AutoPlay
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] SmsRouter  Manual -> Disabled  (3/- -> 4/-)
     why: text messaging over a cellular modem
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; no Microsoft source Hadron checked says to keep it.
+[x] SSDPSRV  Manual -> Disabled  (3/- -> 4/-)
+    why: UPnP discovery
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] SysMain  Auto -> Disabled  (2/- -> 4/-)
     why: memory preloading; contested, test it
     basis: published -- Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; other Microsoft sources disagree (see Contested). Minimum includes it because it is not needed to boot, network or play. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) gives No guidance (Server 2016: leave at default).
     contested: Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates SysMain Do not disable (Windows 10/11 IoT Enterprise); Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops and Microsoft's Windows 10 2004 VDI guide (archived) (https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/rds-vdi-recommendations-2004) says to evaluate it in each environment.
+[x] UnistoreSvc  Manual -> Disabled  (3/- -> 4/-)
+    why: user data store for the Mail, Calendar and People apps
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise); Microsoft's per-user services page (https://learn.microsoft.com/en-us/windows/application-management/per-user-services-in-windows) warns that dependent apps might not work correctly and says to test changes.
+[x] upnphost  Manual -> Disabled  (3/- -> 4/-)
+    why: hosting UPnP devices
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] UserDataSvc  Manual -> Disabled  (3/- -> 4/-)
     why: user data access for the Mail, Calendar and People apps
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise); Microsoft's per-user services page (https://learn.microsoft.com/en-us/windows/application-management/per-user-services-in-windows) warns that dependent apps might not work correctly and says to test changes.
@@ -134,66 +192,30 @@ Note: Start types only. Changes take effect at the next restart; Hadron never re
 [x] WMPNetworkSvc  Manual -> Disabled  (3/- -> 4/-)
     why: media library sharing from the legacy Windows Media Player
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise (a device-maker page, not a desktop page); no Microsoft source Hadron checked says to keep it.
+[x] WSearch  Manual -> Disabled  (3/- -> 4/-)
+    why: search indexing; leave unticked if you search from Start or Outlook
+    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise); Microsoft's Windows 10 2004 VDI guide (archived) (https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/rds-vdi-recommendations-2004) lists it as a VDI candidate with a test-first note.
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
 [x] XblAuthManager  Manual -> Disabled  (3/- -> 4/-)
     why: Xbox sign-in; untick if you use the Xbox app or Game Pass
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it Should be disabled (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; both are written for managed enterprise devices and virtual desktops, not gaming PCs.
 [x] XboxNetApiSvc  Manual -> Disabled  (3/- -> 4/-)
     why: Xbox Live networking; untick if you play Xbox-enabled online games
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it Should be disabled (Windows 10/11 IoT Enterprise) and Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops; both are written for managed enterprise devices and virtual desktops, not gaming PCs.
-[ ] CDPSvc  Auto (delayed) -> Disabled  (2/1 -> 4/1)
-    why: cross-device features (Phone Link, Nearby sharing)
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise, meaning useful to some devices but not all; Hadron adds it only where the hardware or use is absent. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) gives No guidance (Server 2016: leave at default). Microsoft's Windows 10 2004 VDI guide (archived) (https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/rds-vdi-recommendations-2004) lists it as a VDI candidate.
-    evidence: use cannot be detected: tick if you don't use it
-[ ] CDPUserSvc  Auto -> Disabled  (2/- -> 4/-)
-    why: cross-device features (Phone Link, Nearby sharing)
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
 [ ] dmwappushservice  Manual -> Disabled  (3/- -> 4/-)
     why: work or school device management; leave unticked if this PC is managed (Intune/MDM)
     basis: published -- Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) rates it OK to disable (Windows Server 2016) and names MDM and Unified Write Filter as its uses; Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) gives No guidance (leave at default), so it is not in Pure bloat removal.
-    evidence: use cannot be detected: tick if you don't use it
+    evidence: use cannot be detected: ticked at Minimum, untick if you use it
     warning: needs TrustedInstaller: Windows refuses this write to administrators, and the toggle is off
     needs TrustedInstaller
 [ ] FrameServer  Manual -> Disabled  (3/- -> 4/-)
     why: cameras; kept when one was ever seen
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
     evidence: no devnode for class Camera ever seen, but it is a hot-plug class: left unticked
-[ ] lltdsvc  Manual -> Disabled  (3/- -> 4/-)
-    why: network map
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
-[ ] NcbService  Manual -> Disabled  (3/- -> 4/-)
-    why: network triggers for Store apps
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) rate it OK to disable (Windows 10/11 IoT Enterprise, Windows Server 2016).
-    warning: CDPSvc (Auto) depends on it and stays enabled: unticked by default
-[ ] OneSyncSvc  Auto (delayed) -> Disabled  (2/1 -> 4/1)
-    why: Mail/Calendar/People sync; leave unticked if you use those apps
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent. Microsoft's Windows 10 2004 VDI guide (archived) (https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/rds-vdi-recommendations-2004) lists it as a VDI candidate.
-    evidence: use cannot be detected: tick if you don't use it
-[ ] PcaSvc  Auto -> Disabled  (2/- -> 4/-)
-    why: compatibility prompts for old programs
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
-[ ] PimIndexMaintenanceSvc  Manual -> Disabled  (3/- -> 4/-)
-    why: contact indexing for the People and Mail apps
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
 [ ] PrintNotify  Manual -> Disabled  (3/- -> 4/-)
     why: printer extensions
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
     evidence: no devnode for class Printer ever seen, but it is a hot-plug class: left unticked
-[ ] QWAVE  Manual -> Disabled  (3/- -> 4/-)
-    why: home-network streaming QoS
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
-[ ] RasAuto  Manual -> Disabled  (3/- -> 4/-)
-    why: dial-up and on-demand VPN connections
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise, meaning useful to some devices but not all; Hadron adds it only where the hardware or use is absent. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) gives No guidance (Server 2016: leave at default). Test it if you use the built-in Windows VPN client.
-    evidence: use cannot be detected: tick if you don't use it
-[ ] RmSvc  Manual -> Disabled  (3/- -> 4/-)
-    why: airplane mode; a desktop rarely uses it
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent. Microsoft's VDI optimization tool (Windows 10 20H2+ virtual desktops) (https://raw.githubusercontent.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool/main/2009/ConfigurationFiles/Services.json) disables it for virtual desktops.
-    evidence: use cannot be detected: tick if you don't use it
 [ ] SCardSvr  Manual -> Disabled  (3/- -> 4/-)
     why: smart cards; kept when a reader was ever seen
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise, meaning useful to some devices but not all; Hadron adds it only where the hardware or use is absent. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) lists it as Already disabled (Server 2016).
@@ -206,36 +228,11 @@ Note: Start types only. Changes take effect at the next restart; Hadron never re
     why: smart cards; kept when a reader was ever seen
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable on Windows 10/11 IoT Enterprise, meaning useful to some devices but not all; Hadron adds it only where the hardware or use is absent. Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) gives No guidance (Server 2016: leave at default).
     evidence: no devnode for class SmartCardReader ever seen, but it is a hot-plug class: left unticked
-[ ] SharedAccess  Manual -> Disabled  (3/- -> 4/-)
-    why: connection sharing, hotspot and Miracast
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
-[ ] ShellHWDetection  Auto -> Disabled  (2/- -> 4/-)
-    why: AutoPlay
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
 [ ] Spooler  Auto -> Disabled  (2/- -> 4/-)
     why: printing
     basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) says that with it off you are not able to print (Windows 10/11 IoT Enterprise); Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) rates it OK to disable when the machine is not a print server. Printers are a hot-plug class, so an absent printer leaves the row unticked.
     evidence: no devnode for class Printer ever seen, but it is a hot-plug class: left unticked
     warning: Fax (Manual) depends on it and stays enabled: unticked by default
-[ ] SSDPSRV  Manual -> Disabled  (3/- -> 4/-)
-    why: UPnP discovery
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
-    warning: upnphost (Manual) depends on it and stays enabled: unticked by default
-[ ] UnistoreSvc  Manual -> Disabled  (3/- -> 4/-)
-    why: user data store for the Mail, Calendar and People apps
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise); Microsoft's per-user services page (https://learn.microsoft.com/en-us/windows/application-management/per-user-services-in-windows) warns that dependent apps might not work correctly and says to test changes.
-    warning: PimIndexMaintenanceSvc (Manual) depends on it and stays enabled: unticked by default
-[ ] upnphost  Manual -> Disabled  (3/- -> 4/-)
-    why: hosting UPnP devices
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) (Windows 10/11 IoT Enterprise) and Microsoft's Windows Server 2016 service guidance (https://learn.microsoft.com/en-us/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server) (Windows Server 2016) both rate it OK to disable; Hadron adds it only where the hardware or use is absent.
-    evidence: use cannot be detected: tick if you don't use it
-[ ] WSearch  Manual -> Disabled  (3/- -> 4/-)
-    why: search indexing; leave unticked if you search from Start or Outlook
-    basis: published -- Microsoft's IoT Enterprise services page (https://learn.microsoft.com/en-us/windows/iot/iot-enterprise/optimize/services) rates it OK to disable (Windows 10/11 IoT Enterprise); Microsoft's Windows 10 2004 VDI guide (archived) (https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/rds-vdi-recommendations-2004) lists it as a VDI candidate with a test-first note.
-    evidence: use cannot be detected: tick if you don't use it
 [-] BluetoothUserService  Manual -> Disabled  (3/- -> 4/-)
     Kept: hardware in use or seen before. present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth)
     why: Bluetooth

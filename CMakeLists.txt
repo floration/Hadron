@@ -86,7 +86,8 @@ target_link_libraries(mod_services PUBLIC advapi32 version shell32 ole32 cfgmgr3
 # Two selftest hooks in Store (owner check and reparse injection) for Wine, which can't set an owner or make a
 # reparse point. OFF by default: a release build has no such code at all. CI turns it on for the Wine run only, in
 # a separate build folder.
-option(HADRON_SERVICES_TEST_HOOKS "Services: Wine-only selftest hooks in Store (never in a release build)" OFF)
+# It also builds --live-test (R25): a release build has no command-line path that writes a service.
+option(HADRON_SERVICES_TEST_HOOKS "Services: selftest hooks in Store and --live-test (never in a release build)" OFF)
 if(HADRON_SERVICES_TEST_HOOKS)
   target_compile_definitions(mod_services PRIVATE HX_SERVICES_TEST_HOOKS=1)
 endif()
