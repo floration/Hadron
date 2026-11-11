@@ -40,6 +40,10 @@ include(cmake/HadronModule.cmake)
 hadron_add_module(hello NAME HadronHello DESC "Hadron Hello module")
 # Dev/reference gallery for core/ui; builds HadronUikit.exe but is not in the suite catalogue.
 hadron_add_module(uikit NAME HadronUikit DESC "Hadron core/ui gallery")
+hadron_add_module(diskmap NAME HadronDiskMap DESC "Hadron DiskMap: drive-space treemap and folder list")
+# The scan engine and rules are separate files so they stay testable headless (docs/design/diskmap.md).
+target_sources(mod_diskmap PRIVATE modules/diskmap/scan.cpp modules/diskmap/classify.cpp)
+target_link_libraries(mod_diskmap PUBLIC msimg32)   # GradientFill for the treemap blocks (system lib)
 
 # --- suite --------------------------------------------------------------------------------------
 # registry.cpp is compiled into the suite exe (not core) so the module factories resolve without a
@@ -49,4 +53,4 @@ add_executable(Hadron WIN32
   app/hadron.cpp
   core/host/registry.cpp
   "${HADRON_SUITE_RC}")
-target_link_libraries(Hadron PRIVATE mod_hello hadron_core)
+target_link_libraries(Hadron PRIVATE mod_hello mod_diskmap hadron_core)
