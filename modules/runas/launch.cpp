@@ -554,45 +554,64 @@ void LaunchTrustedInstaller(const LaunchRequest& req, LaunchResult* out) {
     ThreadPrivilege dbg(L"SeDebugPrivilege");
     if (!dbg.ok()) { FailPrivilege(out, L"SeDebugPrivilege", dbg.err()); return; }
 
-    DWORD err = 0;
-    HANDLE tok = DupPrimaryToken(tiPid, &err);
-    if (!tok) {
-        out->error = L"Could not duplicate the TrustedInstaller token: " + sys::ErrorText(err);
+    // TrustedInstaller's token DACL admits SYSTEM and TrustedInstaller, not Administrators, and
+    // SeDebugPrivilege only bypasses the *process* DACL. So: impersonate SYSTEM (winlogon's token in
+    // our session, reachable with SeDebug), open and duplicate the TI token as SYSTEM, and move it to
+    // our session under the same impersonation (that needs SeTcbPrivilege, which SYSTEM holds).
+    DWORD ourSession = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &ourSession)) {
+        out->error = L"Could not read this process's session: " + sys::ErrorText(GetLastError());
         return;
     }
-
-    // The TI token is in session 0. Moving it to our interactive session needs SeTcbPrivilege,
-    // which winlogon's SYSTEM token holds; impersonate it to make SetTokenInformation succeed.
-    DWORD ourSession = 0;
-    ProcessIdToSessionId(GetCurrentProcessId(), &ourSession);
     DWORD winPid = FindWinlogonPid();
+    if (!winPid) { out->error = L"Could not find winlogon.exe in this session."; return; }
     HANDLE winTok = nullptr;
-    if (winPid) {
+    DWORD err = 0;
+    {
         HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, winPid);
-        if (proc) {
+        if (!proc) err = GetLastError();
+        else {
             HANDLE src = nullptr;
-            if (OpenProcessToken(proc, TOKEN_DUPLICATE | TOKEN_QUERY, &src)) {
-                DuplicateTokenEx(src, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation,
-                                 TokenImpersonation, &winTok);
+            if (!OpenProcessToken(proc, TOKEN_DUPLICATE | TOKEN_QUERY, &src)) err = GetLastError();
+            else {
+                if (!DuplicateTokenEx(src, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation,
+                                      TokenImpersonation, &winTok)) { err = GetLastError(); winTok = nullptr; }
                 CloseHandle(src);
             }
             CloseHandle(proc);
         }
     }
+    if (!winTok) { out->error = L"Could not get a SYSTEM token from winlogon: " + sys::ErrorText(err); return; }
+    {
+        // Enable SeTcbPrivilege on our copy of the SYSTEM token (best effort: if it fails, the
+        // session move below reports the real error).
+        TOKEN_PRIVILEGES tp{};
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (LookupPrivilegeValueW(nullptr, L"SeTcbPrivilege", &tp.Privileges[0].Luid))
+            AdjustTokenPrivileges(winTok, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+    }
+
+    HANDLE tok = nullptr;
     bool moved = false;
     DWORD moveErr = 0;
-    if (winTok) {
+    {
         ThreadTokenSwap swap(winTok);   // restores the outer SeDebug impersonation afterwards
         if (!swap.ok()) {
-            moveErr = swap.err();
-        } else {
+            CloseHandle(winTok);
+            out->error = L"Could not impersonate SYSTEM: " + sys::ErrorText(swap.err());
+            return;
+        }
+        tok = DupPrimaryToken(tiPid, &err);
+        if (tok) {
             moved = SetTokenInformation(tok, TokenSessionId, &ourSession, sizeof(ourSession)) != FALSE;
             if (!moved) moveErr = GetLastError();
         }
-        CloseHandle(winTok);
-    } else {
-        moved = SetTokenInformation(tok, TokenSessionId, &ourSession, sizeof(ourSession)) != FALSE;
-        if (!moved) moveErr = GetLastError();
+    }
+    CloseHandle(winTok);
+    if (!tok) {
+        out->error = L"Could not duplicate the TrustedInstaller token: " + sys::ErrorText(err);
+        return;
     }
     if (!moved) {   // never launch into session 0
         out->error = L"Could not move the TrustedInstaller token to this session: " + sys::ErrorText(moveErr);

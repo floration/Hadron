@@ -281,12 +281,15 @@ LRESULT BiosModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LBUTTONDBLCLK:
         SetFocus(h);
         [[fallthrough]];
-    case WM_LBUTTONUP: case WM_MOUSEMOVE: case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_CHAR:
+    case WM_RBUTTONDOWN:
+        SetFocus(h);
+        return 0;
+    case WM_LBUTTONUP: case WM_MOUSEMOVE: case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_CHAR: case WM_RBUTTONUP:
         if (m == WM_MOUSEMOVE && !tracking_) {
             TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
             tracking_ = TrackMouseEvent(&t) != FALSE;
         }
-        if (OnInput(m == WM_LBUTTONDBLCLK ? WM_LBUTTONDOWN : m, w, l)) Invalidate();
+        if (OnInput(m, w, l)) Invalidate();
         return 0;
     }
     return DefWindowProcW(h, m, w, l);
@@ -841,6 +844,23 @@ void BiosModule::MoveSel(int delta) {
 bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (!host_) return false;
     PaintCtx c = Ctx();
+    if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK || msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP ||
+        msg == WM_RBUTTONUP) {
+        // The search box takes text selection, dragging and the right-click edit menu.
+        int mx = GET_X_LPARAM(l), my = GET_Y_LPARAM(l);
+        POINT mp{mx, my};
+        if (search_.Dragging() && (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP)) {
+            search_.OnMouse(hwnd_, msg, mx, my, rcSearch_, c);
+            return true;
+        }
+        if (msg != WM_MOUSEMOVE && msg != WM_LBUTTONUP && PtInRect(&rcSearch_, mp)) {
+            focus_ = Focus::Search;
+            search_.OnMouse(hwnd_, msg, mx, my, rcSearch_, c);
+            return true;
+        }
+        if (msg == WM_LBUTTONDBLCLK) msg = WM_LBUTTONDOWN;
+        if (msg == WM_RBUTTONUP) return false;
+    }
     if (msg == WM_KEYDOWN) {
         bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         int pitch = Sc(Console() ? 20 : 26);
@@ -871,8 +891,13 @@ bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
             }
             return detSb_.Offset() != before;
         }
-        if (focus_ == Focus::Search && (w == VK_LEFT || w == VK_RIGHT || w == VK_HOME || w == VK_END || w == VK_DELETE))
-            return search_.OnKey(w);
+        if (focus_ == Focus::Search && w != VK_UP && w != VK_DOWN && w != VK_PRIOR && w != VK_NEXT) {
+            // Editing, selection and clipboard keys (Ctrl+A/C/X/V/Z, Shift+arrows, Ctrl+Backspace…).
+            bool r = search_.OnKey(w, hwnd_);
+            if (w == VK_LEFT || w == VK_RIGHT || w == VK_HOME || w == VK_END || w == VK_DELETE || w == VK_BACK ||
+                w == VK_INSERT || ctrl)
+                return r;
+        }
         switch (w) {   // the list (also while typing in the search box: legacy parity keys + Home/End)
             case VK_DOWN: MoveSel(1); return true;
             case VK_UP: MoveSel(-1); return true;

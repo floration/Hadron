@@ -88,21 +88,54 @@ private:
     int  lastClickRow_ = -1;
 };
 
-// A single-line text box for filtering. Holds its own text and caret; the owner routes WM_CHAR and
-// the editing keys to it and reads Text() in onChanged.
-class SearchBox {
+// A single-line editable text field: caret, selection (mouse drag, double-click selects a word,
+// Shift+arrows/Home/End, Ctrl+A), clipboard (Ctrl+C/X/V, Shift+Insert/Delete, Ctrl+Insert, and a
+// right-click Cut/Copy/Paste/Select all menu), Ctrl+Left/Right by word, Ctrl+Backspace/Delete, one
+// level of Ctrl+Z, and horizontal scrolling so long text stays editable. The owner routes WM_CHAR,
+// WM_KEYDOWN and the mouse messages to it (with the field's rect) and reads Text().
+class TextField {
 public:
     const std::wstring& Text() const { return text_; }
-    void SetText(std::wstring s) { text_ = std::move(s); caret_ = text_.size(); }
+    void SetText(std::wstring s);          // caret to the end, no selection; does not fire onChanged
+    void SelectAll() { anchor_ = 0; caret_ = text_.size(); }
+    bool HasSelection() const { return anchor_ != caret_; }
+    std::wstring placeholder;
     std::function<void(const std::wstring&)> onChanged;
 
     void Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused);
-    bool OnChar(wchar_t ch);        // printable char or backspace (0x08)
-    bool OnKey(WPARAM vk);          // Delete / Home / End / arrows
+    bool OnChar(wchar_t ch);                     // printable char or backspace (0x08)
+    bool OnKey(WPARAM vk, HWND owner = nullptr); // editing/navigation keys and Ctrl/Shift shortcuts
+    // WM_LBUTTONDOWN / WM_LBUTTONDBLCLK / WM_MOUSEMOVE / WM_LBUTTONUP / WM_RBUTTONUP, in the same
+    // coordinates as rc. Takes mouse capture while dragging. WM_RBUTTONUP shows the context menu.
+    bool OnMouse(HWND owner, UINT msg, int x, int y, const RECT& rc, const PaintCtx& c);
+    bool Dragging() const { return dragging_; }
 
 private:
+    size_t SelLo() const { return anchor_ < caret_ ? anchor_ : caret_; }
+    size_t SelHi() const { return anchor_ < caret_ ? caret_ : anchor_; }
+    void   Snapshot();                             // save undo state before an edit
+    void   ReplaceSel(const std::wstring& s);      // insert s over the selection
+    bool   DeleteSel();
+    void   Changed() { if (onChanged) onChanged(text_); }
+    bool   Copy(HWND owner) const;
+    bool   Paste(HWND owner);
+    size_t WordLeft(size_t i) const;
+    size_t WordRight(size_t i) const;
+    size_t HitIndex(HWND owner, int x, const RECT& rc, const PaintCtx& c) const;
+
     std::wstring text_;
-    size_t caret_ = 0;
+    size_t caret_ = 0, anchor_ = 0;
+    int    scrollX_ = 0;        // pixels of text scrolled off the left edge
+    bool   dragging_ = false;
+    std::wstring undoText_;
+    size_t undoCaret_ = 0;
+    bool   hasUndo_ = false;
+};
+
+// The search box every list uses: a TextField with the "Search…" placeholder.
+class SearchBox : public TextField {
+public:
+    SearchBox() { placeholder = L"Search\u2026"; }
 };
 
 // A scrollable key/value pane for the selected item's details.

@@ -122,7 +122,7 @@ public:
                     SyncDetail();
                     return ch;
                 }
-                if (focus_ == Focus::Search) return search_.OnKey(w);
+                if (focus_ == Focus::Search) return search_.OnKey(w, hwnd_);
                 return false;
             case WM_CHAR:
                 if (focus_ == Focus::Search) return search_.OnChar((wchar_t)w);
