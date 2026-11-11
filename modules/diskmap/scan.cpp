@@ -175,7 +175,11 @@ bool Scan::RunImpl(const std::wstring& root, const std::wstring& display,
         for (u32 x = di; x != 0; x = dirs[x].parent) segs.push_back(LowerName(Name(dirs[x].name), wcslen(Name(dirs[x].name))));
         std::reverse(segs.begin(), segs.end());
 
-        const u8 ctx = dirs[di].ctx, dsafe = dirs[di].safe;
+        const u8 ctx = dirs[di].ctx;
+        u8 dsafe = dirs[di].safe;
+        // Root AMD/NVIDIA: flagged only if its own listing holds setup.exe or Packages, decided below
+        // from the entries we list anyway (no extra filesystem call).
+        const bool needMarker = !dsafe && rules.NeedsInstallerMarker(segs);
         const int depth = (int)dirs[di].depth;
         const u32 fileFirst = (u32)files.size();
         subNames.clear();
@@ -316,6 +320,22 @@ bool Scan::RunImpl(const std::wstring& root, const std::wstring& display,
             if (stats.deniedSample.size() < kDeniedSample)
                 stats.deniedSample.push_back({sys::ToShell(cur.path), err});
             if (di == 0 && !listed) { rootErr = err; return false; }
+        }
+
+        if (needMarker) {
+            bool marker = false;
+            for (u32 f = fileFirst; f < (u32)files.size() && !marker; f++) {
+                if (files[f].flags & FF_REPARSE) continue;   // a link named setup.exe is not installer data
+                const wchar_t* n = Name(files[f].name);
+                marker = IsInstallerMarker(LowerName(n, wcslen(n)), false);
+            }
+            for (size_t i = 0; i < subNames.size() && !marker; i++)
+                marker = IsInstallerMarker(LowerName(subNames[i]), true);
+            if (marker) {
+                dsafe = rules.DirSafe(segs, true);
+                dirs[di].safe = dsafe;
+                for (u32 f = fileFirst; f < (u32)files.size(); f++) files[f].safe = dsafe;
+            }
         }
 
         dirs[di].fileFirst = fileFirst;

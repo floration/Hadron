@@ -51,6 +51,8 @@ struct SafeRule {
     const wchar_t* pattern;    // drive-root relative, lower case, `\` separated; `*` in-segment, `**` = 0+ segments
     const wchar_t* basis;
     const wchar_t* basisNote;
+    const wchar_t* exclude = nullptr;   // '|'-separated patterns: a folder matching any of them is NOT flagged
+    bool needsInstallerMarker = false;  // flag only if the folder holds setup.exe or a Packages folder
 };
 const std::vector<SafeRule>& SafeDirRules();
 const std::vector<SafeRule>& SafeFileRules();
@@ -59,16 +61,24 @@ const std::vector<SafeRule>& SafeFileRules();
 class Rules {
 public:
     static const Rules& Get();
-    // segs: lower-cased, root-relative path segments of a directory (root = empty). First match wins.
-    u8 DirSafe(const std::vector<std::wstring>& segs) const;
+    // segs: lower-cased, root-relative path segments of a directory (root = empty). First match wins;
+    // a rule whose exclusion matches, or that needs an installer marker the folder lacks, is skipped.
+    // hasInstallerMarker: the folder's own listing held setup.exe or a Packages folder (IsInstallerMarker).
+    u8 DirSafe(const std::vector<std::wstring>& segs, bool hasInstallerMarker = false) const;
+    // True when the folder would be flagged if it held an installer marker but isn't without one: the
+    // scanner then decides after listing that folder, from entries it already has (no extra I/O).
+    bool NeedsInstallerMarker(const std::vector<std::wstring>& segs) const;
     // A file in an unflagged directory: only tried at depths a file rule can match (legacy g_fileDepth).
     u8 FileSafe(std::vector<std::wstring>& segs, const std::wstring& lname) const;
-    // The rule (table index) that DirSafe/FileSafe matched, for showing its basis; -1 when none.
-    int DirRuleIndex(const std::vector<std::wstring>& segs) const;
+    // The rule (table index) that DirSafe matched, for showing its basis; -1 when none.
+    int DirRuleIndex(const std::vector<std::wstring>& segs, bool hasInstallerMarker = false) const;
 
 private:
     Rules();
-    struct Compiled { u8 reason; std::vector<std::wstring> segs; };
+    struct Compiled {
+        u8 reason; std::vector<std::wstring> segs;
+        std::vector<std::vector<std::wstring>> exclude; bool marker;
+    };
     std::vector<Compiled> dir_, file_;
     bool fileDepth_[64] = {};
 };
@@ -77,6 +87,10 @@ private:
 bool Glob(const wchar_t* p, const wchar_t* s);
 bool MatchSegs(const std::vector<std::wstring>& p, size_t pi, const std::vector<std::wstring>& s, size_t si);
 std::vector<std::wstring> SplitPattern(const wchar_t* p);
+
+// Installer-unpack marker for the root AMD/NVIDIA rule: an immediate child file setup.exe or an
+// immediate child folder Packages (lname lower-cased).
+bool IsInstallerMarker(const std::wstring& lname, bool isDir);
 
 // ---- classification ----------------------------------------------------------------------------
 // Lower-case with CharLowerBuffW (legacy Lower; no 260-char truncation, names are short anyway).

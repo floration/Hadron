@@ -1022,11 +1022,15 @@ std::wstring DiskMapModule::SkippedText() const {
     const ScanStats& st = data_->stats;
     std::wstring s;
     auto add = [&](const std::wstring& part) { if (!s.empty()) s += L"  \x00B7  "; s += part; };
-    if (st.cloudFiles) add(U64Str(st.cloudFiles) + L" cloud-only files (" + FmtSize(st.cloudBytes) + L", not on disk) skipped");
-    if (st.cloudDirs) add(U64Str(st.cloudDirs) + L" cloud-only folders skipped");
-    if (st.hardlinkDupFiles) add(U64Str(st.hardlinkDupFiles) + L" hard links counted once (" + FmtSize(st.hardlinkDupBytes) + L")");
-    if (st.reparseDirs + st.linkFiles) add(U64Str(st.reparseDirs + st.linkFiles) + L" links not followed");
-    if (st.noIdDirs) add(U64Str(st.noIdDirs) + L" folders listed without file IDs (hard links there counted per link)");
+    auto n = [](u64 v, const wchar_t* one, const wchar_t* many) { return U64Str(v) + (v == 1 ? one : many); };
+    if (st.cloudFiles) add(n(st.cloudFiles, L" cloud-only file (", L" cloud-only files (") + FmtSize(st.cloudBytes) + L", not on disk) skipped");
+    if (st.cloudDirs) add(n(st.cloudDirs, L" cloud-only folder skipped", L" cloud-only folders skipped"));
+    if (st.hardlinkDupFiles)
+        add(n(st.hardlinkDupFiles, L" hard link counted once (", L" hard links counted once (") + FmtSize(st.hardlinkDupBytes) + L")");
+    if (st.reparseDirs + st.linkFiles) add(n(st.reparseDirs + st.linkFiles, L" link not followed", L" links not followed"));
+    if (st.noIdDirs)
+        add(n(st.noIdDirs, L" folder listed without file IDs (hard links there counted per link)",
+                           L" folders listed without file IDs (hard links there counted per link)"));
     return s;
 }
 
@@ -1957,7 +1961,28 @@ int DiskMapModule::RunCli(int argc, wchar_t** argv) {
     sg = {L"steamapps", L"shadercache"};
     check(R.DirSafe(sg) == SF_SHADER, L"**\\steamapps\\shadercache matches at the root (** = 0 segments)");
     sg = {L"users", L"bob", L"appdata", L"roaming", L"x", L"cache"};
-    check(R.DirSafe(sg) == SF_CACHE, L"users\\*\\appdata\\**\\cache is broad (any depth)");
+    check(R.DirSafe(sg) == SF_CACHE, L"users\\*\\appdata\\**\\cache still flags a plain AppData cache (any depth)");
+    // Narrowed cache rule: caches inside per-user installs are part of the app, never flagged.
+    sg = {L"users", L"bob", L"appdata", L"local", L"programs", L"app", L"cache"};
+    check(R.DirSafe(sg) == SF_NONE, L"AppData\\Local\\Programs\\...\\cache is not flagged");
+    sg = {L"users", L"bob", L"appdata", L"roaming", L"x", L"node_modules", L"pkg", L"cache"};
+    check(R.DirSafe(sg) == SF_NONE, L"...\\node_modules\\...\\cache is not flagged");
+    sg = {L"users", L"bob", L"appdata", L"local", L"python", L"lib", L"site-packages", L"foo", L"cache"};
+    check(R.DirSafe(sg) == SF_NONE, L"...\\site-packages\\...\\cache is not flagged");
+    sg = {L"users", L"bob", L"appdata", L"local", L"programs", L"app", L"gpucache"};
+    check(R.DirSafe(sg) == SF_CACHE, L"GPUCache rule is unchanged (still flagged under Local\\Programs)");
+    // Narrowed root AMD/NVIDIA rule: only with an installer marker in the folder's own listing.
+    for (const wchar_t* v : {L"amd", L"nvidia"}) {
+        sg = {v};
+        check(R.DirSafe(sg) == SF_NONE && R.NeedsInstallerMarker(sg),
+              std::wstring(L"root ") + v + L" without setup.exe/Packages is not flagged");
+        check(R.DirSafe(sg, true) == SF_DRVPKG, std::wstring(L"root ") + v + L" with setup.exe/Packages -> Driver installer leftovers");
+    }
+    check(IsInstallerMarker(L"setup.exe", false) && IsInstallerMarker(L"packages", true) &&
+          !IsInstallerMarker(L"setup.exe", true) && !IsInstallerMarker(L"packages", false),
+          L"installer marker = child file setup.exe or child folder Packages");
+    sg = {L"programdata", L"nvidia corporation", L"downloader"};
+    check(R.DirSafe(sg) == SF_DRVPKG && !R.NeedsInstallerMarker(sg), L"ProgramData\\NVIDIA Corporation\\Downloader unchanged (no marker needed)");
     sg = {L"users", L"bob", L"appdata", L"local", L"microsoft", L"windows", L"explorer"};
     check(R.FileSafe(sg, L"thumbcache_256.db") == SF_THUMB, L"thumbcache_*.db file rule");
     sg = {L"windows"};

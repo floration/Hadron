@@ -38,8 +38,8 @@ const SafeInfo kSafe[NSAFE] = {
      L"Files you already deleted. Empty the Recycle Bin to get this space back.",
      L"reasoning", L"Everything here is a file someone already chose to delete."},
     {L"App & browser caches",
-     L"Browsers and apps rebuild these automatically. Close the app first; the next launch or page load may be a little slower.",
-     L"reasoning", L"Matched by folder name only (cache, cache2, Code Cache, GPUCache); not checked per app, and some apps keep state in such folders."},
+     L"Folders named Cache, cache2, Code Cache or GPUCache under AppData. Browsers and most apps rebuild these. DiskMap skips caches inside installed programs (Local\\Programs, node_modules, site-packages), so it won't flag part of an app; still, close the app first \x2014 the next launch or page load may be slower.",
+     L"reasoning", L"Matched by folder name (cache, cache2, Code Cache, GPUCache) under AppData, excluding per-user installs (Local\\Programs, node_modules, site-packages); not checked per app."},
     {L"Shader caches",
      L"Compiled GPU shaders. Games and drivers rebuild them; until they do, loads can be longer and gameplay can stutter, by an amount that depends on the game. Test it on a game you play.",
      L"reasoning", L"Drivers and games compile shaders on demand when no cached copy exists."},
@@ -47,8 +47,8 @@ const SafeInfo kSafe[NSAFE] = {
      L"Explorer's thumbnail and icon cache. Rebuilt automatically as you browse folders (Disk Cleanup can clear it too).",
      L"reasoning", L"Explorer regenerates thumbnails and icons from the files themselves."},
     {L"Driver installer leftovers",
-     L"Files AMD/NVIDIA installers extracted during past driver installs. The installed driver doesn't use them.",
-     L"reasoning", L"The AMD and NVIDIA installers extract to X:\\AMD and X:\\NVIDIA by default; the rule flags any root folder with those exact names, whatever it holds."},
+     L"A root folder named AMD or NVIDIA where those driver installers unpack. The installed driver runs from Windows' driver store, not from here. DiskMap flags it only when it holds a Setup.exe or a Packages folder; check it's installer files and nothing of yours.",
+     L"reasoning", L"The AMD and NVIDIA installers unpack to X:\\AMD and X:\\NVIDIA by default; flagged only when the folder holds setup.exe or a Packages folder."},
 };
 
 const wchar_t* const kR = L"reasoning";
@@ -73,12 +73,14 @@ const std::vector<SafeRule> kDirRules = {
     {SF_SHADER,  L"users\\*\\appdata\\**\\glcache", kR, L"Driver OpenGL shader cache (folder name match)."},
     {SF_SHADER,  L"**\\steamapps\\shadercache", kR, L"Steam's per-game shader pre-cache."},
     {SF_CACHE,   L"users\\*\\appdata\\local\\microsoft\\windows\\inetcache", kR, L"WinINet / Edge legacy web cache."},
-    {SF_CACHE,   L"users\\*\\appdata\\**\\cache", kR, L"Broad: any folder named exactly \"cache\" anywhere under AppData."},
+    {SF_CACHE,   L"users\\*\\appdata\\**\\cache", kR,
+     L"Any folder named exactly \"cache\" under AppData, except inside per-user installs (Local\\Programs, node_modules, site-packages).",
+     L"users\\*\\appdata\\local\\programs\\**|**\\node_modules\\**|**\\site-packages\\**"},
     {SF_CACHE,   L"users\\*\\appdata\\**\\cache2", kR, L"Firefox-style disk cache (folder name match)."},
     {SF_CACHE,   L"users\\*\\appdata\\**\\code cache", kR, L"Chromium/Electron compiled-script cache (folder name match)."},
     {SF_CACHE,   L"users\\*\\appdata\\**\\gpucache", kR, L"Chromium/Electron GPU cache (folder name match)."},
-    {SF_DRVPKG,  L"amd", kR, L"Broad: any root folder named AMD, whatever it holds."},
-    {SF_DRVPKG,  L"nvidia", kR, L"Broad: any root folder named NVIDIA, whatever it holds."},
+    {SF_DRVPKG,  L"amd", kR, L"Root AMD folder holding setup.exe or a Packages folder (installer unpack).", nullptr, true},
+    {SF_DRVPKG,  L"nvidia", kR, L"Root NVIDIA folder holding setup.exe or a Packages folder (installer unpack).", nullptr, true},
     {SF_DRVPKG,  L"programdata\\nvidia corporation\\downloader", kR, L"NVIDIA app/GeForce Experience driver downloads."},
 };
 
@@ -168,10 +170,27 @@ bool MatchSegs(const std::vector<std::wstring>& p, size_t pi, const std::vector<
     return Glob(p[pi].c_str(), s[si].c_str()) && MatchSegs(p, pi + 1, s, si + 1);
 }
 
+bool IsInstallerMarker(const std::wstring& ln, bool isDir) {
+    return isDir ? ln == L"packages" : ln == L"setup.exe";
+}
+
 Rules::Rules() {
-    for (auto& r : kDirRules) dir_.push_back({r.reason, SplitPattern(r.pattern)});
+    for (auto& r : kDirRules) {
+        Compiled c{r.reason, SplitPattern(r.pattern), {}, r.needsInstallerMarker};
+        if (r.exclude) {
+            std::wstring all = r.exclude;
+            size_t start = 0;
+            for (;;) {
+                size_t bar = all.find(L'|', start);
+                c.exclude.push_back(SplitPattern(all.substr(start, bar - start).c_str()));
+                if (bar == std::wstring::npos) break;
+                start = bar + 1;
+            }
+        }
+        dir_.push_back(std::move(c));
+    }
     for (auto& r : kFileRules) {
-        file_.push_back({r.reason, SplitPattern(r.pattern)});
+        file_.push_back({r.reason, SplitPattern(r.pattern), {}, false});
         size_t d = file_.back().segs.size() - 1;   // depth of the folder that holds the file
         if (d < 64) fileDepth_[d] = true;
     }
@@ -182,14 +201,25 @@ const Rules& Rules::Get() {
     return r;
 }
 
-int Rules::DirRuleIndex(const std::vector<std::wstring>& segs) const {
-    for (size_t i = 0; i < dir_.size(); i++) if (MatchSegs(dir_[i].segs, 0, segs, 0)) return (int)i;
+int Rules::DirRuleIndex(const std::vector<std::wstring>& segs, bool marker) const {
+    for (size_t i = 0; i < dir_.size(); i++) {
+        const Compiled& c = dir_[i];
+        if (c.marker && !marker) continue;
+        if (!MatchSegs(c.segs, 0, segs, 0)) continue;
+        bool excluded = false;
+        for (auto& ex : c.exclude) if (MatchSegs(ex, 0, segs, 0)) { excluded = true; break; }
+        if (!excluded) return (int)i;
+    }
     return -1;
 }
 
-u8 Rules::DirSafe(const std::vector<std::wstring>& segs) const {
-    int i = DirRuleIndex(segs);
+u8 Rules::DirSafe(const std::vector<std::wstring>& segs, bool marker) const {
+    int i = DirRuleIndex(segs, marker);
     return i < 0 ? (u8)SF_NONE : dir_[i].reason;
+}
+
+bool Rules::NeedsInstallerMarker(const std::vector<std::wstring>& segs) const {
+    return DirRuleIndex(segs, false) < 0 && DirRuleIndex(segs, true) >= 0;
 }
 
 u8 Rules::FileSafe(std::vector<std::wstring>& segs, const std::wstring& lname) const {
