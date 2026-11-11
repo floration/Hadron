@@ -12,7 +12,7 @@
 | `core/fs` header + design note | not started | lead | - | - |
 | `runas` module | merged; owner's-PC launch checks pending | module-builder | module/runas | #2 |
 | `services` module (pipeline `svcdrv`, full run) | merged; read-only owner's-PC checks pending | pipeline | module/services-svcdrv | #8 |
-| `services` KB follow-ups (svcdrv-kb: stock table, Fax, drivers, OEM) | in Push | Small fixes | fix/svcdrv-kb | (PR) |
+| `services` KB follow-ups (svcdrv-kb: stock table, Fax, drivers, OEM) | in Push | Small fixes | fix/svcdrv-kb | #9 |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)
