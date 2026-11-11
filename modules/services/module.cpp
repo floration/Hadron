@@ -1449,10 +1449,10 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
             if (wa == 1) prot = L"Windows refuses this write to administrators (service security descriptor); the TrustedInstaller toggle can help";
             else if (wa == 0) prot = g.neverTouch ? L"Windows lets administrators change it; Hadron does not (see above)" : L"administrators can change the start type";
         }
-        static const wchar_t* const kDefender[] = {L"WinDefend", L"WdNisSvc", L"WdNisDrv", L"WdFilter", L"WdBoot", L"Sense",
-                                                   L"SecurityHealthService", L"wscsvc"};
-        for (auto* n : kDefender)
-            if (IEq(s.name, n)) prot += (prot.empty() ? L"" : L"; ") + std::wstring(L"Tamper Protection blocks changes to Defender");
+        // Tamper Protection guards Defender Antivirus's settings; the other Defender items carry their own reason.
+        if (IEq(s.name, L"WinDefend"))
+            prot += (prot.empty() ? L"" : L"; ") +
+                    std::wstring(L"when Tamper Protection is on, it blocks registry changes to Defender Antivirus settings");
         kv(L"Protection", prot, s.protect ? p.warn : kNoColor);
     }
     kv(L"Depends on", Join(s.deps, L", "));
@@ -1486,7 +1486,7 @@ std::vector<Para> ServicesModule::PlanRowDoc(const PlanRow& r) const {
     kv(L"Why", r.reason);
     if (!r.basis.empty()) kv(L"Basis", BasisLabel(r.basis) + (r.basisNote.empty() ? L"" : L": " + r.basisNote), p.mute);
     kv(L"Contested", r.contested, p.warn);
-    kv(L"Hardware", r.evidence);
+    kv(L"Evidence", r.evidence);
     kv(L"Warning", r.warning, p.warn);
     if (r.needsTi) kv(L"Identity", L"needs TrustedInstaller: Windows refuses this write to administrators", p.warn);
     const KbEntry* e = kbOk_ ? kb_.Find(r.name) : nullptr;

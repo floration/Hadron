@@ -139,6 +139,17 @@ bool MakeWorld(const std::wstring& dir, const Kb* kb, World* w, std::wstring* er
     return true;
 }
 
+// What a user does on the plan screen: tick the rows offered unticked because their use cannot be detected.
+void TickUndetectable(Plan* p) {
+    for (auto& r : p->rows)
+        if (r.canToggle && r.blocked.empty() && r.evidence.rfind(L"use cannot be detected", 0) == 0) r.include = true;
+}
+
+void Tick(Plan* p, const wchar_t* name) {
+    for (auto& r : p->rows)
+        if (r.name == name && r.canToggle) r.include = true;
+}
+
 Plan PlanFor(int level, int tab, World& w) {
     Plan p;
     if (level >= 0) p = BuildPreset(level, tab, w.items, w.ctx);
@@ -440,9 +451,13 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         Plan db = PlanFor(LV_BLOAT, TAB_DRIVERS, w);
         check(bl.alreadySet >= 2 && !RowOf(bl, L"DiagTrack") && RowOf(bl, L"MapsBroker") && RowOf(bl, L"MapsBroker")->include,
               L"Bloat: DiagTrack and XblGameSave already disabled; MapsBroker ticked");
-        const PlanRow* dm = RowOf(bl, L"dmwappushservice");
-        check(dm && dm->needsTi && !dm->include && dm->warning.find(L"TrustedInstaller") != std::wstring::npos,
+        const PlanRow* dm = RowOf(st, L"dmwappushservice");
+        check(dm && dm->needsTi && !dm->include && !dm->canToggle && dm->warning.find(L"TrustedInstaller") != std::wstring::npos,
               L"TI marking: an admin-refused row is excluded with the toggle off, with the reason");
+        check(!RowOf(bl, L"dmwappushservice"), L"No guidance from IoT keeps dmwappushservice out of Pure bloat");
+        const PlanRow* ud = RowOf(st, L"SSDPSRV");
+        check(ud && ud->blocked.empty() && !ud->include && ud->canToggle && ud->evidence.rfind(L"use cannot be detected", 0) == 0,
+              L"Stripped: a row whose use cannot be detected is offered unticked, with the reason");
         const PlanRow* fs = RowOf(st, L"FrameServer");
         check(fs && fs->blocked.empty() && !fs->include && fs->evidence.find(L"hot-plug") != std::wstring::npos,
               L"Stripped: a never-seen hot-plug class (camera) is offered unticked");
@@ -619,6 +634,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         Store s(NewTempDir(L"apply"));
         s.fixedStamp = L"20261111-101500";
         Plan p = PlanFor(LV_STRIPPED, TAB_SERVICES, a);
+        TickUndetectable(&p);
         ApplyEnv env = EnvFor(&a.fx.backend, &s);
         ApplyResult r;
         bool ok = RunApply(p, env, &r);
@@ -669,6 +685,7 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         Store s(NewTempDir(L"faults"));
         s.fixedStamp = L"20261111-101600";
         Plan p = PlanFor(LV_STRIPPED, TAB_SERVICES, a);
+        TickUndetectable(&p);
         a.fx.backend.faults.deny = {L"upnphost"};
         a.fx.backend.faults.vanish = {L"lfsvc"};
         a.fx.backend.faults.changeOnQuery = {L"retaildemo"};
@@ -772,8 +789,9 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         World a;
         freshWorld(&a);
         Store s(NewTempDir(L"ti"));
-        Plan p = BuildPreset(LV_BLOAT, TAB_SERVICES, a.items, a.ctx);
+        Plan p = BuildPreset(LV_STRIPPED, TAB_SERVICES, a.items, a.ctx);
         MarkTi(&p, a.fx.backend, true);
+        Tick(&p, L"dmwappushservice");
         const PlanRow* dm = RowOf(p, L"dmwappushservice");
         check(dm && dm->needsTi && dm->include, L"TI marking: with the toggle on the row is included and marked");
         FakeTi ti;
@@ -794,8 +812,9 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         World b;
         freshWorld(&b);
         Store s2(NewTempDir(L"ti-off"));
-        Plan p2 = BuildPreset(LV_BLOAT, TAB_SERVICES, b.items, b.ctx);
+        Plan p2 = BuildPreset(LV_STRIPPED, TAB_SERVICES, b.items, b.ctx);
         MarkTi(&p2, b.fx.backend, true);   // marked with the toggle on, then applied with it off
+        Tick(&p2, L"dmwappushservice");
         ApplyResult r2;
         RunApply(p2, EnvFor(&b.fx.backend, &s2), &r2);
         bool failed = false;

@@ -231,7 +231,7 @@ jobs:
           build\HadronServices.exe --fixture $sf --select RpcSs --screenshot "shots\services-detail-protected.png"
           build\HadronServices.exe --fixture $sf --plan stripped --screenshot "shots\services-plan-stripped.png"
           build\HadronServices.exe --fixture "$sf\interrupted" --screenshot "shots\services-interrupted.png"
-          build\HadronServices.exe --fixture $sf --ti on --plan bloat --select dmwappushservice --screenshot "shots\services-ti-on.png"
+          build\HadronServices.exe --fixture $sf --ti on --plan stripped --select dmwappushservice --screenshot "shots\services-ti-on.png"
           build\Hadron.exe --module services --fixture $sf --screenshot "shots\services-suite.png"
       - uses: actions/upload-artifact@v4
         with:

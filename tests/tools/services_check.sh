@@ -61,7 +61,7 @@ shot services-detail-kb "$S" --fixture "$FIX" --select DiagTrack
 shot services-detail-protected "$S" --fixture "$FIX" --select RpcSs
 shot services-plan-stripped "$S" --fixture "$FIX" --plan stripped
 shot services-interrupted "$S" --fixture "$FIX/interrupted"
-shot services-ti-on "$S" --fixture "$FIX" --ti on --plan bloat --select dmwappushservice
+shot services-ti-on "$S" --fixture "$FIX" --ti on --plan stripped --select dmwappushservice
 shot services-ti-list "$S" --fixture "$FIX" --ti on --select dmwappushservice
 shot services-light "$S" --fixture "$FIX" --theme light --select WSearch
 shot services-suite "$BUILD/Hadron.exe" --module services --fixture "$FIX"

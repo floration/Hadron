@@ -52,10 +52,10 @@ const std::vector<const wchar_t*>& HypervisorDrivers() {
 
 const std::vector<Group>& NeverPreset() {
     static const std::vector<Group> g = {
-        {L"Defender and Windows Security: Microsoft says not to disable, stop or modify them, and Tamper Protection guards them",
+        {L"Defender and Windows Security: Microsoft says not to disable, stop or modify them",
          {L"windefend", L"wdnissvc", L"wdnisdrv", L"wdfilter", L"wdboot", L"sense", L"securityhealthservice", L"wscsvc"}},
         {L"TrustedInstaller: Windows servicing, and what Hadron's TrustedInstaller toggle needs", {L"trustedinstaller"}},
-        {L"Volume Shadow Copy: the System Restore path on a PC with no backups", {L"vss", L"swprv"}},
+        {L"Volume Shadow Copy: System Restore needs it, and restore points are Microsoft's registry recovery path (Microsoft's RegBack page)", {L"vss", L"swprv"}},
         {L"file-system filter that Store apps, containers, Defender or cloud files sit on",
          {L"fileinfo", L"filecrypt", L"bindflt", L"wcifs", L"cldflt"}},
     };
@@ -181,6 +181,11 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
             r.evidence = ev;
             if (h == 0) r.blocked = L"Kept: hardware in use or seen before. " + ev;
             else if (h == 2) r.include = false;
+        } else if (r.blocked.empty() && e->JoinLevel() == LV_STRIPPED) {
+            // Spec 5.3: Stripped applies only where hardware or use is absent with evidence shown. Use without a
+            // hardware hint cannot be detected, so the row is offered unticked, like a hot-plug class.
+            r.evidence = L"use cannot be detected: tick if you don't use it";
+            r.include = false;
         }
         if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
         p.rows.push_back(std::move(r));
@@ -188,7 +193,8 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
     DependencyCheck(&p, items);
     SortRows(&p);
     if (tab == TAB_DRIVERS && level == LV_BLOAT)
-        p.notes.push_back(L"Pure bloat removal on the Drivers tab is expected to be near-empty: no Microsoft source names a stock driver as bloat.");
+        p.notes.push_back(L"Pure bloat removal on the Drivers tab is expected to be near-empty: Hadron found no Microsoft source that names a "
+                          L"stock driver as safe to disable.");
     if (p.unknown)
         p.notes.push_back(std::to_wstring(p.unknown) + L" item(s) on this tab have no KB entry (third-party or unknown): never in a preset.");
     if (c.kb && !c.kb->build.empty() && c.kb->build != c.build)

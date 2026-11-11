@@ -135,7 +135,8 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   - Never-seen hot-plug classes are offered unticked.
   - Never-seen non-hot-plug hardware is ticked.
   - Present or phantom ("seen before") hardware is blocked as "Kept".
-  - Use-based Stripped items (no hardware hint) are ticked, with "use cannot be detected" in their why text.
+  - Use-based Stripped items (no hardware hint) are offered unticked with "use cannot be detected: tick if you don't use it" (kb-auditor M16, spec §5.3).
+- **"No guidance"** is a keep-the-default rating (DECISIONS.md, proxy): an IoT No guidance keeps an item out of Pure bloat; a WS16 No guidance alone does not, but the pbasis says so.
 - **Windows stock.** The seed has no stock values, because no measured or published table was available.
   - The plan says how many items have a stock value (0 today).
   - The mechanism is selftested with an in-memory KB.

@@ -21,7 +21,7 @@ Note: Start types only. Changes take effect at the next restart; Hadron never re
     evidence: no devnode for service IntcDAud ever seen
 [x] luafv  Auto -> Disabled  (2/- -> 4/-)
     why: only old programs without a manifest need it; test it
-    basis: reasoning -- Not named in the Microsoft sources Hadron checked; programs built for Windows Vista or later do not use it.
+    basis: reasoning -- Not named in the Microsoft sources Hadron checked. Programs with a UAC manifest, 64-bit programs and programs run as administrator are never virtualized.
 [x] Serial  Manual -> Disabled  (3/- -> 4/-)
     why: no built-in serial port was ever seen
     basis: reasoning -- Hardware-absent: no devnode for this driver was ever recorded on this PC.
