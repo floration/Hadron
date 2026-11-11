@@ -138,6 +138,8 @@ SERVICES = [
     ('SecurityHealthService', 'Windows Security Service', OWN, '3/-', 0, 'LocalSystem', r'%systemroot%\system32\SecurityHealthService.exe', 'RpcSs', 'Windows Security Service handles unified device protection and health information'),
     ('wscsvc', 'Security Center', SHARE, '2/1', 0, 'NT AUTHORITY\\LocalService', SVCHOST + 'LocalServiceNetworkRestricted -p', 'RpcSs', 'The WSCSVC (Windows Security Center) service monitors and reports security health settings on the computer.'),
     ('BrokerInfrastructure', 'Background Tasks Infrastructure Service', SHARE, '2/-', 0, 'LocalSystem', SVCHOST + 'DcomLaunch -p', 'RpcEptMapper;DcomLaunch;RpcSs', 'Windows infrastructure service that controls which background tasks can run on the system.'),
+    # Disabled by an earlier tweak: the Windows-stock golden shows its published stock note (kb-audit svcdrv-kb M1).
+    ('TimeBrokerSvc', 'Time Broker', SHARE, '4/-', 1, 'NT AUTHORITY\\LocalService', SVCHOST + 'LocalServiceNetworkRestricted -p', 'RpcSs', 'Coordinates execution of background work for WinRT application.'),
     # ---- floor (no KB entry needed: the guards protect them)
     ('RpcSs', 'Remote Procedure Call (RPC)', SHARE, '2/-', 0, 'NT AUTHORITY\\NetworkService', SVCHOST + 'rpcss -p', 'RpcEptMapper;DcomLaunch', 'The RPCSS service is the Service Control Manager for COM and DCOM servers.'),
     ('RpcEptMapper', 'RPC Endpoint Mapper', SHARE, '2/-', 0, 'NT AUTHORITY\\NetworkService', SVCHOST + 'RPCSS -p', '', 'Resolves RPC interfaces identifiers to transport endpoints.'),

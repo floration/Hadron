@@ -2,7 +2,7 @@ Plan: Stripped (Services)
 Source: preset:stripped:services
 Rows: 28 ticked, 20 unticked, 8 kept or protected; already set: 3
 Note: 1 row(s) need TrustedInstaller (Windows refuses the write to administrators): left out while the TrustedInstaller toggle is off.
-Note: 3 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
+Note: 2 item(s) on this tab have no KB entry (third-party or unknown): never in a preset.
 Note: Start types only. Changes take effect at the next restart; Hadron never restarts the PC.
 [x] autotimesvc  Manual -> Disabled  (3/- -> 4/-)
     why: clock from a cellular network

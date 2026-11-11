@@ -1,4 +1,4 @@
 Plan: Default: Windows stock (Drivers)
 Source: default-stock:drivers
 Rows: 0 ticked, 0 unticked, 0 kept or protected; already set: 0
-Note: Hadron has no Windows-stock data for build 19045 yet: nothing will be changed.
+Note: Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed.

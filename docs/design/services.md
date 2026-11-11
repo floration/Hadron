@@ -316,11 +316,26 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   - Present or phantom ("seen before") hardware is blocked as "Kept".
   - Use-based Stripped items (no hardware hint) are offered unticked at Stripped with "use cannot be detected: tick if you don't use it" (kb-auditor M16, spec §5.3). At Minimum the same rows are ticked and say "use cannot be detected: ticked at Minimum, untick if you use it" (R18, proxy Q1: Minimum is only what is needed to boot, network, play games and run Hadron); plan, confirm and undo still gate them.
 - **"No guidance"** is a keep-the-default rating (DECISIONS.md, proxy): an IoT No guidance keeps an item out of Pure bloat; a WS16 No guidance alone does not, but the pbasis says so.
-- **Windows stock.** The seed has no stock values, because no measured or published table was available.
-  - With no stock value for this build the plan is empty and says "Hadron has no Windows-stock data for build N
-    yet: nothing will be changed." (R20, proxy Q2), with no Apply button and no sum; the chip says "(no data for
-    this build yet)" and the detail's Windows stock line uses the same words.
-  - The mechanism is selftested with an in-memory KB.
+- **Windows stock.** The KB has a small stock table (`STOCK` at the end of `tools/services/kb.py`, fix/svcdrv-kb):
+  five services whose default or expected start type a Microsoft page for Windows client states (msiserver,
+  W32Time, TimeBrokerSvc, WSearch, BrokerInfrastructure), each `published` with its URL. None of the pages names
+  build 19045, and each stock note says what its page applies to. No driver has a stock value. Every other item
+  is "no data": `docs/pipeline/fixes/svcdrv-kb.md` says why the larger tables that exist (IoT, per-user services,
+  Server 2016) are not used.
+  - The plan writes only items with a stock value; the note says how many of the tab's items have one.
+  - An explanation-only (`never`) KB entry doesn't block its stock row: `never` means not in a preset level.
+    Never-touch items, protected services and the named never-preset list still block (DECISIONS 2026-11-11).
+  - With no stock value the plan is empty, with no Apply button and no sum, and never a bare "Nothing to change."
+    (R20, proxy Q2). On a build the KB has no stock values for, it says "Hadron has no Windows-stock data for build N
+    yet: nothing will be changed." and the chip "(no data for this build yet)". On 19045, a tab with no value (Drivers)
+    says "Hadron's KB has no Windows stock value for any item on this tab: nothing will be changed." and the chip
+    "(no data on this tab)". The detail's Windows stock line uses the chip's words; a row without a value on a tab
+    that has some says "no data for this item yet". `StockKnown()` counts per tab; the Services chip reads
+    "Default: Windows stock (N sourced)".
+  - A published stock value is worded "from a Microsoft page (it names no build)". genkb enforces that: a published
+    stock note cites learn.microsoft.com pages only and says its page "names no build"; a driver with a stock value
+    needs `sysok`.
+  - The mechanism is also selftested with an in-memory KB.
   - Stock values are never applied to storage drivers.
 - **"Default: as first seen"** (the first-run snapshot).
   - KB guards don't apply: it restores what the PC had.
@@ -416,7 +431,7 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 | `--data-dir <dir>` | module, `--live-test` | Use another data folder instead of `%ProgramData%\Hadron\services\` |
 | `--readonly` | module | Never arm the backend. Without `--data-dir` it opens the default data folder read-only, so the first-run snapshot, undo logs and interrupted banner still show |
 | `--selftest [--update-golden] [--golden <dir>]` | selftest | Run the selftest. `--golden` points at another golden folder (default `<fixture>\..\..\golden\services`); `--update-golden` rewrites every golden it compares instead of comparing |
-| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (no data yet: the plan says so) |
+| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (Services: the fixture's WSearch row; Drivers: no data, the plan says so) |
 | `--live-test HadronTest<name> [--ti] [--data-dir <dir>]` | `HadronServices.exe`, test build only (R25) | CI's round trip on a dummy service (see below) |
 
 **Regenerating goldens** (only when a change is meant to alter them, and review every diff):
