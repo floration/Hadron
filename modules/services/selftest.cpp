@@ -678,6 +678,14 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         check(SxsCacheName(L"19045.5737", L"Professional") == L"sxs-19045.5737-Professional.txt" && SxsCacheName(L"19045", L"Pro").empty() &&
                   SxsCacheName(L"19045.1", L"..\\x").empty() && SxsCacheName(L"", L"Pro").empty(),
               L"sxs cache name: build.UBR and an alphanumeric edition only");
+        if (fs) {
+            std::string tsv = SxsDumpTsv(*fs, 7);
+            check(tsv.find("# build.UBR\t19045.5737\n") != std::string::npos && tsv.find("# elapsed ms\t7\n") != std::string::npos &&
+                      tsv.find("\naudiosrv\t2\t0\tedition\t0\tProfessionalEdition.xml\n") != std::string::npos &&
+                      tsv.find("\ndps\t2\t1\tsettingDefault\t0\tc-settings.manifest\n") != std::string::npos &&
+                      tsv.find("\nbeep\t1\t-\tregistry\t0\td-driver.manifest\n") != std::string::npos,
+                  L"--dump-stock-live TSV: header (build.UBR, elapsed), start, delayed, layer, conflict and source file per name");
+        }
         check(SxsRuntimeDependent(L"WlanSvc") && SxsRuntimeDependent(L"BITS") && !SxsRuntimeDependent(L"Spooler"),
               L"sxs: the runtime-set list (WlanSvc, BITS, ...)");
         auto pick = [&](const wchar_t* n) {
@@ -2680,6 +2688,30 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
 }
 
 // ============================================================================================
+// --dump-stock-live [--out <file>]: this PC's WinSxS stock values, read with the live reader only. Read only: no
+// backend (nothing armed, no SCM or registry writes), no data folder, no cache. Exit 1 with the reason when the
+// reader can't start (wcp.dll or msdelta.dll) or no manifest could be read.
+int RunDumpStockLive(const std::vector<std::wstring>& args) {
+    const std::wstring out = ArgValue(args, L"--out");
+    std::unique_ptr<SxsReader> r = MakeLiveSxsReader();
+    ULONGLONG t0 = GetTickCount64();
+    SxsStock s = ScanSxs(*r);
+    std::string text = SxsDumpTsv(s, GetTickCount64() - t0);
+    bool wrote = true;
+    if (!out.empty()) wrote = WriteAll(out, text);
+    else {
+        fflush(stdout);
+        _setmode(_fileno(stdout), _O_BINARY);
+        fwrite(text.data(), 1, text.size(), stdout);
+        fflush(stdout);
+    }
+    if (!wrote) { fwprintf(stderr, L"dump-stock-live: could not write %ls\n", out.c_str()); return 1; }
+    if (!s.ok) { fwprintf(stderr, L"dump-stock-live: %ls\n", s.err.c_str()); return 1; }
+    fwprintf(stderr, L"dump-stock-live: %d manifests, %d failures, %d skipped, %d values\n", s.manifests, s.failed, s.skipped,
+             s.Usable());
+    return 0;
+}
+
 int RunDumpPlan(const std::vector<std::wstring>& args) {
     std::wstring lv = ArgValue(args, L"--dump-plan"), tab = ArgValue(args, L"--tab"), fx = ArgValue(args, L"--fixture"),
                  out = ArgValue(args, L"--out");

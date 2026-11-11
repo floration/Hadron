@@ -44,6 +44,18 @@ StartCfg SxsValue::Cfg() const {
     return c;
 }
 
+const std::wstring& SxsValue::StartFile() const {
+    static const std::wstring none;
+    switch (StartSrc()) {
+        case EDITION: return fileEdition;
+        case SERVICE: return fileService;
+        case REGISTRY: return fileRegistry;
+        case SETTING: return fileSetting;
+        case NONE: break;
+    }
+    return none;
+}
+
 std::wstring SxsSrcText(SxsValue::Src s) {
     switch (s) {
         case SxsValue::EDITION: return L"the edition file's override";
@@ -245,7 +257,8 @@ void SetField(int* field, int v, bool* conflict) {
 
 }  // namespace
 
-void ScanManifestXml(const std::string& x, SxsScan* acc) {
+void ScanManifestXml(const std::string& x, SxsScan* acc, const std::wstring& file) {
+    auto mark = [&](std::wstring* f) { if (f->empty()) *f = file; };
     // Cheap filter: most manifests have none of these.
     if (x.find("serviceData") == std::string::npos && LowerA(x).find("\\services\\") == std::string::npos) return;
     std::string curKey;      // the open registryKey's service name, "" when none
@@ -268,6 +281,7 @@ void ScanManifestXml(const std::string& x, SxsScan* acc) {
                 if (start < 0) return;
                 SxsValue& v = acc->byName[Lower(FromUtf8(nm))];
                 SetField(&v.svcStart, start, &v.conflict);
+                mark(&v.fileService);
                 if (delayed == 1) SetField(&v.delayed, 1, &v.conflict);
             } else if (tag == "registrykey") {
                 curKey = ServiceKey(get("keyname"));
@@ -277,6 +291,7 @@ void ScanManifestXml(const std::string& x, SxsScan* acc) {
                 if (vn == "start" && d >= 0 && d <= 4) {
                     SxsValue& v = acc->byName[Lower(FromUtf8(curKey))];
                     SetField(&v.regStart, (int)d, &v.conflict);
+                    mark(&v.fileRegistry);
                 } else if (vn == "delayedautostart" && (d == 0 || d == 1)) {
                     SxsValue& v = acc->byName[Lower(FromUtf8(curKey))];
                     SetField(&v.delayed, (int)d, &v.conflict);
@@ -292,7 +307,7 @@ void ScanManifestXml(const std::string& x, SxsScan* acc) {
                 if (def == a.end()) return;
                 long long d = Dword(def->second);
                 SxsValue& v = acc->byName[w];
-                if (!isDelayed && d >= 0 && d <= 4) SetField(&v.setStart, (int)d, &v.conflict);
+                if (!isDelayed && d >= 0 && d <= 4) { SetField(&v.setStart, (int)d, &v.conflict); mark(&v.fileSetting); }
                 else if (isDelayed && (d == 0 || d == 1)) SetField(&v.setDelayed, (int)d, &v.conflict);
             }
         },
@@ -303,7 +318,7 @@ void ScanManifestXml(const std::string& x, SxsScan* acc) {
         [](const std::string&) {});
 }
 
-int ApplyEditionXml(const std::string& x, SxsScan* acc) {
+int ApplyEditionXml(const std::string& x, SxsScan* acc, const std::wstring& file) {
     int applied = 0;
     std::string component, open, text;   // the open <component>'s name; its open child element and that one's text
     Tokenize(x,
@@ -325,7 +340,11 @@ int ApplyEditionXml(const std::string& x, SxsScan* acc) {
             if (it == acc->settings.end()) return;
             long long d = Dword(text);
             SxsValue& v = acc->byName[it->second.first];
-            if (!it->second.second && d >= 0 && d <= 4) { SetField(&v.edStart, (int)d, &v.conflict); applied++; }
+            if (!it->second.second && d >= 0 && d <= 4) {
+                SetField(&v.edStart, (int)d, &v.conflict);
+                if (v.fileEdition.empty()) v.fileEdition = file;
+                applied++;
+            }
             else if (it->second.second && (d == 0 || d == 1)) { SetField(&v.edDelayed, (int)d, &v.conflict); applied++; }
         },
         [&](const std::string& t) { if (!open.empty()) text += Entities(t); });
@@ -347,7 +366,7 @@ SxsStock ScanSxs(SxsReader& r, const std::function<bool()>& cancelled) {
         std::wstring e;
         if (!r.ReadXml(nm, &xml, &skipped, &e)) { (skipped ? s.skipped : s.failed)++; continue; }
         s.manifests++;
-        ScanManifestXml(xml, &acc);
+        ScanManifestXml(xml, &acc, nm);
     }
     if (s.manifests == 0) {
         s.err = L"No component manifest could be read (" + std::to_wstring(s.failed) + L" failed, " +
@@ -358,11 +377,39 @@ SxsStock ScanSxs(SxsReader& r, const std::function<bool()>& cancelled) {
     std::wstring e;
     if (r.ReadEdition(&ed, &e)) {
         s.editionRead = true;
-        s.overrides = ApplyEditionXml(ed, &acc);
+        s.overrides = ApplyEditionXml(ed, &acc, s.edition + L"Edition.xml");
     }
     s.byName = std::move(acc.byName);
     s.ok = true;
     return s;
+}
+
+std::string SxsDumpTsv(const SxsStock& s, unsigned long long elapsedMs) {
+    std::string o = "# Hadron --dump-stock-live (read only: no SCM, registry or data-folder writes)\n";
+    o += "# build.UBR\t" + ToUtf8(s.build) + "\n# EditionID\t" + ToUtf8(s.edition) + "\n# edition file read\t" +
+         (s.editionRead ? "yes" : "no") + "\n# edition overrides\t" + std::to_string(s.overrides) + "\n# manifests read\t" +
+         std::to_string(s.manifests) + "\n# decompress/read failures\t" + std::to_string(s.failed) +
+         "\n# skipped (reparse, recall or offline)\t" + std::to_string(s.skipped) + "\n# elapsed ms\t" +
+         std::to_string(elapsedMs) + "\n";
+    if (!s.ok) o += "# error\t" + ToUtf8(s.err) + "\n";
+    o += "name\tstart\tdelayed\tlayer\tconflict\tsource\n";
+    for (auto& kv : s.byName) {
+        const SxsValue& v = kv.second;
+        const char* layer = "";
+        switch (v.StartSrc()) {
+            case SxsValue::EDITION: layer = "edition"; break;
+            case SxsValue::SERVICE: layer = "serviceData"; break;
+            case SxsValue::REGISTRY: layer = "registry"; break;
+            case SxsValue::SETTING: layer = "settingDefault"; break;
+            case SxsValue::NONE: layer = "none"; break;
+        }
+        StartCfg c = v.Cfg();
+        bool conflict = v.conflict || !v.Usable();
+        o += ToUtf8(kv.first) + "\t" + (v.StartSrc() == SxsValue::NONE ? std::string("-") : std::to_string(c.start)) + "\t" +
+             (c.start == 2 ? std::to_string(c.delayed) : std::string("-")) + "\t" + layer + "\t" + (conflict ? "1" : "0") +
+             "\t" + ToUtf8(v.StartFile()) + "\n";
+    }
+    return o;
 }
 
 // ---- cache --------------------------------------------------------------------------------------

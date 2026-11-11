@@ -39,7 +39,10 @@ struct SxsValue {
     int setStart = -1, setDelayed = -1;   // configuration-setting defaults
     int edStart = -1, edDelayed = -1;     // the edition file's override
     bool conflict = false;       // two manifests (or serviceData and the registry value) disagree: no value
+    // The file that first set each layer's start (for --dump-stock-live; not cached).
+    std::wstring fileService, fileRegistry, fileSetting, fileEdition;
     Src StartSrc() const;
+    const std::wstring& StartFile() const;   // the file of StartSrc()'s layer
     Src DelayedSrc() const;      // NONE when nothing says (not delayed)
     bool Usable() const;
     bool LowConfidence() const;  // the start, or an Auto value's delay, comes from a setting default alone
@@ -77,10 +80,10 @@ struct SxsScan {
 
 // Hadron's own scanner (no XML library: rule 3). Adds every serviceData start and Services\X Start /
 // DelayedAutostart registry value found in xml to out, marking conflicts.
-void ScanManifestXml(const std::string& xml, SxsScan* acc);
+void ScanManifestXml(const std::string& xml, SxsScan* acc, const std::wstring& file = L"");
 // The edition file: each <component name="C"> child <S>value</S> whose "c|s" is a known setting overrides that
 // service's value. Returns how many were applied.
-int ApplyEditionXml(const std::string& xml, SxsScan* acc);
+int ApplyEditionXml(const std::string& xml, SxsScan* acc, const std::wstring& file = L"");
 
 class SxsReader {
 public:
@@ -101,6 +104,10 @@ std::unique_ptr<SxsReader> MakeFakeSxsReader(const std::wstring& dir);
 
 // Reads every manifest (cancel: stop early, ok false).
 SxsStock ScanSxs(SxsReader& r, const std::function<bool()>& cancelled = nullptr);
+
+// --dump-stock-live's UTF-8 TSV: "#" header lines (build.UBR, EditionID, manifests, failures, skipped, elapsed ms),
+// then name, start, delayed, layer (edition|serviceData|registry|settingDefault), conflict, source file per name.
+std::string SxsDumpTsv(const SxsStock& s, unsigned long long elapsedMs);
 
 // The cache in the data folder: "sxs-<build>.<ubr>-<edition>.txt", written once (temp + rename, never overwritten).
 std::wstring SxsCacheName(const std::wstring& buildUbr, const std::wstring& edition);   // "" when either is odd
