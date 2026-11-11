@@ -5,7 +5,8 @@
 #    zips it (Python zipfile, deflated) so both snapshot sources are exercised. Deletes nothing.
 # 2. --selftest standalone (folder fixture) and in the suite (--snapshot zip).
 # 3. Screenshots, one xvfb-run each: Baseline/Console x dark/light from the folder fixture, a non-solo
-#    suite shot from the zip, the empty state, and a goal shot (Goal column colours).
+#    suite shot from the zip, the empty state, a goal shot (Goal column colours) and a detail-pane shot
+#    of a sourced entry (--select: Basis row and "Sources for numbers").
 set -euo pipefail
 BUILD="${1:?build dir}"; OUT="${2:?output dir}"
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -45,4 +46,5 @@ shot bios-suite-baseline "$BUILD/Hadron.exe" --module bios --snapshot "$FIX/snap
 shot bios-suite-console "$BUILD/Hadron.exe" --module bios --snapshot "$FIX/snap" --layout console
 shot bios-empty-dark "$BUILD/HadronBios.exe"
 shot bios-goal-latency-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --goal 5
+shot bios-detail-iccmax-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --goal 5 --select "IA ICC Max Current Limit Override"
 echo "fixture left at $FIX (temp; not deleted by this script)"

@@ -100,8 +100,8 @@ int GoalRank(const Db& db, const Setting& s, int goal);
 // Basis display (rule 7). "Not stated" when the field is empty (v1 files and the temporary v2 file).
 std::wstring BasisLabel(const std::wstring& basis);
 
-// Version guard (spec "Version guard"). Board: the SMBIOS type-2 product contains the B board id
-// (MSI reports "PRO Z790-P WIFI (MS-7E06)"). BIOS: equal ignoring case, or MSI's mapping between the
+// Version guard (spec "Version guard"). Board: the SMBIOS type-2 product contains the B board id as a
+// token delimited by whitespace, parentheses or the string edges (MSI reports "PRO Z790-P WIFI (MS-7E06)"). BIOS: equal ignoring case, or MSI's mapping between the
 // download name and the SMBIOS type-0 version ("7E06vAF" <-> "A.F0"). reported may be a whole line
 // (system.txt "BIOS: <vendor> <version> <date>"): any whitespace-separated token can match.
 bool BoardMatches(const std::wstring& dbBoard, const std::wstring& reported);

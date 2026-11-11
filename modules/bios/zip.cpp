@@ -7,16 +7,18 @@
 namespace hx::bios {
 
 uint32_t Crc32(const uint8_t* p, size_t n, uint32_t crc) {
-    static uint32_t table[256];
-    static bool init = false;
-    if (!init) {
-        for (uint32_t i = 0; i < 256; i++) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            table[i] = c;
+    struct Table {
+        uint32_t t[256];
+        Table() {
+            for (uint32_t i = 0; i < 256; i++) {
+                uint32_t c = i;
+                for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+                t[i] = c;
+            }
         }
-        init = true;
-    }
+    };
+    static const Table tab;   // function-local static: initialised once, thread-safe (C++11)
+    const uint32_t* table = tab.t;
     crc = ~crc;
     for (size_t i = 0; i < n; i++) crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
     return ~crc;
@@ -84,10 +86,10 @@ const uint8_t kDistExtra[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 
 
 }  // namespace
 
-bool Inflate(const uint8_t* in, size_t n, std::vector<uint8_t>* out, size_t expected, std::wstring* err) {
+bool Inflate(const uint8_t* in, size_t n, std::vector<uint8_t>* out, size_t maxOut, std::wstring* err) {
     Bits b(in, n);
     const size_t start = out->size();
-    const size_t limit = expected ? start + expected : (size_t)1 << 30;
+    const size_t limit = start + maxOut;   // hard stop, whatever the stream or the header claims
     auto fail = [&](const wchar_t* why) { if (err) *err = std::wstring(L"deflate: ") + why; return false; };
     bool last = false;
     while (!last) {
@@ -102,7 +104,7 @@ bool Inflate(const uint8_t* in, size_t n, std::vector<uint8_t>* out, size_t expe
             b.pos += 4;
             if ((len ^ 0xFFFF) != nlen) return fail(L"stored block length check failed");
             if (b.pos + len > n) return fail(L"truncated stored data");
-            if (out->size() + len > limit) return fail(L"output larger than the entry says");
+            if (out->size() + len > limit) return fail(L"output would exceed its size limit");
             out->insert(out->end(), in + b.pos, in + b.pos + len);
             b.pos += len;
             continue;
@@ -153,7 +155,7 @@ bool Inflate(const uint8_t* in, size_t n, std::vector<uint8_t>* out, size_t expe
             int sym = lit.Decode(b);
             if (sym < 0) return fail(L"bad literal/length symbol");
             if (sym < 256) {
-                if (out->size() + 1 > limit) return fail(L"output larger than the entry says");
+                if (out->size() + 1 > limit) return fail(L"output would exceed its size limit");
                 out->push_back((uint8_t)sym);
                 continue;
             }
@@ -166,7 +168,7 @@ bool Inflate(const uint8_t* in, size_t n, std::vector<uint8_t>* out, size_t expe
             size_t d = kDistBase[ds] + b.Get(kDistExtra[ds]);
             if (b.over) return fail(L"truncated data");
             if (d > out->size() - start) return fail(L"distance before start of output");
-            if (out->size() + len > limit) return fail(L"output larger than the entry says");
+            if (out->size() + len > limit) return fail(L"output would exceed its size limit");
             size_t from = out->size() - d;
             for (size_t k = 0; k < len; k++) out->push_back((*out)[from + k]);
         }
@@ -237,11 +239,15 @@ const ZipEntry* ZipReader::Find(const std::wstring& name) const {
     return nullptr;
 }
 
-bool ZipReader::Extract(const ZipEntry& z, std::vector<uint8_t>* out, std::wstring* err) const {
+bool ZipReader::Extract(const ZipEntry& z, std::vector<uint8_t>* out, size_t cap, std::wstring* err) const {
     out->clear();
     auto fail = [&](const std::wstring& why) { if (err) *err = z.name + L": " + why; return false; };
     if (z.flags & 0x0001) return fail(L"encrypted entries are not supported");
     if (z.csize == 0xFFFFFFFFu || z.usize == 0xFFFFFFFFu) return fail(L"zip64 entries are not supported");
+    // Size checks before any allocation: a hostile directory can claim anything.
+    if (z.usize > cap) return fail(L"entry is larger than " + std::to_wstring(cap >> 20) + L" MB (" +
+                                   std::to_wstring(z.usize) + L" bytes claimed)");
+    if (z.method == 8 && z.usize == 0 && z.csize > 16) return fail(L"empty entry with compressed data");
     size_t p = z.localOffset;
     if (p + 30 > data_.size() || Rd32(&data_[p]) != 0x04034b50) return fail(L"bad local header");
     size_t body = p + 30 + Rd16(&data_[p + 26]) + Rd16(&data_[p + 28]);

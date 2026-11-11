@@ -31,12 +31,17 @@ bool ParseSmbios(const uint8_t* raw, size_t n, SmbiosInfo* out) {
     *out = SmbiosInfo{};
     if (n < 8) return false;
     uint32_t len = raw[4] | (raw[5] << 8) | (raw[6] << 16) | ((uint32_t)raw[7] << 24);
-    const uint8_t* p = raw + 8;
-    const uint8_t* end = raw + 8 + (len < n - 8 ? len : n - 8);
+    // Walk by offsets within [0, size): the header's Length may run past the buffer (clamped here) and a
+    // string set may have no terminator (the skip below stops at the end), so no pointer leaves the table.
+    const uint8_t* base = raw + 8;
+    const size_t size = len < n - 8 ? len : n - 8;
+    const uint8_t* end = base + size;
     bool have0 = false, have2 = false;
-    while (p + 4 <= end) {
+    size_t off = 0;
+    while (size - off >= 4) {
+        const uint8_t* p = base + off;
         uint8_t type = p[0], flen = p[1];
-        if (flen < 4 || p + flen > end) break;
+        if (flen < 4 || flen > size - off) break;
         const uint8_t* strs = p + flen;
         if (type == 0 && !have0 && flen >= 9) {
             out->biosVendor = SmbiosString(strs, end, p[4]);
@@ -50,9 +55,10 @@ bool ParseSmbios(const uint8_t* raw, size_t n, SmbiosInfo* out) {
         }
         if (type == 127) break;   // end-of-table
         // Skip the string set: up to and including the double NUL.
-        const uint8_t* q = strs;
-        while (q + 1 < end && !(q[0] == 0 && q[1] == 0)) q++;
-        p = q + 2;
+        size_t q = off + flen;
+        while (q + 1 < size && !(base[q] == 0 && base[q + 1] == 0)) q++;
+        if (q + 1 >= size) break;   // unterminated string set: nothing after it can be trusted
+        off = q + 2;
     }
     out->ok = have0 || have2;
     return out->ok;

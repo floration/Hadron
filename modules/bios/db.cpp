@@ -239,7 +239,17 @@ std::wstring BasisLabel(const std::wstring& b) {
 
 bool BoardMatches(const std::wstring& dbBoard, const std::wstring& reported) {
     if (dbBoard.empty() || reported.empty()) return false;
-    return Lower(reported).find(Lower(dbBoard)) != std::wstring::npos;
+    // A delimited token: bounded by whitespace, parentheses or the string edges, so "MS-7E06" matches
+    // "PRO Z790-P WIFI (MS-7E06)" but not "MS-7E06x" or "XMS-7E06".
+    std::wstring r = Lower(reported), b = Lower(dbBoard);
+    auto delim = [](wchar_t c) { return iswspace(c) || c == L'(' || c == L')'; };
+    for (size_t pos = r.find(b); pos != std::wstring::npos; pos = r.find(b, pos + 1)) {
+        bool left = pos == 0 || delim(r[pos - 1]);
+        size_t e = pos + b.size();
+        bool right = e == r.size() || delim(r[e]);
+        if (left && right) return true;
+    }
+    return false;
 }
 
 bool BiosMatches(const std::wstring& dbBios, const std::wstring& reported) {
@@ -261,6 +271,19 @@ bool BiosMatches(const std::wstring& dbBios, const std::wstring& reported) {
     return false;
 }
 
+// Rule 7 in the export: the basis of the KB entry behind a line, then the field-17 source of every
+// number that appears in the text printed for it.
+static std::wstring BasisLines(const Kb& k, const std::wstring& printed) {
+    std::wstring o = L"    basis: " + BasisLabel(k.basis) + (k.basisNote.empty() ? L"" : L": " + k.basisNote) + L"\r\n";
+    std::set<std::wstring> done;
+    for (auto& src : k.sources) {
+        if (src.number.empty() || printed.find(src.number) == std::wstring::npos) continue;
+        std::wstring line = L"    source: " + src.number + L" \u2014 " + src.kind + L" \u2014 " + src.ref + L"\r\n";
+        if (done.insert(line).second) o += line;
+    }
+    return o;
+}
+
 // Legacy Export (266-295) content; the caller writes it (Save dialog, UTF-8 BOM).
 std::wstring ExportText(const Db& db, int goal, const std::wstring& source, const std::wstring& unverified) {
     if (goal < 0 || goal >= kGoalCount) return L"";
@@ -278,6 +301,7 @@ std::wstring ExportText(const Db& db, int goal, const std::wstring& source, cons
         if (!s.path.empty()) o += L"    where: " + s.path + L"\r\n";
         const Kb* k = db.KbOf(s);
         if (k && !k->note.empty()) o += L"    note: " + k->note + L"\r\n";
+        if (k) o += BasisLines(*k, RecText(db, s, goal) + L"\n" + k->note);
         n++;
     }
     if (!n) o += L"(none - everything with an exact recommendation already matches)\r\n";
@@ -290,7 +314,9 @@ std::wstring ExportText(const Db& db, int goal, const std::wstring& source, cons
         const std::wstring& r = k->rec[goal];
         if (r.empty() || RecVal(db, s, goal, &v)) continue;
         seen.insert(s.kb);
-        o += L"- " + k->title + L" (now: " + CurText(s) + L"): " + RecText(db, s, goal) + L"\r\n";
+        std::wstring rt = RecText(db, s, goal);
+        o += L"- " + k->title + L" (now: " + CurText(s) + L"): " + rt + L"\r\n";
+        o += BasisLines(*k, rt);
     }
     // Normalise embedded newlines (KB text may contain \n) to CRLF.
     std::wstring crlf;

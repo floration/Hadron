@@ -54,7 +54,7 @@ const wchar_t* const kViewClass = L"Hadron.bios.View";
 const wchar_t* const kAppTitle = L"BIOS Settings Explorer";
 
 enum ClickId {
-    ID_NONE = 0, ID_EXPORT = 1, ID_LOAD = 2, ID_SAVE = 3, ID_BANNER_LOAD = 4, ID_SEARCH = 5,
+    ID_NONE = 0, ID_EXPORT = 1, ID_LOAD = 2, ID_SAVE = 3, ID_BANNER_LOAD = 4, ID_SEARCH = 5, ID_BANNER_TOGGLE = 6,
     ID_GOAL = 100,     // + goal + 1 (100 = None)
     ID_FILTER = 200,   // + filter
 };
@@ -65,7 +65,13 @@ enum class Job { None, Live, Load, Save };
 enum ColId { C_NAME = 0, C_CUR = 1, C_DEF = 2, C_GOAL = 3, C_SNAP = 4 };
 
 struct Click { RECT rc; int id; };
-struct Banner { std::wstring text; int tone; int action; };   // tone 0 info, 1 warn, 2 bad
+// tone 0 info, 1 warn, 2 bad. action: a click id for the banner's button (0 = none). Text is capped at
+// 3 lines unless the banner is expanded (maxLines 0).
+struct Banner {
+    std::wstring text; int tone; int action; std::wstring actionLabel; int maxLines;
+    Banner(std::wstring t, int tn, int act = 0, std::wstring label = L"", int lines = 3)
+        : text(std::move(t)), tone(tn), action(act), actionLabel(std::move(label)), maxLines(lines) {}
+};
 
 COLORREF Mix(COLORREF a, COLORREF b, double t) {
     return RGB((int)(GetRValue(a) * (1 - t) + GetRValue(b) * t), (int)(GetGValue(a) * (1 - t) + GetGValue(b) * t),
@@ -157,7 +163,7 @@ private:
     void Chip(HDC dc, int& x, int y, const std::wstring& label, int id, bool on);
     int  Button(HDC dc, int right, int y, const std::wstring& label, int id, bool primary, bool enabled);
     void PaintHeader(HDC dc, const RECT& rc);
-    void PaintBanners(HDC dc);
+    int  PaintBanners(HDC dc, const RECT& rc);   // returns the y below the last banner
     void PaintList(HDC dc);
     int  PaintDetail(HDC dc, bool draw);
     int  TextW(HDC dc, const std::wstring& s, HFONT f) const;
@@ -178,9 +184,14 @@ private:
     std::map<VarKey, const FwVar*> liveState_;
     std::wstring snapLabel_, snapSummary_;
     int snapLoaded_ = 0;
-    bool unverified_ = false;
+    bool unverified_ = false;       // primary values: guard mismatched or couldn't run
     std::wstring guardText_;        // banner for a mismatch
-    std::wstring guardUnknown_;     // why the guard could not run (no mismatch claimed)
+    std::wstring guardUnknown_;     // why the guard could not run (values still marked unverified)
+    bool snapUnverified_ = false;   // the compare snapshot: same rule, from its system.txt
+    std::wstring snapGuardText_;
+    bool bannerExpanded_ = false;
+    bool centrePending_ = false;    // a selection made before the first layout still needs centring
+    std::wstring selectPrompt_;     // --select <prompt>: applied at the first Refilter that lists it   // the per-variable error banner shows every variable
 
     // worker
     sys::Worker worker_;
@@ -337,6 +348,9 @@ HWND BiosModule::Create(IHost& host, HWND parent, const RECT& rc) {
             if (g >= 1 && g <= kGoalCount) { goal_ = g - 1; Refilter(); }
         }
     }
+    std::wstring selectArg;
+    for (size_t i = 0; i + 1 < cl.rest.size(); i++) if (cl.rest[i] == L"--select") selectArg = cl.rest[i + 1];
+    if (!selectArg.empty()) selectPrompt_ = selectArg;
     if (!cl.screenshot.empty() || cl.selftest) {
         if (!snapArg.empty()) {
             SnapLoad s;
@@ -372,7 +386,12 @@ void BiosModule::StartLive() {
     auto want = db_.Variables();
     LiveResult* out = &jobLive_;
     job_ = Job::Live;
-    if (!worker_.Start(hwnd_, WM_BIOS_DONE, [want, out] { ReadLive(want, out); })) {
+    if (!worker_.Start(hwnd_, WM_BIOS_DONE, [want, out] {
+            // An exception must not escape the worker thread (it would end the process).
+            try { ReadLive(want, out); }
+            catch (const std::bad_alloc&) { *out = LiveResult{}; out->error = L"Out of memory while reading firmware variables."; }
+            catch (const std::exception& e) { *out = LiveResult{}; out->error = L"Firmware read failed: " + FromUtf8(e.what()); }
+        })) {
         job_ = Job::None;
         SetNotice(L"Could not start the firmware read: " + sys::ErrorText(GetLastError()), 2);
         return;
@@ -386,7 +405,11 @@ void BiosModule::StartLoad(const std::wstring& path) {
     jobPath_ = path;
     SnapLoad* out = &jobSnap_;
     job_ = Job::Load;
-    if (!worker_.Start(hwnd_, WM_BIOS_DONE, [path, out] { LoadSnapshot(path, out); })) {
+    if (!worker_.Start(hwnd_, WM_BIOS_DONE, [path, out] {
+            try { LoadSnapshot(path, out); }
+            catch (const std::bad_alloc&) { *out = SnapLoad{}; out->error = L"Out of memory while loading the snapshot."; }
+            catch (const std::exception& e) { *out = SnapLoad{}; out->error = L"Loading failed: " + FromUtf8(e.what()); }
+        })) {
         job_ = Job::None;
         SetNotice(L"Could not start loading the snapshot: " + sys::ErrorText(GetLastError()), 2);
         return;
@@ -403,6 +426,7 @@ void BiosModule::StartSave(const std::wstring& parent) {
     sys::Worker* wk = &worker_;
     job_ = Job::Save;
     bool ok = worker_.Start(hwnd_, WM_BIOS_DONE, [parent, out, wk] {
+      try {
         *out = SaveResult{};
         ThreadPrivilege priv(L"SeSystemEnvironmentPrivilege");   // this thread only
         std::vector<FwVar> vars;
@@ -417,6 +441,11 @@ void BiosModule::StartSave(const std::wstring& parent) {
         DWORD se = 0;
         ReadSmbios(&smb, &se);
         SaveSnapshot(parent, vars, smb, out);
+      } catch (const std::bad_alloc&) {
+        out->ok = false; out->error = L"Out of memory while saving the snapshot.";
+      } catch (const std::exception& e) {
+        out->ok = false; out->error = L"Saving failed: " + FromUtf8(e.what());
+      }
     });
     if (!ok) {
         job_ = Job::None;
@@ -467,11 +496,27 @@ void BiosModule::ApplyLive() {
         // A snapshot was opened first: it becomes the comparison, live becomes primary.
         for (auto& s : db_.S) { s.hasSnap = s.hasCur; s.snap = s.cur; }
         compare_ = true;
+        snapUnverified_ = unverified_;
+        snapGuardText_ = guardText_.empty() ? guardUnknown_ : guardText_;
     }
     if (primary_ == Src::None) sel_ = -1;
     db_.Apply(vm, /*snapshot=*/false);
     primary_ = Src::Live;
     CheckGuardLive();
+}
+
+// Version guard against a snapshot's own system.txt. Returns "" when it matches; otherwise the reason,
+// and the values count as unverified (a mismatch, or no record to check against).
+std::wstring SnapGuard(const Db& db, const SnapLoad& s, const wchar_t* what) {
+    if (db.board.empty()) return L"This settings map has no board/BIOS guard (v1 file). Every value is unverified.";
+    if (!s.hasSystem || (s.sysBoard.empty() && s.sysBios.empty()))
+        return std::wstring(L"The ") + what + L" doesn't record its board or BIOS version (no system.txt), so the "
+               L"map can't be checked against it. Its values are marked unverified.";
+    if (!BoardMatches(db.board, s.sysBoard) || !BiosMatches(db.bios, s.sysBios))
+        return L"This map was built for " + db.board + L" / " + db.bios + L"; the " + what + L" reports " +
+               (s.sysBoard.empty() ? L"?" : s.sysBoard) + L" / " + (s.sysBios.empty() ? L"?" : s.sysBios) +
+               L". Its values are unverified.";
+    return L"";
 }
 
 void BiosModule::ApplySnapshot(SnapLoad&& s) {
@@ -482,24 +527,20 @@ void BiosModule::ApplySnapshot(SnapLoad&& s) {
     if (primary_ == Src::Live) {
         db_.Apply(s.vars, /*snapshot=*/true);
         compare_ = true;
+        snapGuardText_ = SnapGuard(db_, s, L"compared snapshot");   // reviewer 3.1: the compare side too
+        snapUnverified_ = !snapGuardText_.empty();
     } else {
         db_.Apply(s.vars, /*snapshot=*/false);
         db_.ClearValues(true);
         compare_ = false;
+        snapUnverified_ = false; snapGuardText_.clear();
         primary_ = Src::Snapshot;
-        // Version guard from the snapshot's own system.txt, when it recorded one.
-        unverified_ = false; guardText_.clear(); guardUnknown_.clear();
-        if (!s.hasSystem || (s.sysBoard.empty() && s.sysBios.empty())) {
-            guardUnknown_ = L"This snapshot doesn't record its board or BIOS version (no system.txt), so the map "
-                            L"can't be checked against it.";
-        } else if (!BoardMatches(db_.board, s.sysBoard) || !BiosMatches(db_.bios, s.sysBios)) {
-            unverified_ = true;
-            guardText_ = L"This map was built for " + db_.board + L" / " + db_.bios + L"; the snapshot reports " +
-                         (s.sysBoard.empty() ? L"?" : s.sysBoard) + L" / " + (s.sysBios.empty() ? L"?" : s.sysBios) +
-                         L". Every value is unverified.";
-        }
+        guardText_.clear(); guardUnknown_.clear();
+        std::wstring g = SnapGuard(db_, s, L"snapshot");
+        unverified_ = !g.empty();
+        if (!s.hasSystem || (s.sysBoard.empty() && s.sysBios.empty())) guardUnknown_ = g;
+        else guardText_ = g;
     }
-    if (db_.board.empty()) { unverified_ = true; guardText_ = L"This settings map has no board/BIOS guard (v1 file). Every value is unverified."; }
 }
 
 void BiosModule::CheckGuardLive() {
@@ -507,8 +548,9 @@ void BiosModule::CheckGuardLive() {
     if (db_.board.empty()) { unverified_ = true; guardText_ = L"This settings map has no board/BIOS guard (v1 file). Every value is unverified."; return; }
     const SmbiosInfo& m = live_.smbios;
     if (!m.ok) {
+        unverified_ = true;   // reviewer 3.2: a guard that can't run doesn't verify anything
         guardUnknown_ = L"Couldn't read SMBIOS (" + VarErrorText(live_.smbiosErr) +
-                        L"), so the board and BIOS version can't be checked against the map.";
+                        L"), so the board and BIOS version can't be checked against the map. Values are marked unverified.";
         return;
     }
     if (!BoardMatches(db_.board, m.boardProduct) || !BiosMatches(db_.bios, m.biosVersion)) {
@@ -525,6 +567,7 @@ void BiosModule::Refilter() {
     std::wstring q = Lower(search_.Text());
     if (filter_ == F_DIFFERS && goal_ < 0) filter_ = F_ALL;
     if (filter_ == F_SNAPDIFF && !compare_) filter_ = F_ALL;
+    if (sortCol_ == C_SNAP && !compare_) sortCol_ = -1;
     for (int i = 0; i < (int)db_.S.size(); i++) {
         const Setting& s = db_.S[i];
         if (filter_ == F_KEY && !db_.IsKey(s)) continue;
@@ -544,6 +587,9 @@ void BiosModule::Refilter() {
         return rank(a) < rank(b);
     });
     SortV();
+    if (!selectPrompt_.empty()) {
+        for (int i : V_) if (db_.S[i].prompt == selectPrompt_) { sel_ = i; selectPrompt_.clear(); break; }
+    }
     int prev = sel_;
     if (sel_ >= 0 && std::find(V_.begin(), V_.end(), sel_) == V_.end()) sel_ = V_.empty() ? -1 : V_[0];
     if (sel_ < 0 && !V_.empty()) sel_ = V_[0];
@@ -557,6 +603,8 @@ void BiosModule::Refilter() {
         int rows = std::max(1, (int)(rcListBody_.bottom - rcListBody_.top) / std::max(1, pitch));
         listSb_.Configure(rcListBody_.bottom - rcListBody_.top, (int)V_.size() * pitch);
         if (k >= rows) listSb_.SetOffset((k - rows / 2) * pitch);
+    } else if (it != V_.end() && it != V_.begin()) {
+        centrePending_ = true;   // --select before the first layout: centre it once the list has a size
     }
 }
 
@@ -608,7 +656,8 @@ std::vector<Banner> BiosModule::Banners() const {
     if (!dbOk_) { b.push_back({dbErr_, 2, 0}); return b; }
     if (!notice_.empty()) b.push_back({notice_, noticeTone_, 0});
     if (!guardText_.empty()) b.push_back({guardText_, 2, 0});
-    if (liveDone_) {
+    if (liveDone_ && !live_.error.empty()) b.push_back({live_.error, 2, 0});
+    else if (liveDone_) {
         if (!live_.elevated)
             b.push_back({L"Not running as administrator, so live values can't be read (the manifest asks for "
                          L"admin; something ignored it). Load a snapshot instead.", 1, 0});
@@ -622,15 +671,16 @@ std::vector<Banner> BiosModule::Banners() const {
             int bad = (int)live_.vars.size() - live_.readOk;
             if (bad > 0) {
                 std::wstring t = std::to_wstring(bad) + L" of " + std::to_wstring(live_.vars.size()) +
-                                 L" variables couldn't be read; settings stored in them show \"-\". ";
-                int shown = 0;
-                for (auto& v : live_.vars) {
-                    if (v.err == 0) continue;
-                    if (shown == 3) { t += L"; …"; break; }
-                    t += (shown ? L"; " : L"") + v.name + L": " + VarErrorText(v.err);
-                    shown++;
+                                 L" variables couldn't be read; settings stored in them show \"-\" (select one to "
+                                 L"see why).";
+                if (bannerExpanded_) {
+                    for (auto& v : live_.vars)
+                        if (v.err) t += L"\n\u2022 " + v.name + L" {" + v.guid + L"}: " + VarErrorText(v.err);
+                } else {
+                    for (auto& v : live_.vars) if (v.err) { t += L" First: " + v.name + L": " + VarErrorText(v.err) + L"."; break; }
                 }
-                b.push_back({t, live_.readOk ? 1 : 2, 0});
+                b.push_back({t, live_.readOk ? 1 : 2, ID_BANNER_TOGGLE, bannerExpanded_ ? L"Hide list" : L"Show all",
+                             bannerExpanded_ ? 0 : 2});
             }
         }
     }
@@ -645,10 +695,11 @@ std::vector<Banner> BiosModule::Banners() const {
         if (!snapSummary_.empty()) t += L" " + snapSummary_ + L".";
         b.push_back({t, 0, 0});
     }
-    if (!guardUnknown_.empty()) b.push_back({guardUnknown_, 0, 0});
+    if (!guardUnknown_.empty()) b.push_back({guardUnknown_, 1, 0});
+    if (compare_ && !snapGuardText_.empty()) b.push_back({snapGuardText_, 1, 0});
     if (primary_ == Src::None && job_ != Job::Live && job_ != Job::Load)
         b.push_back({L"No values loaded. Every setting is listed with its default; load a snapshot (a UEFI_Dump "
-                     L"folder or its .zip) to see values.", 1, ID_BANNER_LOAD});
+                     L"folder or its .zip) to see values.", 1, ID_BANNER_LOAD, L"Load snapshot…"});
     return b;
 }
 
@@ -659,6 +710,7 @@ void BiosModule::OnClickId(int id) {
     if (id == ID_EXPORT) DoExport();
     else if (id == ID_LOAD || id == ID_BANNER_LOAD) DoLoadDialog();
     else if (id == ID_SAVE) DoSaveDialog();
+    else if (id == ID_BANNER_TOGGLE) bannerExpanded_ = !bannerExpanded_;
     else if (id == ID_SEARCH) focus_ = Focus::Search;
     else if (id >= ID_GOAL && id < ID_GOAL + 1 + kGoalCount) {
         goal_ = id - ID_GOAL - 1;
@@ -696,7 +748,8 @@ void BiosModule::DoExport() {
     }
     std::wstring path = file.data();
     host_->Prefs().SetStr(L"exportDir", path.substr(0, path.find_last_of(L"\\/")));
-    std::wstring unv = unverified_ ? guardText_ : L"";
+    std::wstring unv = !unverified_ ? L"" : (guardText_.empty() ? guardUnknown_ : guardText_);
+    if (compare_ && snapUnverified_) unv += (unv.empty() ? L"" : L" ") + snapGuardText_;
     std::string data = "\xEF\xBB\xBF" + ToUtf8(ExportText(db_, goal_, SourceLine(), unv));
     // The user confirmed any overwrite in the dialog (OFN_OVERWRITEPROMPT), so CREATE_ALWAYS is theirs.
     HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
@@ -1008,42 +1061,42 @@ void BiosModule::PaintHeader(HDC dc, const RECT& rc) {
     }
 }
 
-void BiosModule::PaintBanners(HDC dc) {
+int BiosModule::PaintBanners(HDC dc, const RECT& rc) {
     Pal p(host_->Theme());
     const Fonts& f = host_->Fonts();
-    int pad = Sc(Console() ? 10 : 20);
-    RECT cl; GetClientRect(hwnd_, &cl);
+    const bool con = Console();
+    int pad = Sc(con ? 10 : 20);
     int y = bannerTop_;
     for (auto& b : Banners()) {
         COLORREF tone = b.tone == 2 ? p.bad : (b.tone == 1 ? p.warn : p.acc);
-        int right = cl.right - pad;
-        int actionW = 0;
-        if (b.action) actionW = TextW(dc, L"Load snapshot…", f.caption) + Sc(26) + Sc(8);
-        // Wrapped text: measure, then size the banner to fit (up to 3 lines).
+        int right = rc.right - pad;
+        int actionW = b.action ? TextW(dc, b.actionLabel, f.caption) + Sc(26) + Sc(8) : 0;
+        // Wrapped text: measure, then size the banner to fit (capped unless expanded).
         RECT tr{pad + Sc(14), 0, right - Sc(10) - actionW, 0};
-        RECT m = tr; m.bottom = Sc(200);
+        RECT m = tr; m.bottom = Sc(2000);
         SelectObject(dc, f.caption);
         DrawTextW(dc, b.text.c_str(), -1, &m, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
-        int lineH = Sc(16);
-        int textH = std::min((int)(m.bottom - m.top), lineH * 3);
-        int h = std::max(Sc(Console() ? 24 : 30), textH + Sc(Console() ? 8 : 12));
+        int textH = m.bottom - m.top;
+        if (b.maxLines > 0) textH = std::min(textH, Sc(16) * b.maxLines);
+        int h = std::max(Sc(con ? 24 : 30), textH + Sc(con ? 8 : 12));
         RECT r{pad, y, right, y + h};
-        RoundFill(dc, r, Sc(Console() ? 3 : 8), Mix(p.panel, tone, 0.16));
+        RoundFill(dc, r, Sc(con ? 3 : 8), Mix(p.panel, tone, 0.16));
         RECT bar{r.left, r.top, r.left + Sc(4), r.bottom};
         FillSolid(dc, bar, tone);
         tr.top = y + (h - textH) / 2; tr.bottom = tr.top + textH;
         ui::DrawText(dc, b.text, tr, f.caption, p.text, DT_WORDBREAK | DT_END_ELLIPSIS);
         if (b.action) {
-            int bh = Sc(Console() ? 20 : 24);
+            int bh = Sc(con ? 20 : 24);
             int bw = actionW - Sc(8);
             RECT ar{right - Sc(8) - bw, y + (h - bh) / 2, right - Sc(8), y + (h - bh) / 2 + bh};
             bool hot = hoverId_ == b.action;
             RoundFill(dc, ar, Sc(6), hot ? Mix(p.acc, RGB(255, 255, 255), 0.18) : p.acc);
-            ui::DrawText(dc, L"Load snapshot…", ar, f.caption, p.onAcc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+            ui::DrawText(dc, b.actionLabel, ar, f.caption, p.onAcc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
             AddClick(ar, b.action);
         }
         y += h + Sc(6);
     }
+    return y == bannerTop_ ? y : y + Sc(2);
 }
 
 void BiosModule::Paint(HDC dc, const RECT& rc) {
@@ -1058,25 +1111,7 @@ void BiosModule::Paint(HDC dc, const RECT& rc) {
 
     PaintHeader(dc, rc);
     bannerTop_ = Sc(con ? 38 : 74);
-    // Measure the banner block by painting it (it is above everything else and never overlaps).
-    PaintBanners(dc);
-    int y = bannerTop_;
-    {
-        // Recompute the banner block height the same way PaintBanners did.
-        int n = 0;
-        RECT cl; GetClientRect(hwnd_, &cl);
-        for (auto& b : Banners()) {
-            int actionW = b.action ? TextW(dc, L"Load snapshot…", f.caption) + Sc(34) : 0;
-            RECT m{pad + Sc(14), 0, cl.right - pad - Sc(10) - actionW, Sc(200)};
-            SelectObject(dc, f.caption);
-            DrawTextW(dc, b.text.c_str(), -1, &m, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
-            int textH = std::min((int)(m.bottom - m.top), Sc(16) * 3);
-            y += std::max(Sc(con ? 24 : 30), textH + Sc(con ? 8 : 12)) + Sc(6);
-            n++;
-        }
-        if (!n) y = bannerTop_;
-        else y += Sc(2);
-    }
+    int y = PaintBanners(dc, rc);
 
     // Goal row.
     int chipH = Sc(con ? 22 : 26);
@@ -1138,6 +1173,13 @@ void BiosModule::PaintList(HDC dc) {
     rcListBody_ = RECT{rcList_.left, rcList_.top + hdrH, rcList_.right, rcList_.bottom - Sc(6)};
     int viewH = rcListBody_.bottom - rcListBody_.top;
     listSb_.Configure(viewH, (int)V_.size() * pitch);
+    if (centrePending_ && viewH > 0) {
+        centrePending_ = false;
+        auto it = std::find(V_.begin(), V_.end(), sel_);
+        int k = it == V_.end() ? 0 : (int)(it - V_.begin());
+        int rows = std::max(1, viewH / std::max(1, pitch));
+        if (k >= rows) listSb_.SetOffset((k - rows / 2) * pitch);
+    }
     int sbW = listSb_.Visible() ? Sc(14) : 0;
     rcListSbTrack_ = RECT{rcList_.right - Sc(14), rcListBody_.top, rcList_.right - Sc(2), rcListBody_.bottom};
     int right = rcList_.right - Sc(10) - sbW;
@@ -1150,7 +1192,7 @@ void BiosModule::PaintList(HDC dc) {
         switch (col) {
             case C_NAME: t = L"Setting  (" + std::to_wstring(V_.size()) + L")    grey = hidden in BIOS menus"; break;
             case C_CUR: t = unverified_ ? L"Current (unverified)" : (compare_ ? L"Live" : L"Current"); break;
-            case C_SNAP: t = L"Snapshot"; break;
+            case C_SNAP: t = snapUnverified_ ? L"Snapshot (unverified)" : L"Snapshot"; break;
             case C_DEF: t = L"Default"; break;
             default: t = L"Goal"; break;
         }
@@ -1211,7 +1253,11 @@ void BiosModule::PaintList(HDC dc) {
         std::wstring cur = CurText(s);
         if (unverified_ && s.hasCur) cur += L" ?";
         cell(C_CUR, cur, Changed(s) ? p.warn : p.text);
-        if (compare_) cell(C_SNAP, SnapText(s), SnapDiffers(s) ? p.warn : p.mute);
+        if (compare_) {
+            std::wstring st = SnapText(s);
+            if (snapUnverified_ && s.hasSnap) st += L" ?";
+            cell(C_SNAP, st, SnapDiffers(s) ? p.warn : p.mute);
+        }
         cell(C_DEF, DefText(s), p.mute);
         if (goal_ >= 0 && db_.KbOf(s)) {
             long long v;
@@ -1307,7 +1353,9 @@ int BiosModule::PaintDetail(HDC dc, bool draw) {
         if (s.hidden) badge(L"Hidden in BIOS menus", p.mute);
         else if (s.cond) badge(L"Shown depending on other settings", p.mute);
         if (Changed(s)) badge(L"Changed from default", p.warn);
-        if (unverified_ && s.hasCur) badge(L"Unverified (board/BIOS mismatch)", p.bad);
+        if (unverified_ && s.hasCur)
+            badge(guardText_.empty() ? L"Unverified (board/BIOS not checked)" : L"Unverified (board/BIOS mismatch)", p.bad);
+        if (compare_ && snapUnverified_ && s.hasSnap) badge(L"Snapshot unverified", p.bad);
         if (compare_ && SnapDiffers(s)) badge(L"Snapshot differs", p.warn);
         wchar_t loc[160];
         swprintf(loc, 160, L"%ls + 0x%X (%d byte%ls)", s.var.c_str(), (unsigned)s.offset, s.width, s.width == 1 ? L"" : L"s");
@@ -1360,7 +1408,7 @@ int BiosModule::PaintDetail(HDC dc, bool draw) {
         std::wstring cv = L"Current: " + CurText(s);
         if (unverified_ && s.hasCur) cv = L"Current (unverified): " + CurText(s);
         std::wstring line = cv + L"      Default: " + DefText(s);
-        if (compare_) line += L"      Snapshot: " + SnapText(s);
+        if (compare_) line += (snapUnverified_ ? L"      Snapshot (unverified): " : L"      Snapshot: ") + SnapText(s);
         block(line, body, p.text, 4);
         if (!s.hasCur) {
             std::wstring why;
@@ -1438,9 +1486,12 @@ void BiosModule::LoadFixture(const wchar_t* dir) {
 // An in-memory snapshot for the selftest (the folder and zip sources are tested separately).
 struct MemSource : FileSource {
     std::map<std::wstring, std::string> files;
-    bool Read(const std::wstring& rel, std::string* out, std::wstring* err) override {
+    int reads = 0;
+    bool Read(const std::wstring& rel, std::string* out, size_t cap, std::wstring* err) override {
+        reads++;
         auto it = files.find(rel);
         if (it == files.end()) { if (err) *err = L"missing"; return false; }
+        if (it->second.size() > cap) { if (err) *err = L"too large"; return false; }
         *out = it->second;
         return true;
     }
@@ -1488,8 +1539,14 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
         for (auto& k : db_.K) if (k.basis.empty()) noBasis++;
         check(key == 501, L"501 settings matched by tier-1 entries (got " + std::to_wstring(key) + L")");
         check(bad == 0, L"every S line has a valid KB index");
-        wprintf(L"  [info] %d of %zu KB entries have no basis yet (temporary file; package B fills them) -> \"%ls\"\n",
-                noBasis, db_.K.size(), BasisLabel(L"").c_str());
+        int tier1NoBasis = 0, sourced = 0;
+        for (int i = 0; i < (int)db_.K.size(); i++) {
+            if (i < db_.keyCount && db_.K[i].basis.empty()) tier1NoBasis++;
+            if (!db_.K[i].sources.empty()) sourced++;
+        }
+        check(tier1NoBasis == 0, L"every tier-1 KB entry states a basis (generated file)");
+        wprintf(L"  [info] %d of %zu KB entries without a basis (shown as \"%ls\"); %d entries carry number sources\n",
+                noBasis, db_.K.size(), BasisLabel(L"").c_str(), sourced);
         int multi = 0, ctx = 0;
         std::map<std::pair<std::wstring, std::wstring>, int> amb;
         for (auto& s : db_.S) if (!s.ctx.empty()) { ctx++; amb[{s.prompt, s.ctx}]++; }
@@ -1626,6 +1683,82 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
         SnapLoad sb;
         bool refused = !LoadSnapshotZip(bad, L"bad.zip", &sb);
         check(refused, L"zip: corrupt data is refused (" + sb.error + L")");
+
+        // Hostile sizes (reviewer 2.1). A hand-built zip whose one deflated entry claims 0xFFFFFFF0 bytes.
+        auto le16 = [](std::vector<uint8_t>& v, uint32_t x) { v.push_back(x & 0xFF); v.push_back((x >> 8) & 0xFF); };
+        auto le32 = [&](std::vector<uint8_t>& v, uint32_t x) { le16(v, x & 0xFFFF); le16(v, x >> 16); };
+        auto mkzip = [&](uint32_t usize, const std::vector<uint8_t>& data) {
+            std::vector<uint8_t> z;
+            const std::string nm = "index.csv";
+            le32(z, 0x04034b50); le16(z, 20); le16(z, 0); le16(z, 8); le16(z, 0); le16(z, 0);
+            le32(z, 0); le32(z, (uint32_t)data.size()); le32(z, usize); le16(z, (uint32_t)nm.size()); le16(z, 0);
+            z.insert(z.end(), nm.begin(), nm.end());
+            z.insert(z.end(), data.begin(), data.end());
+            uint32_t cd = (uint32_t)z.size();
+            le32(z, 0x02014b50); le16(z, 20); le16(z, 20); le16(z, 0); le16(z, 8); le16(z, 0); le16(z, 0);
+            le32(z, 0); le32(z, (uint32_t)data.size()); le32(z, usize); le16(z, (uint32_t)nm.size());
+            le16(z, 0); le16(z, 0); le16(z, 0); le16(z, 0); le32(z, 0); le32(z, 0);
+            z.insert(z.end(), nm.begin(), nm.end());
+            uint32_t cdSize = (uint32_t)z.size() - cd;
+            le32(z, 0x06054b50); le16(z, 0); le16(z, 0); le16(z, 1); le16(z, 1); le32(z, cdSize); le32(z, cd); le16(z, 0);
+            return z;
+        };
+        {
+            ZipReader hz;
+            bool opened = hz.Open(mkzip(0xFFFFFFF0u, {0x03, 0x00}), &err);
+            std::vector<uint8_t> outv;
+            std::wstring why;
+            bool ex = opened && hz.Extract(hz.Entries()[0], &outv, kMaxSnapText, &why);
+            check(opened && !ex && outv.capacity() == 0,
+                  L"zip: an entry claiming 0xFFFFFFF0 bytes is refused before allocating (" + why + L")");
+            ZipReader hz2;
+            std::vector<uint8_t> junk(64, 0x5A);
+            bool o2 = hz2.Open(mkzip(0, junk), &err);
+            std::wstring why2;
+            bool ex2 = o2 && hz2.Extract(hz2.Entries()[0], &outv, kMaxSnapText, &why2);
+            check(o2 && !ex2, L"zip: usize 0 with 64 bytes of deflate data is refused (" + why2 + L")");
+        }
+        {
+            // The sample's 600-byte deflated variable, inflated with a 100-byte ceiling, must stop there.
+            const ZipEntry* big = nullptr;
+            for (auto& e : z.Entries()) if (e.method == 8 && e.usize == 600) big = &e;
+            bool stopped = false;
+            size_t got = 0;
+            std::wstring why;
+            if (big) {
+                const uint8_t* lh = kSampleZip + big->localOffset;
+                size_t body = big->localOffset + 30 + (lh[26] | (lh[27] << 8)) + (lh[28] | (lh[29] << 8));
+                std::vector<uint8_t> o;
+                stopped = !Inflate(kSampleZip + body, big->csize, &o, 100, &why);
+                got = o.size();
+            }
+            check(big && stopped && got <= 100, L"inflate stops at its output cap (" + std::to_wstring(got) +
+                  L" of 600 bytes, " + why + L")");
+        }
+        {
+            // Caps, cache and device names through LoadSnapshotFrom.
+            MemSource ms;
+            ms.files[L"index.csv"] =
+                "\"Name\",\"Guid\",\"Size\",\"Attributes\",\"Error\",\"File\"\r\n"
+                "\"A\",\"{g}\",\"1\",\"0x7\",\"0\",\"same.bin\"\r\n"
+                "\"B\",\"{g}\",\"1\",\"0x7\",\"0\",\"same.bin\"\r\n"
+                "\"C\",\"{g}\",\"1\",\"0x7\",\"0\",\"SAME.bin\"\r\n"
+                "\"D\",\"{g}\",\"1\",\"0x7\",\"0\",\"NUL.bin\"\r\n"
+                "\"E\",\"{g}\",\"1\",\"0x7\",\"0\",\"com1.txt\"\r\n"
+                "\"F\",\"{g}\",\"1\",\"0x7\",\"0\",\"Lpt9\"\r\n"
+                "\"G\",\"{g}\",\"1\",\"0x7\",\"0\",\"console.bin\"\r\n"
+                "\"H\",\"{g}\",\"1\",\"0x7\",\"0\",\"huge.bin\"\r\n";
+            ms.files[L"vars/same.bin"] = "x";
+            ms.files[L"vars/console.bin"] = "y";
+            ms.files[L"vars/huge.bin"] = std::string(kMaxSnapVar + 1, 'z');
+            SnapLoad sl2;
+            bool l2 = LoadSnapshotFrom(ms, L"hostile", &sl2);
+            check(l2 && sl2.loaded == 4 && sl2.skipReasons[L"with an unsafe file name"] == 3,
+                  L"snapshot: NUL.bin, com1.txt, Lpt9 refused as device names; console.bin allowed");
+            check(sl2.skipReasons[L"whose vars file can't be read"] == 1, L"snapshot: a variable over 4 MB is refused");
+            // index.csv + same.bin + console.bin + huge.bin + system.txt: one read per distinct file name.
+            check(ms.reads == 5, L"snapshot: one read per file name, not per row (" + std::to_wstring(ms.reads) + L" reads)");
+        }
     }
     // --- SMBIOS ---
     {
@@ -1662,6 +1795,28 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
               !BoardMatches(L"MS-7E06", L"MS-7D25"), L"version guard: MSI 7E06vAF <-> A.F0; mismatches detected");
         SmbiosInfo bad;
         check(!ParseSmbios(t.data(), 6, &bad), L"SMBIOS: truncated table refused");
+        // A Length that runs past the buffer is clamped to it.
+        std::vector<uint8_t> t2 = t;
+        t2[4] = 0xFF; t2[5] = 0xFF; t2[6] = 0xFF;
+        SmbiosInfo m2;
+        check(ParseSmbios(t2.data(), t2.size(), &m2) && m2.boardProduct == L"PRO Z790-P WIFI (MS-7E06)",
+              L"SMBIOS: header Length past the buffer is clamped");
+        // A string set with no terminator: type 0 then strings that run to the end of the buffer.
+        std::vector<uint8_t> t3 = {0, 3, 0, 0, 0, 0, 0, 0};
+        t3.insert(t3.end(), s0.begin(), s0.end());
+        const char unterminated[] = {'V', 'e', 'n', 'd', 'o', 'r', 0, 'A', '.', 'F', '0'};
+        t3.insert(t3.end(), unterminated, unterminated + sizeof(unterminated));
+        uint32_t l3 = (uint32_t)(t3.size() - 8);
+        t3[4] = l3 & 0xFF; t3[5] = (l3 >> 8) & 0xFF;
+        SmbiosInfo m3;
+        bool p3 = ParseSmbios(t3.data(), t3.size(), &m3);
+        check(p3 && m3.biosVendor == L"Vendor" && m3.biosVersion == L"A.F0" && m3.boardProduct.empty(),
+              L"SMBIOS: an unterminated string set stops at the buffer end");
+        check(BiosMatches(L"7E06vAF", L"a.f0") && !BiosMatches(L"7E06vAF", L"A.F1") &&
+              !BiosMatches(L"7E06vAF", L"7E06vAF1"), L"version guard: \"a.f0\" matches; \"A.F1\" and \"7E06vAF1\" don't");
+        check(!BoardMatches(L"MS-7E06", L"MS-7E06x") && !BoardMatches(L"MS-7E06", L"PRO (XMS-7E06)") &&
+              BoardMatches(L"MS-7E06", L"MS-7E06") && BoardMatches(L"MS-7E06", L"ms-7e06 rev 1.0"),
+              L"version guard: board id must be a delimited token (\"MS-7E06x\" doesn't match)");
     }
     // --- naming ---
     {
@@ -1743,6 +1898,20 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
               ex.find(L"\r\n=== Settings to change ===\r\n") != std::wstring::npos &&
               ex.find(L"\r\n=== Advice (check these by hand) ===\r\n") != std::wstring::npos &&
               ex.find(L"  ->  ") != std::wstring::npos, L"export text: legacy sections and separators");
+        check(ex.find(L"\r\n    basis: ") != std::wstring::npos, L"export text: basis lines (rule 7)");
+        {
+            // A source line appears only when its number is in the printed text.
+            Db d;
+            d.Parse("V\tt\nB\tMS-0\t0000v10\nK\t0\tTitle\tE\t\t\t\t\t~Lower it by 5 W and test\tNote\ta\tb\tc\tcl\t"
+                    "published\thttps://example.org/x\t5 W\x1fpublished\x1fhttps://example.org/x\x1e"
+                    "9 ms\x1fpublished\x1fhttps://example.org/y\nT\t1\n"
+                    "S\t0\tSetup\tg\t0\t1\toneof\t\t0\t\t\t\tP\t\tM\t0\x1fOff\x1e" "1\x1fOn\t0\n", &err);
+            std::wstring e2 = ExportText(d, 4, L"src", L"");
+            check(e2.find(L"    basis: Published: https://example.org/x\r\n") != std::wstring::npos &&
+                  e2.find(L"    source: 5 W \u2014 published \u2014 https://example.org/x\r\n") != std::wstring::npos &&
+                  e2.find(L"9 ms") == std::wstring::npos,
+                  L"export text: basis + the source of each number printed, and only those");
+        }
         // Goal rank on a fixture setting: Hyper-Threading (exact recs).
         const Setting& ht = db_.S[417];
         long long v;
@@ -1760,6 +1929,15 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
             db_.Apply(sl.vars, false);
             check(sl.loaded == 20, L"fixture: 20 variables (bios-snapshot-expected.json \"variables\")");
             checkFixture(L"fixture " + Shell(fx));
+            // --print-export <1-5>: print the export for that goal on the fixture values (review sample;
+            // the GUI path goes through the Save dialog, which Wine can't drive headless).
+            for (size_t i = 0; i + 1 < cl.rest.size(); i++) {
+                if (cl.rest[i] != L"--print-export") continue;
+                int g = _wtoi(cl.rest[i + 1].c_str()) - 1;
+                if (g < 0 || g >= kGoalCount) continue;
+                std::string u = ToUtf8(ExportText(db_, g, L"Snapshot: " + sl.label, SnapGuard(db_, sl, L"snapshot")));
+                fwrite(u.data(), 1, u.size(), stdout);
+            }
         }
     } else {
         wprintf(L"  [info] no --fixture/--snapshot given: on-disk fixture check skipped (in-memory port ran above)\n");

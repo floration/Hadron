@@ -14,9 +14,10 @@ namespace hx::bios {
 
 uint32_t Crc32(const uint8_t* p, size_t n, uint32_t crc = 0);
 
-// Raw deflate stream (no zlib header). Appends to *out. expected (if non-zero) bounds the output so a
-// corrupt stream can't grow without limit. Returns false with a reason in *err.
-bool Inflate(const uint8_t* in, size_t n, std::vector<uint8_t>* out, size_t expected, std::wstring* err);
+// Raw deflate stream (no zlib header). Appends to *out and stops with an error as soon as the output
+// would exceed maxOut bytes, so a corrupt or hostile stream can't grow without limit. Returns false
+// with a reason in *err.
+bool Inflate(const uint8_t* in, size_t n, std::vector<uint8_t>* out, size_t maxOut, std::wstring* err);
 
 struct ZipEntry {
     std::wstring name;        // '/'-separated (a '\' written by some archivers is normalised to '/')
@@ -31,7 +32,8 @@ public:
     bool Open(std::vector<uint8_t> data, std::wstring* err);
     const std::vector<ZipEntry>& Entries() const { return entries_; }
     const ZipEntry* Find(const std::wstring& name) const;   // exact, case-insensitive ASCII
-    bool Extract(const ZipEntry& e, std::vector<uint8_t>* out, std::wstring* err) const;
+    // Refuses (before allocating) an entry whose declared size exceeds cap; inflate stops at that size.
+    bool Extract(const ZipEntry& e, std::vector<uint8_t>* out, size_t cap, std::wstring* err) const;
 
 private:
     std::vector<uint8_t> data_;

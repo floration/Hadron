@@ -74,14 +74,18 @@ std::wstring SnapFileName(int index, const std::wstring& name, const std::wstrin
 // ---- file sources -------------------------------------------------------------------------------
 namespace {
 
-bool ReadWholeFile(const std::wstring& path, std::string* out, std::wstring* err) {
+bool ReadWholeFile(const std::wstring& path, std::string* out, size_t cap, std::wstring* err) {
     out->clear();
     HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) { if (err) *err = sys::ErrorText(GetLastError()); return false; }
     LARGE_INTEGER sz{};
     if (!GetFileSizeEx(h, &sz)) { DWORD e = GetLastError(); CloseHandle(h); if (err) *err = sys::ErrorText(e); return false; }
-    if (sz.QuadPart > (256LL << 20)) { CloseHandle(h); if (err) *err = L"file is larger than 256 MB"; return false; }
+    if ((unsigned long long)sz.QuadPart > cap) {
+        CloseHandle(h);
+        if (err) *err = L"file is larger than " + std::to_wstring(cap >> 20) + L" MB";
+        return false;
+    }
     out->resize((size_t)sz.QuadPart);
     size_t done = 0;
     while (done < out->size()) {
@@ -100,22 +104,22 @@ bool ReadWholeFile(const std::wstring& path, std::string* out, std::wstring* err
 struct FolderSource : FileSource {
     std::wstring root;
     explicit FolderSource(std::wstring r) : root(std::move(r)) {}
-    bool Read(const std::wstring& rel, std::string* out, std::wstring* err) override {
+    bool Read(const std::wstring& rel, std::string* out, size_t cap, std::wstring* err) override {
         std::wstring p = root;
         if (!p.empty() && p.back() != L'\\' && p.back() != L'/') p += L'\\';
         for (wchar_t c : rel) p += (c == L'/') ? L'\\' : c;
-        return ReadWholeFile(p, out, err);
+        return ReadWholeFile(p, out, cap, err);
     }
 };
 
 struct ZipSource : FileSource {
     ZipReader zip;
     std::wstring prefix;   // folder inside the zip that holds index.csv ("" at the root)
-    bool Read(const std::wstring& rel, std::string* out, std::wstring* err) override {
+    bool Read(const std::wstring& rel, std::string* out, size_t cap, std::wstring* err) override {
         const ZipEntry* e = zip.Find(prefix + rel);
         if (!e) { if (err) *err = L"not in the zip"; return false; }
         std::vector<uint8_t> d;
-        if (!zip.Extract(*e, &d, err)) return false;
+        if (!zip.Extract(*e, &d, cap, err)) return false;
         out->assign(d.begin(), d.end());
         return true;
     }
@@ -129,6 +133,13 @@ bool EndsWithI(const std::wstring& s, const std::wstring& suf) {
 bool SafeFileName(const std::wstring& f) {
     if (f.empty() || f == L"." || f == L"..") return false;
     for (wchar_t c : f) if (c == L'\\' || c == L'/' || c == L':' || c < 0x20) return false;
+    // Reserved DOS device names with any extension ("NUL.bin", "com1.txt") open a device, not a file.
+    std::wstring base = Lower(f.substr(0, f.find(L'.')));
+    while (!base.empty() && base.back() == L' ') base.pop_back();
+    if (base == L"con" || base == L"prn" || base == L"aux" || base == L"nul") return false;
+    if (base.size() == 4 && (base.compare(0, 3, L"com") == 0 || base.compare(0, 3, L"lpt") == 0) &&
+        base[3] >= L'1' && base[3] <= L'9')
+        return false;
     return true;
 }
 
@@ -158,7 +169,8 @@ bool LoadSnapshotFrom(FileSource& src, const std::wstring& label, SnapLoad* out)
     out->label = label;
     std::string raw;
     std::wstring err;
-    if (!src.Read(L"index.csv", &raw, &err)) { out->error = L"No readable index.csv: " + err; return false; }
+    if (!src.Read(L"index.csv", &raw, kMaxSnapText, &err)) { out->error = L"No readable index.csv: " + err; return false; }
+    size_t total = 0;
     auto rows = ParseCsv(FromUtf8(raw));
     if (rows.empty()) { out->error = L"index.csv is empty."; return false; }
     // Map columns by header name; fall back to the legacy order when there is no header row.
@@ -180,6 +192,8 @@ bool LoadSnapshotFrom(FileSource& src, const std::wstring& label, SnapLoad* out)
         }
     }
     int need = std::max(cName, std::max(cGuid, cFile)) + 1;
+    struct Cached { bool ok = false; std::vector<uint8_t> data; };
+    std::map<std::wstring, Cached> cache;
     auto skip = [&](const std::wstring& why) { out->skipped++; out->skipReasons[why]++; };
     for (size_t r = first; r < rows.size(); r++) {
         auto& c = rows[r];
@@ -193,16 +207,33 @@ bool LoadSnapshotFrom(FileSource& src, const std::wstring& label, SnapLoad* out)
             continue;
         }
         if (!SafeFileName(file)) { skip(L"with an unsafe file name"); continue; }
-        std::string data;
-        std::wstring why;
-        if (!src.Read(L"vars/" + file, &data, &why)) { skip(L"whose vars file can't be read"); continue; }
+        // One read per file name, however many rows point at it (a hostile index can repeat one).
+        auto hit = cache.find(Lower(file));
+        if (hit == cache.end()) {
+            std::string data;
+            std::wstring why;
+            Cached cd;
+            cd.ok = src.Read(L"vars/" + file, &data, kMaxSnapVar, &why);
+            if (cd.ok) {
+                total += data.size();
+                if (total > kMaxSnapTotal) {
+                    out->error = L"The snapshot holds more than " + std::to_wstring(kMaxSnapTotal >> 20) +
+                                 L" MB of variable data; refusing to load it.";
+                    out->vars.clear();
+                    return false;
+                }
+                cd.data.assign(data.begin(), data.end());
+            }
+            hit = cache.emplace(Lower(file), std::move(cd)).first;
+        }
+        if (!hit->second.ok) { skip(L"whose vars file can't be read"); continue; }
         VarKey key = MakeVarKey(c[cName], c[cGuid]);
         if (out->vars.count(key)) skip(L"duplicate (the later row is used)");
         else out->loaded++;
-        out->vars[key] = std::vector<uint8_t>(data.begin(), data.end());
+        out->vars[key] = hit->second.data;
     }
     std::string sys;
-    if (src.Read(L"system.txt", &sys, &err)) {
+    if (src.Read(L"system.txt", &sys, kMaxSnapText, &err)) {
         out->hasSystem = true;
         std::wstring t = FromUtf8(sys);
         size_t a = 0;
@@ -251,7 +282,7 @@ bool LoadSnapshot(const std::wstring& path, SnapLoad* out) {
     if (!(a & FILE_ATTRIBUTE_DIRECTORY) && EndsWithI(path, L".zip")) {
         std::string raw;
         std::wstring err;
-        if (!ReadWholeFile(path, &raw, &err)) { out->error = L"Can't read " + shown + L": " + err; return false; }
+        if (!ReadWholeFile(path, &raw, kMaxSnapTotal, &err)) { out->error = L"Can't read " + shown + L": " + err; return false; }
         return LoadSnapshotZip(std::vector<uint8_t>(raw.begin(), raw.end()), shown, out);
     }
     std::wstring dir = path;
@@ -260,7 +291,7 @@ bool LoadSnapshot(const std::wstring& path, SnapLoad* out) {
         dir = k == std::wstring::npos ? L"." : dir.substr(0, k);
         shown = sys::ToShell(sys::ToExtended(dir));
     }
-    FolderSource fs(dir);
+    FolderSource fs(sys::ToExtended(dir));   // absolute \\?\ form, whatever the caller passed
     return LoadSnapshotFrom(fs, shown, out);
 }
 

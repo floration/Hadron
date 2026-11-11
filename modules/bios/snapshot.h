@@ -16,7 +16,8 @@
 namespace hx::bios {
 
 // RFC 4180: comma-separated, "" inside quotes is a quote, quoted fields may contain commas and
-// newlines; CRLF or LF ends a record. A trailing empty line is not a record.
+// newlines; CRLF or LF ends a record, and a last line without a newline is still a record. An empty
+// line comes back as a record with one empty field (callers skip those).
 std::vector<std::vector<std::wstring>> ParseCsv(const std::wstring& text);
 std::wstring CsvQuote(const std::wstring& field);   // always quoted, as Export-Csv writes
 
@@ -25,11 +26,17 @@ std::wstring SanitiseName(const std::wstring& name);
 // New naming: "<NNNN>_<sanitised>__<guid>.bin" (index 1-based, at least 4 digits).
 std::wstring SnapFileName(int index, const std::wstring& name, const std::wstring& guid);
 
+// Size caps for snapshot input, so a hostile or corrupt snapshot can't exhaust memory.
+constexpr size_t kMaxSnapVar = 4u << 20;      // one variable: ReadVariable's 4 MB ceiling
+constexpr size_t kMaxSnapText = 16u << 20;    // index.csv, system.txt
+constexpr size_t kMaxSnapTotal = 256u << 20;  // all variable data of one snapshot; also the .zip file
+
 // Where a snapshot's files come from: a folder on disk, a zip, or memory (selftest).
 struct FileSource {
     virtual ~FileSource() = default;
-    // rel uses '/' separators, relative to the snapshot root. false + *err when missing/unreadable.
-    virtual bool Read(const std::wstring& rel, std::string* out, std::wstring* err) = 0;
+    // rel uses '/' separators, relative to the snapshot root. Refuses, without allocating, anything
+    // larger than cap. false + *err when missing, unreadable or too large.
+    virtual bool Read(const std::wstring& rel, std::string* out, size_t cap, std::wstring* err) = 0;
 };
 
 struct SnapLoad {

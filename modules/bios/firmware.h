@@ -64,6 +64,7 @@ struct LiveResult {
     SmbiosInfo smbios; DWORD smbiosErr = 0;
     std::vector<FwVar> vars;
     int readOk = 0;
+    std::wstring error;   // set when the read itself failed (e.g. out of memory on the worker)
 };
 void ReadLive(const std::vector<std::pair<std::wstring, std::wstring>>& want, LiveResult* out);
 
