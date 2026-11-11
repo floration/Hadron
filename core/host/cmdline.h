@@ -20,6 +20,7 @@ struct CommandLine {
     ui::Layout  layout = ui::Layout::Baseline;    // --layout baseline|console
     bool     hasAccent = false;   // --accent RRGGBB: stand-in Windows accent for --screenshot (design review)
     COLORREF accent = 0;
+    bool themeGiven = false, layoutGiven = false; // the flag was passed (overrides the saved choice)
     std::vector<std::wstring> rest;   // everything else, passed to RunCli
 
     // Parses GetCommandLineW()-style input. Paths in --screenshot and --fixture are made absolute.

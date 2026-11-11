@@ -50,8 +50,9 @@ const Theme& ThemeBase(ThemeId id) {
     };
     static const Theme boring{
         ThemeId::Boring,
-        RGB(234,228,214), RGB(244,239,228), RGB(224,216,198), RGB(210,201,180), RGB(198,188,166),
-        RGB(54,48,38),    RGB(104,94,76),   RGB(148,138,118),
+        // Dimmed 2026-11-11 (owner: "make the beige less bright"); text darkened to keep contrast.
+        RGB(198,191,176), RGB(207,200,185), RGB(189,181,164), RGB(176,167,149), RGB(165,155,136),
+        RGB(42,37,29),    RGB(80,72,58),    RGB(112,102,85),
         RGB(150,110,70), RGB(150,110,70), RGB(150,110,70), RGB(150,110,70),
         RGB(170,120,30),  RGB(170,70,50),   RGB(90,130,70),
         false,

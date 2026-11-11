@@ -6,6 +6,7 @@
 
 #include "core/sys/win_compat.h"
 #include <map>
+#include <set>
 #include <string>
 
 namespace hx::sys {
@@ -33,7 +34,10 @@ class SettingsStore {
 public:
     // Picks the portable or per-user path and loads it if present. Missing file is not an error.
     void Load();
-    bool Save(DWORD* err = nullptr);          // atomic write via a temp file + MoveFileEx
+    // Writes only the keys this process changed: re-reads the file under a mutex, applies those keys and
+    // replaces it atomically (per-process temp file + MoveFileEx). Several exes can share one file without
+    // undoing each other's changes. Nothing changed => nothing written.
+    bool Save(DWORD* err = nullptr);
     Settings Section(const std::wstring& name) { return Settings(this, name); }
     const std::wstring& Path() const { return path_; }
 
@@ -43,6 +47,7 @@ private:
     std::map<std::wstring, std::map<std::wstring, std::wstring>> data_;
     std::wstring path_;
     bool dirty_ = false;
+    std::set<std::pair<std::wstring, std::wstring>> changed_;   // (section, lowercased key) set since Save
 };
 
 }  // namespace hx::sys
