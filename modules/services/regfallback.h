@@ -21,6 +21,8 @@ namespace hx::services {
 extern const wchar_t kRegLine[];       // the plan line of a forward row
 extern const wchar_t kRegUndoLine[];   // the plan line of an undo or resume row of a registry write
 extern const wchar_t kRegUndoOff[];    // that row's warning while the toggle is off
+// Rule 7: "takes effect after restart" is reasoning, not a measurement; said wherever the fallback is explained.
+extern const wchar_t kRegRestartBasis[];
 constexpr wchar_t kRegIdentity[] = L"reg";   // the undo log's identity field (P and I records)
 
 // "" when the row may use the registry fallback, else why not. live: the service manager's view of the item; reg: its

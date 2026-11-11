@@ -7,6 +7,9 @@ namespace hx::services {
 const wchar_t kRegLine[] = L"SCM refused; will write registry Start directly, takes effect after restart";
 const wchar_t kRegUndoLine[] =
     L"Hadron wrote this to the registry directly; Undo writes the registry Start back the same way, takes effect after restart";
+const wchar_t kRegRestartBasis[] =
+    L"\"Takes effect after restart\" is reasoning (the service manager reads Start from the registry when Windows starts), "
+    L"not tested here: check it after a restart; Windows Update Medic can put some of these back.";
 const wchar_t kRegUndoOff[] =
     L"Hadron wrote this to the registry directly: turn the registry fallback on to put it back the same way";
 
@@ -69,9 +72,9 @@ void MarkRegFallback(Plan* p, Backend& b, bool regOn, bool tiOn, const std::vect
         p->notes.insert(p->notes.begin(),
                         std::to_wstring(marked) + L" row(s): the service manager refuses the change to administrators. With the registry "
                         L"fallback on, Hadron writes Start (and DelayedAutostart) in the service's registry key directly, only after you "
-                        L"press Apply. It takes effect after a restart. The old values go into the undo log, flushed, before each write; "
-                        L"the value is read again just before writing (a changed one is skipped) and read back after; Undo writes the "
-                        L"old values back the same way.");
+                        L"press Apply. The old values go into the undo log, flushed, before each write; the value is read again just "
+                        L"before writing (a changed one is skipped) and read back after; Undo writes the old values back the same way. " +
+                        std::wstring(kRegRestartBasis));
     if (refused)
         p->notes.push_back(std::to_wstring(refused) + L" row(s) the service manager refuses can't use the registry fallback either "
                            L"(launch-protected, protected, a Boot or System-start driver, or a change already waiting for a restart): "

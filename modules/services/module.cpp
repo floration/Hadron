@@ -1812,8 +1812,8 @@ std::vector<Banner> ServicesModule::Banners() const {
                      1, applyW_.Running() ? std::vector<std::pair<int, std::wstring>>{} : std::vector<std::pair<int, std::wstring>>{{ID_TI, L"Turn off"}}});
     if (regOn_ && mode_ == Mode::Plan)
         v.push_back({L"Registry fallback is on for this apply: rows the service manager refuses to administrators are written "
-                     L"to the service's registry key (Start, DelayedAutostart) directly, and take effect after a restart. Never "
-                     L"for launch-protected, protected, boot-path or Boot/System-start items. It turns off after this apply.",
+                     L"to the service's registry key (Start, DelayedAutostart) directly. Never for launch-protected, protected, "
+                     L"boot-path or Boot/System-start items. It turns off after this apply. " + std::wstring(kRegRestartBasis),
                      1, applyW_.Running() ? std::vector<std::pair<int, std::wstring>>{} : std::vector<std::pair<int, std::wstring>>{{ID_REG, L"Turn off"}}});
     if (!storeNote_.empty()) v.push_back({storeNote_, storeRefused_ ? 2 : 1, {}});
     if (loaded_ && loadErr_.empty() && (!hw_.ok || hw_.bootDisk.empty()))
@@ -2226,7 +2226,10 @@ std::vector<Para> ServicesModule::PlanRowDoc(const PlanRow& r) const {
     kv(L"Warning", r.warning, p.warnT);
     kv(L"Dependencies", r.depWarning, p.warnT);
     if (r.needsTi) kv(L"Identity", L"needs TrustedInstaller: Windows refuses this write to administrators", p.warnT);
-    if (r.viaReg) kv(L"Registry", r.regNote, p.warnT);
+    if (r.viaReg) {
+        kv(L"Registry", r.regNote, p.warnT);
+        kv(L"Basis", kRegRestartBasis, p.mute);
+    }
     else if (!r.regRefused.empty()) kv(L"Registry fallback", L"not allowed here: " + r.regRefused, p.mute);
     const KbEntry* e = kbOk_ ? kb_.Find(r.name) : nullptr;
     if (e) {
