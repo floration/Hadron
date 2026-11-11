@@ -57,7 +57,7 @@ NAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
 CFG_RE = re.compile(r'^[0-4]/[-01]$')
 
 # Counts, sizes in words and fractions (kb-audit F7). Years and builds before a noun ("Windows Server 2016 services")
-# are names, not counts.
+# and version numbers ("USB Audio 2.0 driver") are names, not counts.
 # "one" alone is left out: "one instance per user" is a description, not a quantity.
 WORD_NUM = (r'(?:zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|'
             r'sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|'
@@ -67,7 +67,7 @@ COUNT_NOUN = (r'(?:processe?s?|services?|drivers?|threads?|handles?|instances?|t
               r'(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)bytes?)')
 COUNT_RE = re.compile(
     r'(?<![\w./])(?<!Server )(?<!Windows )(?<!build )(?<!version )'
-    r'(?:\d+(?:[.,]\d+)?|' + WORD_NUM + r')(?:\s+(?:of\s+)?(?:or\s+so\s+)?)?[\s-]*'
+    r'(?:\d+(?:,\d{3})*(?![.\d])|' + WORD_NUM + r')(?:\s+(?:of\s+)?(?:or\s+so\s+)?)?[\s-]*'
     r'(?:more\s+|fewer\s+|less\s+|extra\s+|additional\s+|background\s+|running\s+)?' + COUNT_NOUN + r'(?!\w)', re.I)
 # Units spelled out after a number word. "three times" is left to the bios soft check (it warns on "N times faster").
 WORD_UNIT = (r'(?:(?:milli|micro|nano)?seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|'
@@ -354,6 +354,7 @@ def selftest():
                 'Windows Update fails with error 0x80070422.', 'Stop 0x7B after a filter is removed.',
                 'Microsoft\'s Windows 10 2004 VDI guide.', 'Windows Server 2016 with Desktop Experience.']
     ok_texts += ['Windows Server 2016 services and Windows 10 20H2 drivers.', 'One of the Xbox services.', 'Windows 10/11 services.',
+                 'The USB Audio 2.0 driver.',
                  'Restart three times each way.', 'Behalf of the user.', 'Detects a third-party antivirus.', 'A per-user service: one instance per user.',
                  'Frees [[200 MB|published|@IOT]] of RAM.']
     for t in ok_texts:
