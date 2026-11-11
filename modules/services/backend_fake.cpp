@@ -96,9 +96,11 @@ bool FakeBackend::SetStart(const std::wstring& name, const WriteOp& w, Identity 
     return true;
 }
 
-bool FakeBackend::Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err, bool* ownStart) {
-    (void)cancel;
+bool FakeBackend::Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err, bool* ownStart,
+                          DWORD waitMs) {
+    (void)waitMs;
     if (ownStart) *ownStart = false;
+    auto cancelled = [&]() { return cancel && cancel->load(); };
     SvcItem* i = Find(name);
     if (!i) { *err = L"The specified service does not exist as an installed service."; return false; }
     if (IsDriverType(i->type)) { *err = L"Drivers are never loaded or unloaded live."; return false; }
@@ -114,12 +116,25 @@ bool FakeBackend::Control(const std::wstring& name, Op op, const std::atomic<boo
             *err = L"timed out waiting; last state Starting";
             return false;
         }
+        if (cancelled() && fresh && !race) {
+            i->state = SERVICE_START_PENDING;
+            controlLog.push_back(L"start " + name + L" (wait cancelled)");
+            *err = L"cancelled while waiting; last state Starting";
+            return false;
+        }
         i->state = SERVICE_RUNNING;
         controlLog.push_back(race ? L"start " + name + L" (already running)" : L"start " + name);
     } else {
+        if (faults.cancelOnStop.count(Lower(name)) && faults.raise) faults.raise->store(true);
         if (faults.stopFail.count(Lower(name))) {
             controlLog.push_back(L"stop " + name + L" (failed)");
             *err = L"timed out waiting; last state Running";
+            return false;
+        }
+        if (cancelled() && i->state != SERVICE_STOPPED) {
+            i->state = SERVICE_STOP_PENDING;
+            controlLog.push_back(L"stop " + name + L" (wait cancelled)");
+            *err = L"cancelled while waiting; last state Stopping";
             return false;
         }
         i->state = SERVICE_STOPPED;

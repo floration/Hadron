@@ -168,7 +168,7 @@ bool ReadOne(SC_HANDLE scm, const std::wstring& name, const SERVICE_STATUS_PROCE
     return true;
 }
 
-bool WaitState(SC_HANDLE s, DWORD want, const std::atomic<bool>* cancel, std::wstring* err) {
+bool WaitState(SC_HANDLE s, DWORD want, const std::atomic<bool>* cancel, DWORD capMs, std::wstring* err) {
     SERVICE_STATUS_PROCESS ssp{};
     DWORD need = 0;
     DWORD start = GetTickCount();
@@ -190,7 +190,7 @@ bool WaitState(SC_HANDLE s, DWORD want, const std::atomic<bool>* cancel, std::ws
             return false;
         }
         if (cancel && cancel->load()) { *err = L"cancelled while waiting; last state " + StateName(ssp.dwCurrentState); return false; }
-        if (GetTickCount() - start > 30000) {   // overall cap (r1 §4)
+        if (GetTickCount() - start > capMs) {   // overall cap (r1 §4; shorter for cleanup requests, A5)
             *err = L"timed out waiting; last state " + StateName(ssp.dwCurrentState);
             return false;
         }
@@ -322,7 +322,8 @@ public:
         return true;
     }
 
-    bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err, bool* ownStart) override {
+    bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err, bool* ownStart,
+                 DWORD waitMs) override {
         if (ownStart) *ownStart = false;
         if (!armed_) { *err = kNotArmed; return false; }
         Sc scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
@@ -339,7 +340,7 @@ public:
                 *err = L"StartService: " + sys::ErrorText(GetLastError());
                 return false;
             }
-            return WaitState(s.h, SERVICE_RUNNING, cancel, err);
+            return WaitState(s.h, SERVICE_RUNNING, cancel, waitMs, err);
         }
         if (!(cur.controls & SERVICE_ACCEPT_STOP) && cur.state == SERVICE_RUNNING) {
             *err = L"This service does not accept a stop request.";
@@ -361,12 +362,12 @@ public:
                     *err = L"ControlService(stop): " + sys::ErrorText(e);
                     return false;
                 }
-                return WaitState(s.h, SERVICE_STOPPED, cancel, err);
+                return WaitState(s.h, SERVICE_STOPPED, cancel, waitMs, err);
             }
             *err = L"ControlServiceEx(stop): " + sys::ErrorText(e);
             return false;
         }
-        return WaitState(s.h, SERVICE_STOPPED, cancel, err);
+        return WaitState(s.h, SERVICE_STOPPED, cancel, waitMs, err);
     }
 
     bool ReadHw(HwInfo* out) override { return ReadLiveHw(out); }

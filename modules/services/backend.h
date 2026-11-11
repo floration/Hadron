@@ -21,6 +21,16 @@ namespace hx::services {
 enum class Identity { Admin, TrustedInstaller };
 enum class Op { Start, Stop };
 
+constexpr DWORD kControlWaitMs = 30000;   // the wait for RUNNING/STOPPED after a start or stop request (r1 §4)
+// Cleanup requests (TrustedInstaller put back after an apply, R13's restarts after a failed stop) are sent even after
+// Cancel and waited for this long without Cancel cutting it short (mini-analyze A5).
+constexpr DWORD kCleanupWaitMs = 10000;
+// Control's error when the request was sent but the wait for the new state ran out or was cancelled: the request may
+// still take effect, so callers say "requested, not confirmed" instead of "failed".
+inline bool RequestSentNotConfirmed(const std::wstring& err) {
+    return err.rfind(L"timed out waiting", 0) == 0 || err.rfind(L"cancelled while waiting", 0) == 0;
+}
+
 // One start-type write. delayed: -1 leaves DelayedAutostart alone, 0/1 sets it (only meaningful with Auto).
 struct WriteOp {
     int start = 3;
@@ -40,8 +50,9 @@ public:
     virtual bool SetStart(const std::wstring& name, const WriteOp& w, Identity id, std::wstring* err) = 0;
     // *ownStart (optional) is true only when this call's own start request took the service out of STOPPED;
     // false when it was already running (ERROR_SERVICE_ALREADY_RUNNING: someone else started it first).
+    // waitMs caps the wait for the new state after the request was sent (cancel, when set, cuts it shorter).
     virtual bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err,
-                         bool* ownStart = nullptr) = 0;
+                         bool* ownStart = nullptr, DWORD waitMs = kControlWaitMs) = 0;
     virtual bool ReadHw(HwInfo* out) = 0;
     virtual std::wstring Build() = 0;         // "19045"
     virtual std::wstring MachineGuid() = 0;
@@ -69,6 +80,8 @@ struct FakeFaults {
     std::set<std::wstring> stopFail;      // a stop request fails (the service keeps running)
     std::set<std::wstring> startNoWait;   // our start request is accepted, but the wait for RUNNING fails (START_PENDING)
     std::map<std::wstring, int> stopPendingQueries;   // a STOP_PENDING item reads STOPPED after this many more Queries
+    std::set<std::wstring> cancelOnStop;  // a stop request for it sets *raise (the user pressed Cancel meanwhile)
+    std::atomic<bool>* raise = nullptr;
     int setStartCalls = 0;
 };
 
@@ -97,8 +110,10 @@ public:
     bool Dependents(const std::wstring& name, std::vector<std::wstring>* active, std::wstring* err) override;
     bool CanWrite(const std::wstring& name, bool* denied, std::wstring* err) override;
     bool SetStart(const std::wstring& name, const WriteOp& w, Identity id, std::wstring* err) override;
+    // Honours cancel like the live backend: the request takes effect, but the wait for it is cut short (the item is
+    // left pending and the call fails with "cancelled while waiting").
     bool Control(const std::wstring& name, Op op, const std::atomic<bool>* cancel, std::wstring* err,
-                 bool* ownStart = nullptr) override;
+                 bool* ownStart = nullptr, DWORD waitMs = kControlWaitMs) override;
     bool ReadHw(HwInfo* out) override { *out = hw_; return hw_.ok; }
     std::wstring Build() override { return build_; }
     std::wstring MachineGuid() override { return machine_; }

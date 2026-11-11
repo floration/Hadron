@@ -108,14 +108,21 @@ public:
 
     static std::wstring DefaultRoot(std::wstring* err);    // %ProgramData%\Hadron\services
     // Creates the root (and missing parents, up to the volume or share root). secure: a root Hadron creates gets a
-    // protected DACL, Administrators + SYSTEM full control, inherited. The security of a folder that already exists is
-    // never changed (Review R1). On every call (the folder may have been made by someone else): the root and each
-    // parent must not be a reparse point; with secure, the folder that holds the root (unless that is a volume or
-    // share root) must be owned by Administrators, SYSTEM or TrustedInstaller (checked before the root is created),
-    // and the root, checked by handle, must be owned by Administrators or SYSTEM with a DACL that lets nobody else
-    // write, delete or re-permission anything in it. Any failure: false, with the reason, and the caller writes
-    // nothing there.
+    // protected DACL, Administrators + SYSTEM full control, inherited; a missing parent it creates gets owner
+    // Administrators and its inherited DACL. The security of a folder that already exists is never changed (Review R1).
+    // On every call (the folder may have been made by someone else): the root and each parent must not be a reparse
+    // point; with secure, every folder above the root, the volume or share root included, must be owned by
+    // Administrators, SYSTEM or TrustedInstaller and let nobody else rename or delete it (RenameAccessProblem), each
+    // checked by handle before anything is created inside it (mini-analyze A1: otherwise a standard user could rename
+    // an ancestor aside and put a copy with their own restore.cmd in its place); and the root, checked by handle, must
+    // be owned by Administrators or SYSTEM with a DACL that lets nobody else write, delete or re-permission anything in
+    // it. Any failure: false, with the reason, and the caller writes nothing there.
     bool EnsureRoot(bool secure, std::wstring* err);
+    // "" when sd's DACL lets nobody but Administrators, SYSTEM and TrustedInstaller rename or delete the folder or its
+    // entries (DELETE, FILE_DELETE_CHILD) or change its permissions or owner (WRITE_DAC, WRITE_OWNER), else why not.
+    // Inherit-only entries are skipped: they grant nothing on the folder itself (C:\'s "Authenticated Users: Modify"
+    // for subfolders is one). EnsureRoot's test for every folder above the data folder (A1).
+    static std::wstring RenameAccessProblem(PSECURITY_DESCRIPTOR sd);
     // "" when sd's DACL lets nobody but Administrators, SYSTEM and TrustedInstaller write, delete or re-permission
     // anything (inherit-only entries included), else why not. EnsureRoot's test for an existing root.
     static std::wstring WriteAccessProblem(PSECURITY_DESCRIPTOR sd);

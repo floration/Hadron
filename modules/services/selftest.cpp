@@ -114,13 +114,25 @@ bool WriteAll(const std::wstring& path, const std::string& data) {   // test out
     return ok;
 }
 
-// A fresh, empty temp folder for one test's data dir, made the way Hadron makes its own (Store::EnsureRoot: owner
-// Administrators, protected DACL), so RunApply's owner check accepts it. Left in place; nothing is deleted.
-std::wstring NewTempDir(const std::wstring& tag) {
+// Where the test data dirs go: %SystemRoot%\Temp, whose ancestors only administrators can rename or re-permission, as
+// EnsureRoot requires of every folder above a data folder (mini-analyze A1). %TEMP% sits in the user's profile, which
+// the user (a non-admin principal) may rename, so EnsureRoot refuses it; it is the fallback only where there is no
+// %SystemRoot%\Temp. No trailing backslash.
+std::wstring TestTempBase() {
+    wchar_t win[MAX_PATH];
+    UINT w = GetSystemWindowsDirectoryW(win, MAX_PATH);
+    if (w && w < MAX_PATH && DirExists(std::wstring(win) + L"\\Temp")) return std::wstring(win) + L"\\Temp";
     wchar_t tmp[MAX_PATH];
     DWORD n = GetTempPathW(MAX_PATH, tmp);
     std::wstring base = (n && n < MAX_PATH) ? std::wstring(tmp) : L".\\";
     while (!base.empty() && base.back() == L'\\') base.pop_back();
+    return base;
+}
+
+// A fresh, empty temp folder for one test's data dir, made the way Hadron makes its own (Store::EnsureRoot: owner
+// Administrators, protected DACL), so RunApply's owner check accepts it. Left in place; nothing is deleted.
+std::wstring NewTempDir(const std::wstring& tag) {
+    const std::wstring base = TestTempBase();
     for (int i = 0; i < 1000; i++) {
         // In a folder of its own, owned by Administrators as the holding-folder check requires (%TEMP% is owned by
         // the user, and an elevated token's default owner may be the user too).
@@ -508,12 +520,10 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
     // ---- A5 first: the data folder owner check (before any test makes a data dir) ----------------------------
     {
         bool wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
-        wchar_t tmp[MAX_PATH];
-        DWORD n = GetTempPathW(MAX_PATH, tmp);
         std::wstring d;
         bool made = false;
         for (int i = 0; i < 1000 && !made; i++) {   // default ACL, the token's default owner
-            d = std::wstring(n && n < MAX_PATH ? tmp : L".\\") + L"HadronSvcTest-" + std::to_wstring(GetCurrentProcessId()) + L"-owner-" + std::to_wstring(i);
+            d = TestTempBase() + L"\\HadronSvcTest-" + std::to_wstring(GetCurrentProcessId()) + L"-owner-" + std::to_wstring(i);
             made = CreateDirectoryW(d.c_str(), nullptr) != FALSE;
         }
         // d has this token's default owner (Administrators when elevated on Windows). Inside it, a root and a holding
@@ -542,7 +552,11 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         std::wstring e2;
         bool holdMade = made && CreateDirectoryW(hold.c_str(), nullptr) && ownByMe(hold);
         bool ok2 = holdMade && Store(hold + L"\\services").EnsureRoot(true, &e2);
-        check(!holdMade || (!ok2 && e2.find(L"the folder that holds") != std::wstring::npos && e2.find(hold) != std::wstring::npos &&
+        // Under Wine every folder, C:\ included, is owned by this process's user, so the refusal comes at the first
+        // folder above the data folder (A1) instead of at the holding folder: still refused, still nothing made.
+        check(!holdMade || (!ok2 &&
+                            ((e2.find(L"the folder that holds") != std::wstring::npos && e2.find(hold) != std::wstring::npos) ||
+                             (wine && e2.find(L"a folder above Hadron's data folder") != std::wstring::npos)) &&
                             GetFileAttributesW((hold + L"\\services").c_str()) == INVALID_FILE_ATTRIBUTES),
               L"A5 r2: a holding folder (like %ProgramData%\\Hadron) owned by someone else is refused before the data folder is made: " + e2);
         if (wine) {
@@ -1813,7 +1827,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         check(rec, L"R4: the log records T starting, the started process (pid and creation time) and the failed release (T stopfailed)");
         std::wstring bt = TiLeftText(logs, items);
         check(rec && TiLeftRunning(logs, items) && bt.find(L"process " + std::to_wstring(tiNow->pid)) != std::wstring::npos &&
-                  bt.find(L"20261111-130000 UTC") != std::wstring::npos && bt.find(L"Stripped") != std::wstring::npos &&
+                  bt.find(L"2026-11-11 13:00 UTC") != std::wstring::npos && bt.find(L"Stripped") != std::wstring::npos &&
                   bt.find(L"its stop failed") != std::wstring::npos && bt.find(L"preset:") == std::wstring::npos,
               L"R4: the banner claims TrustedInstaller while it is that process; its text (process, stamp, preset, stop failure) comes from data");
         // The banner's Stop it, while it is still that process: stopped, and the claim is closed by a ti-resolved log.
@@ -1983,7 +1997,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         const PlanRow* lf = RowOf(up, L"lfsvc");
         const PlanRow* rd = RowOf(up, L"RetailDemo");
         bool note = false;
-        for (auto& n : up.notes) if (n.find(L"resumed 20261111-150000") != std::wstring::npos) note = true;
+        for (auto& n : up.notes) if (n.find(L"resumed 2026-11-11 15:00 UTC") != std::wstring::npos) note = true;
         check(FindInterrupted(logs) < 0 && u == 1 && mb && mb->after.start == 2 && mb->after.delayed == 1 && lf && lf->after.start == 3 &&
                   rd && rd->after.start == 3 && note,
               L"R7: the undo of a resume also puts back what the interrupted apply had changed (MapsBroker to its value before A)");
@@ -2013,6 +2027,187 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
                   bt.find(L"Dismiss") != std::wstring::npos && bt.find(L"Stripped (Services)") != std::wstring::npos &&
                   bt.find(L"preset:") == std::wstring::npos,
               L"R9: Dismiss writes a dismiss log under the apply lock; the banner goes and the apply's log stays");
+    }
+
+    // ---- Finalize round 2: mini-analyze A2-A6 and its four fixture runs (temp copies, fake backend only) -----------
+    {
+        World a;
+        freshWorld(&a);
+        std::wstring e;
+        auto wlog = [&](Store& st, const std::wstring& stamp, const std::wstring& src, int order,
+                        std::vector<std::vector<std::wstring>> rows, bool end) {
+            std::string t = "HXSVC\t1\tundo\n" + Record({L"B", stamp, Esc(src), std::to_wstring(rows.size()), a.ctx.machine, a.ctx.build,
+                                                         std::to_wstring(order)});
+            int k = 1;
+            for (auto& r : rows) t += Record({L"P", std::to_wstring(k++), r[0], L"start", r[1], r[2], L"admin"});
+            k = 1;
+            for (auto& r : rows) {
+                t += Record({L"I", std::to_wstring(k), r[1], L"admin"});
+                if (r.size() < 4) t += Record({L"D", std::to_wstring(k), L"ok", r[2], L"admin"});   // a 4th field: in progress
+                k++;
+            }
+            if (end) t += Record({L"E", stamp, std::to_wstring(rows.size()), L"0", L"0", L"done"});
+            st.WriteNew(L"undo-" + stamp + L".log", t, &e);
+        };
+        auto idx = [](const std::vector<UndoLog>& v, const wchar_t* stamp) {
+            for (size_t k = 0; k < v.size(); k++) if (v[k].stamp == stamp) return (int)k;
+            return -1;
+        };
+        // The live picture after those applies: what they wrote is in place.
+        a.fx.backend.SetStart(L"MapsBroker", WriteOp{4, 1}, Identity::Admin, &e);
+        a.fx.backend.SetStart(L"lfsvc", WriteOp{4, -1}, Identity::Admin, &e);
+        a.items = Folded(a.fx.backend);
+        // Run 1 (A2): an interrupted apply with D ok rows, then a finished dismiss: log. The banner goes, and Undo
+        // (the header's Undo last apply, --plan undo-last) still puts back what it wrote.
+        Store s1(NewTempDir(L"a2-dismiss-undo"));
+        wlog(s1, L"20261110-213012", L"preset:bloat:services", 1, {{L"MapsBroker", L"2/1", L"4/1"}, {L"lfsvc", L"3/-", L"4/-"}}, false);
+        auto l1 = LoadLogs(s1, nullptr);
+        bool d1 = !l1.empty() && DismissInterrupted(s1, At(l1, 0), a.ctx.machine, a.ctx.build, LockName(), &e);
+        l1 = LoadLogs(s1, nullptr);
+        int u1 = FindUndoable(l1);
+        Plan up1 = u1 >= 0 ? BuildUndo(At(l1, u1), a.fx.backend, a.items, a.ctx) : Plan{};
+        check(d1 && FindInterrupted(l1) < 0 && u1 == idx(l1, L"20261110-213012") && RowOf(up1, L"MapsBroker") && RowOf(up1, L"lfsvc"),
+              L"mini-analyze A2 (run 1): a dismissed interrupted apply keeps its Undo (undo-last opens it, both written rows in the plan)");
+        // Run 2 (A2): apply A interrupted, its resume R interrupted, and R dismissed: A's banner does not come back, and
+        // Undo from R puts back A's rows too (R7).
+        Store s2(NewTempDir(L"a2-dismiss-resume"));
+        wlog(s2, L"20261110-213012", L"preset:bloat:services", 1, {{L"MapsBroker", L"2/1", L"4/1"}, {L"lfsvc", L"3/-", L"4/-"}}, false);
+        wlog(s2, L"20261110-221500", L"resume:20261110-213012", 2, {{L"RetailDemo", L"3/-", L"4/-", L"in progress"}}, false);
+        auto l2 = LoadLogs(s2, nullptr);
+        int r2 = idx(l2, L"20261110-221500");
+        bool before2 = FindInterrupted(l2) == r2;
+        bool d2 = r2 >= 0 && DismissInterrupted(s2, At(l2, r2), a.ctx.machine, a.ctx.build, LockName(), &e);
+        l2 = LoadLogs(s2, nullptr);
+        int u2 = FindUndoable(l2);
+        Plan up2 = u2 >= 0 ? BuildUndo(At(l2, u2), a.fx.backend, a.items, a.ctx) : Plan{};
+        check(before2 && d2 && FindInterrupted(l2) < 0 && u2 == idx(l2, L"20261110-221500") && RowOf(up2, L"MapsBroker") &&
+                  RowOf(up2, L"lfsvc"),
+              L"mini-analyze A2 (run 2): dismissing an interrupted resume:A also settles A (no banner comes back); its Undo covers A's rows");
+        // Run 4: a log with a forged order far above the cap no longer stays "the last apply": the apply after it is.
+        Store s4(NewTempDir(L"order-cap"));
+        wlog(s4, L"20261101-100000", L"preset:bloat:services", 5000000, {{L"RetailDemo", L"3/-", L"4/-"}}, true);
+        auto l4 = LoadLogs(s4, nullptr);
+        int next = NextOrder(l4);
+        wlog(s4, L"20261110-120000", L"preset:stripped:services", next, {{L"lfsvc", L"3/-", L"4/-"}}, true);
+        l4 = LoadLogs(s4, nullptr);
+        check(next == kOrderCap + 1 && l4.size() == 2 && At(l4, 1).stamp == L"20261110-120000" && FindUndoable(l4) == 1 &&
+                  LastApplied(l4).count(L"lfsvc") && OrderKey(5000000) == OrderKey(next),
+              L"mini-analyze run 4: logs with order > 1000000 sort by the cap, then the stamp: Undo last apply is the newest apply, not the forged log");
+        // Run 3 (A3): first.txt from another Windows build, recovery\first and its zip missing: not written again.
+        Store s3(NewTempDir(L"a3-first-build"));
+        Snapshot old;
+        old.meta[L"kind"] = L"first";
+        old.meta[L"created"] = L"2026-01-01 10:00";
+        old.meta[L"build"] = L"19044";
+        old.meta[L"machine"] = a.ctx.machine;
+        old.items = a.items;
+        s3.WriteNew(L"first.txt", WriteSnapshot(old), &e);
+        Snapshot f3;
+        FirstRunResult fr3 = EnsureFirstSnapshot(s3, a.items, a.ctx, &f3);
+        check(fr3.existed && !s3.Exists(L"recovery\\first") && !s3.Exists(L"recovery-first.zip") && !s3.Exists(L"recovery\\first-2") &&
+                  fr3.note.find(L"19044") != std::wstring::npos,
+              L"mini-analyze A3 (run 3): recovery\\first is not rewritten from a first.txt of another Windows build (a note says so)");
+        // A3: a truncated zip is not a complete copy: the folder and zip are written again as first-2.
+        Store s5(NewTempDir(L"a3-zip"));
+        Snapshot f5;
+        EnsureFirstSnapshot(s5, a.items, a.ctx, &f5);
+        std::string z;
+        std::wstring aside;
+        bool cut = s5.Read(L"recovery-first.zip", &z, &e) && s5.RenameAside(L"recovery-first.zip", &aside, &e) &&
+                   s5.WriteNew(L"recovery-first.zip", z.substr(0, z.size() / 2), &e);
+        FirstRunResult fr5 = EnsureFirstSnapshot(s5, a.items, a.ctx, &f5);
+        check(cut && fr5.existed && s5.Exists(L"recovery\\first-2\\restore.cmd") && s5.Exists(L"recovery-first-2.zip"),
+              L"mini-analyze A3: a truncated recovery-first.zip doesn't count as complete; the recovery is written again as first-2");
+        // A6: an apply whose first.txt is from another PC is refused before anything is written.
+        Store s6(NewTempDir(L"a6-foreign"));
+        Snapshot fo = old;
+        fo.meta[L"build"] = a.ctx.build;
+        fo.meta[L"machine"] = L"another-pc-0000";
+        s6.WriteNew(L"first.txt", WriteSnapshot(fo), &e);
+        World b;
+        freshWorld(&b);
+        Plan p6 = BuildSingle(*ItemOf(b.items, L"MapsBroker"), StartCfg{3, -1}, b.items, b.ctx);
+        ApplyEnv env6 = EnvFor(&b.fx.backend, &s6);
+        env6.requireFirst = true;
+        ApplyResult ar6;
+        bool ok6 = RunApply(p6, env6, &ar6);
+        check(!ok6 && ar6.aborted && ar6.error.find(L"not from this PC") != std::wstring::npos && b.fx.backend.faults.setStartCalls == 0 &&
+                  s6.List(L"snap-*.txt").empty() && s6.List(L"undo-*.log").empty(),
+              L"mini-analyze A6: an apply is refused when first.txt is from another PC (machine GUID), before any file or service is touched");
+        // A4: the load saw TrustedInstaller stopped, but another instance has since started it and holds a live claim:
+        // under the lock TrustedInstaller is queried again and the claim is left alone.
+        World c;
+        freshWorld(&c);
+        c.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        std::vector<SvcItem> seen = Folded(c.fx.backend);   // the load's picture: stopped
+        c.fx.backend.SetState(L"TrustedInstaller", SERVICE_RUNNING);   // then the other instance's apply started it
+        SvcItem tiNow;
+        c.fx.backend.Query(L"TrustedInstaller", &tiNow, &e);
+        Store s7(NewTempDir(L"a4-requery"));
+        std::wstring hx = L"";
+        {
+            wchar_t b16[24];
+            swprintf(b16, 24, L"%016llX", (unsigned long long)tiNow.pstart);
+            hx = b16;
+        }
+        std::string t7 = "HXSVC\t1\tundo\n" + Record({L"B", L"20261111-140000", L"preset:stripped:services", L"0", a.ctx.machine, a.ctx.build, L"1"}) +
+                         Record({L"T", L"starting"}) + Record({L"T", L"started", std::to_wstring(tiNow.pid), hx}) +
+                         Record({L"T", L"stopfailed", L"access denied"}) + Record({L"E", L"20261111-140000", L"0", L"0", L"0", L"done"});
+        s7.WriteNew(L"undo-20261111-140000.log", t7, &e);
+        auto l7 = LoadLogs(s7, nullptr);
+        int kept = ResolveStaleTiClaims(s7, l7, seen, a.ctx.machine, a.ctx.build, LockName(), &c.fx.backend);
+        bool live = TiLeftRunning(LoadLogs(s7, nullptr), Folded(c.fx.backend));
+        int blind = ResolveStaleTiClaims(s7, l7, seen, a.ctx.machine, a.ctx.build, LockName());   // the old way: stale picture
+        check(tiNow.pid != 0 && kept == 0 && live && blind == 1,
+              L"mini-analyze A4: a TrustedInstaller claim is closed only from its state re-read under the apply lock (a live claim of another "
+              L"instance is kept)");
+        // A5: Cancel doesn't turn cleanup into failures. TrustedInstaller Hadron started is stopped even after Cancel...
+        World d;
+        freshWorld(&d);
+        d.fx.backend.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        std::atomic<bool> cancel{false};
+        TiService ts(&d.fx.backend);
+        ts.cancel = &cancel;
+        SvcItem tt;
+        bool en = ts.Ensure(&tt, &e);
+        cancel.store(true);
+        std::wstring note;
+        bool stopped = ts.StopIfStarted(&note);
+        const SvcItem* tiAfter = ItemOf(Folded(d.fx.backend), L"TrustedInstaller");
+        check(en && stopped && tiAfter && tiAfter->state == SERVICE_STOPPED && d.fx.backend.controlLog.back() == L"stop TrustedInstaller",
+              L"mini-analyze A5: after Cancel, the release still stops the TrustedInstaller Hadron started (cleanup is not cut short)");
+        // ...a stop that was sent but not seen to finish is "requested, not confirmed", not "could not stop"...
+        TiService ts2(&d.fx.backend);
+        bool en2 = ts2.Ensure(&tt, &e);
+        d.fx.backend.faults.stopFail.insert(L"trustedinstaller");
+        std::wstring note2;
+        bool st2 = ts2.StopIfStarted(&note2);
+        d.fx.backend.faults.stopFail.clear();
+        check(en2 && !st2 && note2.find(L"requested, not confirmed") != std::wstring::npos,
+              L"mini-analyze A5: a TrustedInstaller stop whose wait runs out says \"requested, not confirmed\": " + note2);
+        // ...and R13's restarts after a failed stop still start what the run stopped when Cancel came meanwhile.
+        FakeBackend fr;
+        SvcItem x = Mk(L"HxX", 2, {}), x1 = Mk(L"HxD1", 2, {L"HxX"}), x2 = Mk(L"HxD2", 2, {L"HxX"});
+        x.state = x1.state = x2.state = SERVICE_RUNNING;
+        x.controls = x1.controls = x2.controls = SERVICE_ACCEPT_STOP;
+        fr.SetItems({x, x1, x2});
+        std::vector<SvcItem> three{x, x1, x2};
+        Plan rs = BuildControl(x, 2, fr, three, a.ctx);
+        std::atomic<bool> cancel2{false};
+        fr.faults.stopFail.insert(L"hxx");
+        fr.faults.cancelOnStop.insert(L"hxx");
+        fr.faults.raise = &cancel2;
+        Store cs(NewTempDir(L"a5-control"));
+        ApplyEnv ce = EnvFor(&fr, &cs);
+        ce.cancel = &cancel2;
+        ApplyResult cr;
+        RunControl(rs, ce, &cr);
+        bool allUp = true;
+        for (auto& i : fr.Items()) if (i.state != SERVICE_RUNNING) allUp = false;
+        int again = 0;
+        for (auto& l : cr.lines) if (l.find(L"started again after the failed stop") != std::wstring::npos) again++;
+        check(cancel2.load() && allUp && again == 2,
+              L"mini-analyze A5: Cancel during a Restart whose stop fails still starts the 2 dependents it stopped again (R13 cleanup)");
     }
 
     // ---- R11 and Q3: Default (as first seen); R12: first.txt missing, recovery retried, applies refused -------------
@@ -2244,6 +2439,37 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         bool nullOk = InitializeSecurityDescriptor(&nullSd, SECURITY_DESCRIPTOR_REVISION) && SetSecurityDescriptorDacl(&nullSd, TRUE, nullptr, FALSE);
         check(nullOk && Store::WriteAccessProblem(&nullSd).find(L"no DACL") != std::wstring::npos,
               L"R1: the existing-folder test refuses a null DACL (everyone has full access)");
+        // mini-analyze A1: every folder above the data folder must let nobody but admins rename, delete or re-permission
+        // it. The rule itself, on descriptors built from SDDL (runs under Wine too):
+        auto moveProblem = [](const wchar_t* sddl) {
+            PSECURITY_DESCRIPTOR sd = nullptr;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr)) return std::wstring(L"(bad sddl)");
+            std::wstring w = Store::RenameAccessProblem(sd);
+            LocalFree(sd);
+            return w;
+        };
+        // C:\ (Authenticated Users: create folders here, Modify inherit-only) and C:\ProgramData (Users: create files and
+        // folders, CREATOR OWNER inherit-only) pass; D:\Tools inheriting "Authenticated Users: Modify", a delete-child
+        // right, WRITE_DAC and a null DACL do not.
+        check(moveProblem(L"D:(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;0x1301bf;;;AU)(A;;0x4;;;AU)").empty() &&
+                  moveProblem(L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;GA;;;CO)(A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)").empty() &&
+                  moveProblem(L"D:(A;OICI;FA;;;BA)(A;OICIID;0x1301bf;;;AU)").find(L"rename") != std::wstring::npos &&
+                  !moveProblem(L"D:(A;OICI;FA;;;BA)(A;;0x40;;;BU)").empty() && !moveProblem(L"D:(A;OICI;FA;;;BA)(A;;0x40000;;;BU)").empty() &&
+                  nullOk && Store::RenameAccessProblem(&nullSd).find(L"no DACL") != std::wstring::npos,
+              L"mini-analyze A1: the ancestor rule passes C:\\ and C:\\ProgramData as Windows ships them and refuses a folder others "
+              L"may rename (AU Modify, FILE_DELETE_CHILD, WRITE_DAC, no DACL)");
+        // ...and EnsureRoot applies it to every folder above the data folder, before creating anything below it.
+        std::wstring anc = base + L"\\renamable", e7;
+        bool ma = mkWith(anc, L"O:BAD:(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;;0x10000;;;AU)");
+        if (ma && daclOf(anc).find(L";;;AU)") == std::wstring::npos) {
+            info(L"mini-analyze A1: this system does not keep a folder's DACL (Wine), so EnsureRoot's ancestor check is exercised "
+                 L"on the SDDL rule above only (Windows CI runs this part)");
+        } else {
+            bool okAnc = Store(anc + L"\\Hadron\\services").EnsureRoot(true, &e7);
+            check(ma && !okAnc && e7.find(anc) != std::wstring::npos && e7.find(L"rename") != std::wstring::npos &&
+                      GetFileAttributesW((anc + L"\\Hadron").c_str()) == INVALID_FILE_ATTRIBUTES,
+                  L"mini-analyze A1: a data folder below a folder Authenticated Users may delete is refused, and nothing is created: " + e7);
+        }
         check(Store::Plain(L"\\\\?\\UNC\\srv\\share\\x") == L"\\\\srv\\share\\x" && Store::Plain(L"\\\\?\\C:\\x") == L"C:\\x",
               L"Store::Plain strips \\\\?\\ and \\\\?\\UNC\\ (--data-dir is kept without the prefix)");
     }

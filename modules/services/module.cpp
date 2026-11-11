@@ -46,6 +46,8 @@ using namespace hx::services;
 
 namespace {
 
+namespace { std::wstring StartCellText(const SvcItem& s, bool drift, bool console); }   // the list's Start type cell (below)
+
 constexpr UINT WM_SVC_LOADED = WM_MODULE_BASE + 1;    // load worker -> view
 constexpr UINT WM_SVC_APPLIED = WM_MODULE_BASE + 2;   // apply worker -> view
 constexpr UINT WM_SVC_PLANNED = WM_MODULE_BASE + 3;   // plan worker -> view
@@ -221,13 +223,6 @@ const std::wstring& WindowsDir() {
     return w;
 }
 
-// A log stamp ("20261110-213012", UTC) as the user reads it: "2026-11-10 21:30 UTC". Anything else is shown as is.
-std::wstring StampText(const std::wstring& st) {
-    if (st.size() < 13 || st[8] != L'-') return st;
-    for (size_t i = 0; i < st.size(); i++) if (i != 8 && !iswdigit(st[i])) return st;
-    return st.substr(0, 4) + L"-" + st.substr(4, 2) + L"-" + st.substr(6, 2) + L" " + st.substr(9, 2) + L":" + st.substr(11, 2) + L" UTC";
-}
-
 // ============================================================================================
 class ServicesModule : public Module {
 public:
@@ -289,6 +284,11 @@ private:
     std::wstring ChangedText(const SvcItem& s) const;   // vs the first-run snapshot
     std::wstring BasisShort(const SvcItem& s) const;
     bool CanApply(std::wstring* why) const;
+    // A7: the result banner's Undo is this apply's own log (an aborted apply has no E, so FindUndoable would give the
+    // apply before it).
+    bool ResultUndoable() const {
+        return undoable_ >= 0 && undoable_ < (int)logs_.size() && !result_.stamp.empty() && logs_[undoable_].stamp == result_.stamp;
+    }
     int WriteAccess(const std::wstring& name) const;   // 0 admin can write, 1 refused (needs TI), -1 unknown
 
     // plans
@@ -734,7 +734,8 @@ void ServicesModule::StartLoad() {
                         break;
                     }
                 // R4: claims whose TrustedInstaller process is gone are closed with a "ti-resolved:<stamp>" log.
-                if (ResolveStaleTiClaims(st, out->logs, out->items, out->machine, out->build) > 0) reload = true;
+                if (ResolveStaleTiClaims(st, out->logs, out->items, out->machine, out->build, L"Global\\Hadron.services.apply", b) > 0)
+                    reload = true;
                 if (reload) { out->logProblems.clear(); out->logs = LoadLogs(st, &out->logProblems); }
             }
         }
@@ -780,6 +781,7 @@ void ServicesModule::OnLoaded() {
     TakeData(std::move(o.items), o.hw, o.build, o.machine);
     writeAccess_ = std::move(keep);
     if (planReq_.type != PlanReq::None && !applyW_.Running()) OpenPlan(planReq_, true);
+    if (!dismissStamp_.empty() && !applyW_.Running()) StartLoad();   // a Dismiss pressed during this load (A2)
 }
 
 void ServicesModule::TakeData(std::vector<SvcItem> items, const HwInfo& hw, std::wstring build, std::wstring machine) {
@@ -974,9 +976,7 @@ void ServicesModule::Refilter() {
             if (k == L"name") r.push_back(s.name);
             else if (k == L"display") r.push_back(s.display);
             else if (k == L"state") r.push_back(StateName(s.state));
-            else if (k == L"start")
-                r.push_back(StartLabel(s.cfg, s.trigger) + (s.regStart >= 0 && s.regStart != s.cfg.start ? L" (pending)" : L"") +
-                            (drift_.count(Lower(s.name)) ? L"  *" : L""));
+            else if (k == L"start") r.push_back(StartCellText(s, drift_.count(Lower(s.name)) != 0, false));
             else if (k == L"kb") r.push_back(KbVerdict(s).label);
             else if (k == L"company") r.push_back(CompanyShort(s.company));
             else if (k == L"account") r.push_back(s.account);
@@ -1377,7 +1377,7 @@ void ServicesModule::OnClickId(int id) {
     if (id == ID_UNDO_LAST || id == ID_RESULT_UNDO) {
         if (undoable_ < 0) return;
         // R21: until the reload after an apply has finished, undoable_ is the previous apply's log.
-        if (id == ID_RESULT_UNDO && (!resultFresh_ || loadW_.Running())) return;
+        if (id == ID_RESULT_UNDO && (!resultFresh_ || loadW_.Running() || !ResultUndoable())) return;
         PlanReq r;
         r.type = PlanReq::Undo;
         r.logIndex = undoable_;
@@ -1388,7 +1388,9 @@ void ServicesModule::OnClickId(int id) {
     if (id == ID_INT_DISMISS) {   // R9: recorded in a log by the next load, never only hidden
         if (fixture_ || interrupted_ < 0 || interrupted_ >= (int)logs_.size()) { Status(L"Services: Dismiss is off in fixture mode."); return; }
         dismissStamp_ = logs_[interrupted_].stamp;
-        StartLoad();
+        // mini-analyze A2: a load already running can't take it; OnLoaded starts the next one, which records it.
+        if (loadW_.Running() || applyW_.Running()) Status(L"Services: Dismiss is recorded when the current load finishes.");
+        else StartLoad();
         return;
     }
     if (id == ID_TI_STOP) {
@@ -1681,7 +1683,7 @@ std::vector<Banner> ServicesModule::Banners() const {
         }
         std::vector<std::pair<int, std::wstring>> acts;
         // R21: Undo only once the reload after this apply has finished, so it undoes this apply's log.
-        if (!resultControl_ && r.ok > 0 && undoable_ >= 0 && resultFresh_ && !loadW_.Running())
+        if (!resultControl_ && r.ok > 0 && resultFresh_ && !loadW_.Running() && ResultUndoable())
             acts.push_back({ID_RESULT_UNDO, L"Undo"});
         acts.push_back({ID_DISMISS, L"Dismiss"});
         v.push_back({t, tone, acts});
@@ -1955,7 +1957,8 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
                          p.mute});
     }
     d.push_back({P_HEAD, L"", L"Configuration", kNoColor, SIDE_LEFT});
-    kv(L"Start type", StartLabel(s.cfg, s.trigger) + (s.cfg.delayed >= 0 && s.cfg.start != 2 ? L" (DelayedAutostart " + std::to_wstring(s.cfg.delayed) + L")" : L""));
+    if (s.cfgUnknown) kv(L"Start type", L"unknown (could not be read)", p.warnT);   // A8
+    else kv(L"Start type", StartLabel(s.cfg, s.trigger) + (s.cfg.delayed >= 0 && s.cfg.start != 2 ? L" (DelayedAutostart " + std::to_wstring(s.cfg.delayed) + L")" : L""));
     if (hasFirst_) {
         const SvcItem* f = first_.Find(s.name);
         auto cr = first_.meta.find(L"created");
@@ -2479,11 +2482,12 @@ void ServicesModule::PaintListMode(HDC dc, const RECT& rc, int y) {
     {
         struct B { const wchar_t* label; int id; bool on; };
         std::vector<B> bs;
-        if (drv && s->cfg.start <= 1) bs.push_back({s->cfg.start == 0 ? L"Boot" : L"System", 0, true});
-        bs.push_back({L"Auto", ID_SET + 2, s->cfg.start == 2 && !s->cfg.Delayed()});
-        if (!drv) bs.push_back({L"Auto (delayed)", ID_SET + 5, s->cfg.Delayed()});
-        bs.push_back({L"Manual", ID_SET + 3, s->cfg.start == 3});
-        bs.push_back({L"Disabled", ID_SET + 4, s->cfg.start == 4});
+        const bool known = !s->cfgUnknown;   // A8: an unreadable start type has no current value to mark
+        if (known && drv && s->cfg.start <= 1) bs.push_back({s->cfg.start == 0 ? L"Boot" : L"System", 0, true});
+        bs.push_back({L"Auto", ID_SET + 2, known && s->cfg.start == 2 && !s->cfg.Delayed()});
+        if (!drv) bs.push_back({L"Auto (delayed)", ID_SET + 5, known && s->cfg.Delayed()});
+        bs.push_back({L"Manual", ID_SET + 3, known && s->cfg.start == 3});
+        bs.push_back({L"Disabled", ID_SET + 4, known && s->cfg.start == 4});
         const int x0 = ax, limit = det.right - Sc(14);
         for (auto& b : bs) {
             int bw = TextW(dc, b.label, f.caption) + Sc(20);
@@ -2670,6 +2674,15 @@ std::wstring ShortStart(const StartCfg& c) {
     }
     return L"start " + std::to_wstring(c.start);
 }
+
+// The Start type cell of the list, both layouts. A8: an item whose configuration could not be read has a placeholder
+// start type, so the cell says "unknown" instead of showing it as fact.
+std::wstring StartCellText(const SvcItem& s, bool drift, bool console) {
+    if (s.cfgUnknown) return L"unknown";
+    bool pending = s.regStart >= 0 && s.regStart != s.cfg.start;   // a change waits for a restart
+    if (console) return ShortStart(s.cfg) + (s.trigger ? L"+t" : L"") + (pending ? L"!" : L"") + (drift ? L" *" : L"");
+    return StartLabel(s.cfg, s.trigger) + (pending ? L" (pending)" : L"") + (drift ? L"  *" : L"");
+}
 std::wstring ShortState(DWORD st) {
     switch (st) {
         case SERVICE_STOPPED: return L"stopped";
@@ -2766,7 +2779,7 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
             stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
         }
         auto on = [&](int i) {
-            if (!s) return false;
+            if (!s || s->cfgUnknown) return false;   // A8: no current value to mark
             return i == 0 ? (s->cfg.start == 2 && !s->cfg.Delayed()) : i == 1 ? s->cfg.Delayed() : s->cfg.start == i + 1;
         };
         static const wchar_t* const kSet[] = {L"Auto", L"Delayed", L"Manual", L"Disabled"};
@@ -2996,8 +3009,7 @@ void ServicesModule::ConsoleListCells(int row, std::vector<ConCell>& out) {
         else if (k == L"start") {
             bool drift = drift_.count(Lower(s.name)) != 0;
             bool pending = s.regStart >= 0 && s.regStart != s.cfg.start;   // a change waits for a restart
-            out.push_back({ShortStart(s.cfg) + (s.trigger ? L"+t" : L"") + (pending ? L"!" : L"") + (drift ? L" *" : L""),
-                           drift || pending ? p.warnInk : p.text});
+            out.push_back({StartCellText(s, drift, true), drift || pending || s.cfgUnknown ? p.warnInk : p.text});
         } else if (k == L"changed") {
             std::wstring c = ChangedText(s);
             out.push_back({c, c == L"new" ? p.accInk : p.warnInk});
@@ -3933,6 +3945,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         m->resultControl_ = false;
         m->result_ = ApplyResult{};
         m->result_.ok = 1;
+        m->result_.stamp = m->logs_.empty() ? L"" : m->logs_[0].stamp;   // this apply's own log
         m->resultFresh_ = false;   // as OnApplied leaves it
         auto hasUndo = [&]() {
             for (auto& b : m->Banners())
@@ -3945,6 +3958,57 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         m->resultFresh_ = true;    // as OnLoaded sets it
         check(staleHidden && staleNoPlan && hasUndo(),
               L"ui R21: Undo is off in the result banner (and its click does nothing) until the reload's logs are in");
+        // A7: an aborted apply (2 rows written, then the log failed: no E) has no undoable log of its own, so the
+        // banner's Undo would have opened the previous apply. It is not offered, and its click opens nothing.
+        m->result_.stamp = L"20261111-235959";
+        m->result_.aborted = true;
+        m->result_.ok = 2;
+        bool abortedHidden = !hasUndo();
+        m->OnClickId(ID_RESULT_UNDO);
+        check(abortedHidden && m->mode_ == Mode::List,
+              L"ui mini-analyze A7: after an aborted apply the result banner offers no Undo (the undoable log is an earlier apply's)");
+    }
+
+    {   // A2: Dismiss pressed while a load runs is kept and recorded by the load that follows it
+        auto m = fresh(h, fixture + L"\\interrupted");
+        bool had = m->interrupted_ >= 0;
+        // Dismiss is off in fixture mode. Here: a fake backend for the reload, and no data folder (fixture mode cleared
+        // it), so the reload reads the fake and writes nothing.
+        m->fixture_ = false;
+        auto fb = std::make_unique<FakeBackend>();
+        fb->SetItems(m->items_);
+        m->backend_ = std::move(fb);
+        std::atomic<bool> go{false};
+        bool started = m->loadW_.Start(nullptr, 0, [&go]() { while (!go.load()) Sleep(5); });
+        m->OnClickId(ID_INT_DISMISS);
+        bool kept = !m->dismissStamp_.empty();
+        go.store(true);
+        m->loadW_.Join();
+        m->loadOut_ = LoadOut{};
+        m->loadOut_.ok = true;
+        m->loadOut_.items = m->items_;
+        m->loadOut_.logs = m->logs_;
+        m->loadOut_.build = m->build_;
+        m->loadOut_.machine = m->machine_;
+        m->OnLoaded();
+        bool handed = m->dismissStamp_.empty() && m->loadW_.Running();
+        m->loadW_.Cancel();
+        m->loadW_.Join();
+        check(had && started && kept && handed,
+              L"ui mini-analyze A2: a Dismiss pressed during a load is kept, and the next load (started when this one ends) takes it");
+    }
+
+    {   // A8: an unreadable start type is never shown as fact
+        SvcItem u;
+        u.name = L"HxUnreadable";
+        u.cfg = StartCfg{3, -1};
+        u.regStart = 3;
+        u.cfgUnknown = true;
+        SvcItem k = u;
+        k.cfgUnknown = false;
+        check(StartCellText(u, false, false) == L"unknown" && StartCellText(u, true, true) == L"unknown" &&
+                  StartCellText(k, false, false) == L"Manual" && StartCellText(k, false, true) != L"unknown",
+              L"ui mini-analyze A8: an item whose configuration could not be read shows Start type \"unknown\" in both layouts");
     }
 
     {   // Console detail columns come from each heading's side, never its text (Review cat 5)
