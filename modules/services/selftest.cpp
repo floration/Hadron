@@ -95,6 +95,16 @@ bool ReadAll(const std::wstring& path, std::string* out) {
     return true;
 }
 
+// P1: logs[i] for a check that may already have failed (no data folder, e.g. a release build under Wine): an empty
+// log instead of reading past the vector, so the selftest reports its failures instead of crashing.
+template <class T>
+T& At(std::vector<T>& v, int i) {
+    static T none;
+    if (i >= 0 && i < (int)v.size()) return v[(size_t)i];
+    none = T{};
+    return none;
+}
+
 bool WriteAll(const std::wstring& path, const std::string& data) {   // test outputs only (goldens, --out)
     HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -940,7 +950,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         std::string log;
         UndoLog ul;
         std::vector<std::wstring> logs = Store(fixture + L"\\interrupted").List(L"undo-*.log");
-        bool ok = !logs.empty() && ReadAll(fixture + L"\\interrupted\\" + logs[0], &log) && ParseUndoLog(log, &ul, &err);
+        bool ok = !logs.empty() && ReadAll(fixture + L"\\interrupted\\" + At(logs, 0), &log) && ParseUndoLog(log, &ul, &err);
         check(ok && ul.badRecords == 1 && ul.rows.size() == 3 && ul.Row(2) && ul.Row(2)->hasI && !ul.Row(2)->hasD && !ul.hasE,
               L"undo log: a torn last record is ignored; row 2 was in progress");
         std::string flipped = log;
@@ -1136,7 +1146,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         for (auto& i : a.fx.backend.Items()) if (i.name == L"MapsBroker") ms = &i;
         check(ms && ms->cfg.start == 4 && ms->cfg.delayed == 1, L"MapsBroker is Disabled and its DelayedAutostart left alone");
         auto logs = LoadLogs(s, nullptr);
-        check(logs.size() == 1 && logs[0].hasE && FindInterrupted(logs) < 0 && FindUndoable(logs) == 0,
+        check(logs.size() == 1 && At(logs, 0).hasE && FindInterrupted(logs) < 0 && FindUndoable(logs) == 0,
               L"the undo log is complete (B ... E) and offers Undo");
         std::vector<size_t> order = ApplyOrder(p);
         int xa = -1, xg = -1;
@@ -1145,7 +1155,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             if (p.rows[order[k]].name == L"upnphost") xg = (int)k;
         }
         check(xa >= 0 && xg >= 0 && xg < xa, L"apply order: a dependent (upnphost) is disabled before what it depends on (SSDPSRV)");
-        Plan u = BuildUndo(logs[0], a.fx.backend, a.items, a.ctx);
+        Plan u = BuildUndo(At(logs, 0), a.fx.backend, a.items, a.ctx);
         ApplyResult ru;
         ok = RunApply(u, env, &ru);
         auto after = CfgMap(a.fx.backend);
@@ -1160,7 +1170,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         check(last.count(L"mapsbroker") && last[L"mapsbroker"].start == 4, L"drift: LastApplied records what Hadron set");
         WriteOp back{3, -1};
         a.fx.backend.SetStart(L"MapsBroker", back, Identity::Admin, &err);
-        Plan u2 = BuildUndo(logs[FindUndoable(logs)], a.fx.backend, a.items, a.ctx);
+        Plan u2 = BuildUndo(At(logs, FindUndoable(logs)), a.fx.backend, a.items, a.ctx);
         const PlanRow* mr = RowOf(u2, L"MapsBroker");
         check(mr && !mr->include && mr->warning.find(L"changed since") != std::wstring::npos,
               L"undo: a row changed by something else since Hadron set it is unticked with a warning");
@@ -1189,7 +1199,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         check(line(L"skip lfsvc") && line(L"skip RetailDemo"), L"faults: vanished and changed-since-plan items -> skipped");
         check(line(L"skip SSDPSRV"), L"faults: SSDPSRV is skipped because its dependent (upnphost) could not be changed");
         auto logs = LoadLogs(s, nullptr);
-        check(logs.size() == 1 && logs[0].hasE, L"faults: per-item errors do not stop the run; the log ends with E");
+        check(logs.size() == 1 && At(logs, 0).hasE, L"faults: per-item errors do not stop the run; the log ends with E");
 
         World b;
         freshWorld(&b);
@@ -1220,7 +1230,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         ApplyResult r4;
         RunApply(p4, e4, &r4);
         auto l4 = LoadLogs(s4, nullptr);
-        check(r4.cancelled && r4.ok == 0 && l4.size() == 1 && l4[0].hasE, L"cancel between items: nothing more changes, the log is closed");
+        check(r4.cancelled && r4.ok == 0 && l4.size() == 1 && At(l4, 0).hasE, L"cancel between items: nothing more changes, the log is closed");
         World e;
         freshWorld(&e);
         Store s5(NewTempDir(L"locked"));
@@ -1245,13 +1255,13 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         bool ok = RunApply(p, env, &r);
         auto logs = LoadLogs(s, nullptr);
         int k = FindInterrupted(logs);
-        check(!ok && r.crashed && k == 0 && logs[0].Row(3) && logs[0].Row(3)->hasI && !logs[0].Row(3)->hasD,
+        check(!ok && r.crashed && k == 0 && At(logs, 0).Row(3) && At(logs, 0).Row(3)->hasI && !At(logs, 0).Row(3)->hasD,
               L"crash after BEGIN 3: the log has I for row 3 and no E -> interrupted");
         std::vector<size_t> order = ApplyOrder(p);
         env.crashAfterBegin = -1;
         a.items = Folded(a.fx.backend);
         if (mode == 0) {
-            Plan rp = BuildResume(logs[0], a.fx.backend, a.items, a.ctx);
+            Plan rp = BuildResume(At(logs, 0), a.fx.backend, a.items, a.ctx);
             ApplyResult rr;
             ok = RunApply(rp, env, &rr);
             bool all = true;
@@ -1263,7 +1273,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             check(ok && rr.failed == 0 && rp.alreadySet >= 1 && all && FindInterrupted(logs) < 0,
                   L"Resume: finishes the remaining rows (row 3 already applied), and the interrupted log is resolved");
         } else {
-            Plan up = BuildUndo(logs[0], a.fx.backend, a.items, a.ctx);
+            Plan up = BuildUndo(At(logs, 0), a.fx.backend, a.items, a.ctx);
             ApplyResult ru;
             ok = RunApply(up, env, &ru);
             logs = LoadLogs(s, nullptr);
@@ -1291,11 +1301,11 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         bool ok = RunApply(p, env, &r);
         auto logs = LoadLogs(s, nullptr);
         const UndoRow* ur = nullptr;
-        for (auto& row : logs[0].rows) if (row.name == L"dmwappushservice") ur = &row;
+        for (auto& row : At(logs, 0).rows) if (row.name == L"dmwappushservice") ur = &row;
         check(ok && r.failed == 0 && ti.acquired && ti.impersonations == 1 && ti.released,
               L"TI apply: the token is taken once, used for the marked row only, then released");
         check(ti.flagSeen && ti.writeRefused, L"TI apply: Hadron's own file writes are refused while impersonating");
-        check(ur && ur->identity == L"ti" && ur->result == L"ok" && ur->text == L"ti" && logs[0].tiStarted && logs[0].tiStopped,
+        check(ur && ur->identity == L"ti" && ur->result == L"ok" && ur->text == L"ti" && At(logs, 0).tiStarted && At(logs, 0).tiStopped,
               L"TI apply: the log records the identity and that TrustedInstaller was started and stopped again");
         World b;
         freshWorld(&b);
@@ -1335,23 +1345,23 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         bool okw = MakeWorld(fixture + L"\\forged", &kb, &f, &e);
         auto logs = LoadLogs(Store(fixture + L"\\forged"), nullptr);
         int k = FindUndoable(logs);
-        Plan u = k >= 0 ? BuildUndo(logs[k], f.fx.backend, f.items, f.ctx) : Plan{};
+        Plan u = k >= 0 ? BuildUndo(At(logs, k), f.fx.backend, f.items, f.ctx) : Plan{};
         MarkTi(&u, f.fx.backend, false, f.items);
         bool allBlocked = u.rows.size() == 3;
         for (auto& r : u.rows) if (r.blocked.empty() || r.include || r.canToggle) allBlocked = false;
         check(okw && k == 0 && allBlocked && u.Included() == 0 && RowOf(u, L"stornvme") && RowOf(u, L"disk") && RowOf(u, L"RpcSs"),
               L"A4: a forged undo log (valid CRCs) can't set stornvme, disk or RpcSs to Disabled: every row blocked");
-        UndoLog other = logs.empty() ? UndoLog{} : logs[0];
+        UndoLog other = logs.empty() ? UndoLog{} : At(logs, 0);
         other.machine = L"another-machine";
         Plan um = BuildUndo(other, f.fx.backend, f.items, f.ctx);
         Plan rm = BuildResume(other, f.fx.backend, f.items, f.ctx);
-        UndoLog oldBuild = logs.empty() ? UndoLog{} : logs[0];
+        UndoLog oldBuild = logs.empty() ? UndoLog{} : At(logs, 0);
         oldBuild.build = L"22631";
         Plan ub = BuildUndo(oldBuild, f.fx.backend, f.items, f.ctx);
         auto refused = [](const Plan& p) { return p.rows.empty() && !p.notes.empty() && p.notes[0].rfind(L"Refused", 0) == 0; };
         check(refused(um) && refused(rm) && refused(ub), L"A4: Undo and Resume refuse a log from another machine GUID or another build");
         // Resume through the same guards: a log that would raise a service to System start.
-        UndoLog rs = logs.empty() ? UndoLog{} : logs[0];
+        UndoLog rs = logs.empty() ? UndoLog{} : At(logs, 0);
         rs.hasE = false;
         rs.rows.clear();
         UndoRow ur;
@@ -1675,7 +1685,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         int stops = 0;
         for (auto& c : a.fx.backend.controlLog) if (c == L"stop TrustedInstaller") stops++;
         check(ok1 && ok2 && r1.ok >= 1 && r2.ok == 1 && after1 == SERVICE_STOPPED && stateOf(L"TrustedInstaller") == SERVICE_RUNNING &&
-                  stops == 1 && logs.size() == 2 && logs[0].tiStarted && logs[0].tiStopped && !logs[1].tiStarted && !logs[1].tiStopped,
+                  stops == 1 && logs.size() == 2 && At(logs, 0).tiStarted && At(logs, 0).tiStopped && !At(logs, 1).tiStarted && !At(logs, 1).tiStopped,
               L"A3: two applies; TrustedInstaller already running before the second -> Hadron neither claims nor stops it");
         TiService pend(&a.fx.backend);
         pend.waitMs = 0;
@@ -1743,8 +1753,8 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         write(mkLog(L"20261111-101500-2", L"preset:bloat:services", true, 0));
         write(mkLog(L"20261101-000000", L"preset:stripped:services", true, 7));
         auto logs = LoadLogs(s, nullptr);
-        check(logs.size() == 3 && logs[0].stamp == L"20261111-101500-2" && logs[1].stamp == L"20261111-101500-10" &&
-                  logs[2].stamp == L"20261101-000000",
+        check(logs.size() == 3 && At(logs, 0).stamp == L"20261111-101500-2" && At(logs, 1).stamp == L"20261111-101500-10" &&
+                  At(logs, 2).stamp == L"20261101-000000",
               L"log order: the B record's sequence number first, then the stamp with -N compared as a number (-2 before -10)");
         std::vector<UndoLog> v = {mkLog(L"20261111-110000", L"undo:20261111-120000", true, 0), mkLog(L"20261111-120000", L"preset:bloat:services", false, 0)};
         check(FindInterrupted(v) < 0, L"an undo stamped earlier than its apply (clock change) still resolves it (logic M4)");
@@ -1797,9 +1807,9 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         auto logs = LoadLogs(s, nullptr);
         auto items = Folded(a.fx.backend);
         const SvcItem* tiNow = ItemOf(items, L"TrustedInstaller");
-        bool rec = logs.size() == 1 && tiNow && tiNow->state == SERVICE_RUNNING && logs[0].tiStarting && logs[0].tiStarted &&
-                   logs[0].tiPid == tiNow->pid && logs[0].tiPid != 0 && logs[0].tiPstart == tiNow->pstart && logs[0].tiStopFailed &&
-                   !logs[0].tiStopped && !logs[0].tiStopNote.empty();
+        bool rec = logs.size() == 1 && tiNow && tiNow->state == SERVICE_RUNNING && At(logs, 0).tiStarting && At(logs, 0).tiStarted &&
+                   At(logs, 0).tiPid == tiNow->pid && At(logs, 0).tiPid != 0 && At(logs, 0).tiPstart == tiNow->pstart && At(logs, 0).tiStopFailed &&
+                   !At(logs, 0).tiStopped && !At(logs, 0).tiStopNote.empty();
         check(rec, L"R4: the log records T starting, the started process (pid and creation time) and the failed release (T stopfailed)");
         std::wstring bt = TiLeftText(logs, items);
         check(rec && TiLeftRunning(logs, items) && bt.find(L"process " + std::to_wstring(tiNow->pid)) != std::wstring::npos &&
@@ -1879,8 +1889,8 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         int n1 = ResolveStaleTiClaims(s3, sl, items2, a.ctx.machine, a.ctx.build, LockName());
         auto sl2 = LoadLogs(s3, nullptr);
         int n2 = ResolveStaleTiClaims(s3, sl2, items2, a.ctx.machine, a.ctx.build, LockName());
-        check(nBusy == 0 && n1 == 1 && n2 == 0 && sl2.size() == 2 && sl2[1].source == L"ti-resolved:20261111-132000" &&
-                  sl2[1].note.find(L"different TrustedInstaller process") != std::wstring::npos && FindUndoable(sl2) < 0,
+        check(nBusy == 0 && n1 == 1 && n2 == 0 && sl2.size() == 2 && At(sl2, 1).source == L"ti-resolved:20261111-132000" &&
+                  At(sl2, 1).note.find(L"different TrustedInstaller process") != std::wstring::npos && FindUndoable(sl2) < 0,
               L"R4: load closes a claim whose process is gone with one ti-resolved log (not while the apply lock is busy)");
         // An older log's T started without pid and creation time is never claimed, even with TrustedInstaller running.
         UndoLog old;
@@ -1933,7 +1943,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         auto l4 = LoadLogs(s4, nullptr);
         UndoLog crashed;   // power lost between T starting and T started
         crashed.hasB = true; crashed.stamp = L"20261111-133000"; crashed.source = L"preset:bloat:services"; crashed.tiStarting = true;
-        check(fti.acquired && fti.released && l4.size() == 1 && l4[0].tiStarting && !l4[0].hasE &&
+        check(fti.acquired && fti.released && l4.size() == 1 && At(l4, 0).tiStarting && !At(l4, 0).hasE &&
                   InterruptedText({crashed}, 0).find(L"while starting TrustedInstaller") != std::wstring::npos,
               L"R22: T starting is in the log before TrustedInstaller is started; the banner names a crash there");
     }
@@ -1968,7 +1978,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         a.items = Folded(a.fx.backend);
         auto logs = LoadLogs(s, nullptr);
         int u = FindUndoable(logs);
-        Plan up = u >= 0 ? BuildUndo(logs[u], a.fx.backend, a.items, a.ctx) : Plan{};
+        Plan up = u >= 0 ? BuildUndo(At(logs, u), a.fx.backend, a.items, a.ctx) : Plan{};
         const PlanRow* mb = RowOf(up, L"MapsBroker");
         const PlanRow* lf = RowOf(up, L"lfsvc");
         const PlanRow* rd = RowOf(up, L"RetailDemo");
@@ -1994,12 +2004,12 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         ApplyLock busy;
         busy.Acquire(LockName(), &e);
         std::wstring be;
-        bool dBusy = !l3.empty() && DismissInterrupted(s3, l3[0], a.ctx.machine, a.ctx.build, LockName(), &be);
+        bool dBusy = !l3.empty() && DismissInterrupted(s3, At(l3, 0), a.ctx.machine, a.ctx.build, LockName(), &be);
         busy.Release();
-        bool dOk = !l3.empty() && DismissInterrupted(s3, l3[0], a.ctx.machine, a.ctx.build, LockName(), &e);
+        bool dOk = !l3.empty() && DismissInterrupted(s3, At(l3, 0), a.ctx.machine, a.ctx.build, LockName(), &e);
         auto l4 = LoadLogs(s3, nullptr);
         check(FindInterrupted(l3) == 0 && !dBusy && dOk && l4.size() == 2 && FindInterrupted(l4) < 0 &&
-                  l4[1].source == L"dismiss:20261111-170000" && l4[1].hasE && l4[1].rows.empty() && l4[0].rows.size() == 1 &&
+                  At(l4, 1).source == L"dismiss:20261111-170000" && At(l4, 1).hasE && At(l4, 1).rows.empty() && At(l4, 0).rows.size() == 1 &&
                   bt.find(L"Dismiss") != std::wstring::npos && bt.find(L"Stripped (Services)") != std::wstring::npos &&
                   bt.find(L"preset:") == std::wstring::npos,
               L"R9: Dismiss writes a dismiss log under the apply lock; the banner goes and the apply's log stays");
@@ -2360,7 +2370,7 @@ int RunLiveTest(const std::vector<std::wstring>& args) {
         auto logs = LoadLogs(st, nullptr);
         int k = FindUndoable(logs);
         if (k < 0) { wprintf(L"  FAIL: nothing to undo\n"); fails++; break; }
-        Plan u = BuildUndo(logs[k], *b, items, c);
+        Plan u = BuildUndo(At(logs, k), *b, items, c);
         if (useTi) for (auto& r : u.rows) r.needsTi = true;
         if (!run(u, L"undo")) break;
         verify(original, L"undone");

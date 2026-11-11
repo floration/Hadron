@@ -228,22 +228,6 @@ std::wstring StampText(const std::wstring& st) {
     return st.substr(0, 4) + L"-" + st.substr(4, 2) + L"-" + st.substr(6, 2) + L" " + st.substr(9, 2) + L":" + st.substr(11, 2) + L" UTC";
 }
 
-// A log's source id ("preset:bloat:services", "undo:<stamp>") as the plan title the user saw, without internal ids.
-std::wstring SourceText(const std::wstring& src) {
-    auto tab = [](const std::wstring& t) { return t == L"drivers" ? std::wstring(L"Drivers") : std::wstring(L"Services"); };
-    std::vector<std::wstring> f = Split(src, L':');
-    if (f.size() == 3 && f[0] == L"preset") {
-        int lv = f[1] == L"bloat" ? LV_BLOAT : f[1] == L"stripped" ? LV_STRIPPED : f[1] == L"minimum" ? LV_MINIMUM : -1;
-        if (lv >= 0) return LevelName(lv) + L" (" + tab(f[2]) + L")";
-    }
-    if (f.size() == 2 && f[0] == L"default-first") return L"Default: as first seen (" + tab(f[1]) + L")";
-    if (f.size() == 2 && f[0] == L"default-stock") return L"Default: Windows stock (" + tab(f[1]) + L")";
-    if (src == L"single") return L"a single change";
-    if (f.size() >= 2 && f[0] == L"undo") return L"the undo of the apply of " + StampText(src.substr(5));
-    if (f.size() >= 2 && f[0] == L"resume") return L"the resume of the apply of " + StampText(src.substr(7));
-    return Unesc(src);
-}
-
 // ============================================================================================
 class ServicesModule : public Module {
 public:
@@ -3993,14 +3977,14 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
             h.Use(ly, 96);
             auto m = fresh(h, fixture + L"\\interrupted");
             if (plan) m->OnClickId(ID_PRESET + 3);
-            const RECT small{0, 0, 800, 560};
+            const RECT minRc{0, 0, 800, 560};
             Canvas c2(800, 560);
             if (!c2.ok()) continue;
-            m->Paint(c2.dc, small);
+            m->Paint(c2.dc, minRc);
             std::wstring bad;
             for (size_t i = 0; i < m->clicks_.size(); i++) {
                 const RECT& a = m->clicks_[i].rc;
-                if (a.left < 0 || a.top < 0 || a.right > small.right || a.bottom > small.bottom)
+                if (a.left < 0 || a.top < 0 || a.right > minRc.right || a.bottom > minRc.bottom)
                     bad += L" " + std::to_wstring(m->clicks_[i].id) + L" outside;";
                 for (size_t j = i + 1; j < m->clicks_.size(); j++)
                     if (Overlap(a, m->clicks_[j].rc))
