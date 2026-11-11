@@ -1,12 +1,18 @@
 name: Release
 
-# Push a tag vX.Y.Z on a commit that is on main. This builds the exes with that version in their
+# Push a tag vX.Y.Z on a commit that is on main, or run this workflow by hand on main with a version
+# (Actions > Release > Run workflow); the second way creates the tag on main's head. This builds the exes with that version in their
 # VERSIONINFO and publishes them with a SHA256SUMS file. The in-app updater (core/sys/update.cpp) reads
 # the latest release, matches the asset by exe name, checks SHA256SUMS and the VERSIONINFO, then swaps
 # the exe in.
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version X.Y.Z (the tag vX.Y.Z is created on main's head)"
+        required: true
 
 permissions:
   contents: write
@@ -19,11 +25,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Resolve tag
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::run the release workflow on main"; exit 1; }
+            TAG="v${INPUT_VERSION#v}"
+            git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null && { echo "::error::$TAG already exists"; exit 1; }
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
       - name: Tag must be vX.Y.Z on main
         run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "::error::tag must be vX.Y.Z"; exit 1; }
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "::error::tag must be vX.Y.Z"; exit 1; }
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::tagged commit is not on main"; exit 1; }
-          IFS=. read -r a b c <<< "${GITHUB_REF_NAME#v}"
+          IFS=. read -r a b c <<< "${TAG#v}"
           for n in $a $b $c; do (( n <= 65535 )) || { echo "::error::version fields must be <= 65535"; exit 1; }; done
       # The full CI (incl. the Windows job with the BIOS selftests) must have passed on this exact commit.
       - name: CI passed on this commit
@@ -39,7 +57,7 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake \
-            -DCMAKE_BUILD_TYPE=Release -DHADRON_VERSION="${GITHUB_REF_NAME#v}"
+            -DCMAKE_BUILD_TYPE=Release -DHADRON_VERSION="${TAG#v}"
           cmake --build build
       # Nothing is published that fails its own selftests: users install the latest release automatically.
       - name: Selftests (Wine)
@@ -59,4 +77,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Hadron ${GITHUB_REF_NAME#v}" --generate-notes
+          # --target only matters when the tag doesn't exist yet (manual run): it is created on this commit.
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Hadron ${TAG#v}" --generate-notes
