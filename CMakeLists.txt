@@ -67,6 +67,21 @@ set_property(SOURCE "${HADRON_ROOT}/modules/bios/resources/bios.rc" APPEND PROPE
 # folder picker, comdlg32 for the open/save dialogs, shell32 for ShellExecute.
 target_link_libraries(mod_bios PUBLIC advapi32 ole32 uuid comdlg32 shell32)
 
+hadron_add_module(services NAME HadronServices DESC "Hadron Services: Windows services and drivers, start types, presets and undo")
+# Pure model/plan/store/recovery files stay testable headless under Wine; backend_live.cpp is the only file that
+# calls SCM or registry write APIs (docs/design/services.md). ti.cpp is the module-local TrustedInstaller helper.
+target_sources(mod_services PRIVATE modules/services/model.cpp modules/services/kb.cpp modules/services/hw.cpp
+                                    modules/services/store.cpp modules/services/recovery.cpp modules/services/plan.cpp
+                                    modules/services/backend_fake.cpp modules/services/backend_live.cpp
+                                    modules/services/ti.cpp modules/services/selftest.cpp)
+# The embedded services.db (RCDATA SERVICES_KB), an INTERFACE source as for bios.
+target_sources(mod_services INTERFACE "${HADRON_ROOT}/modules/services/resources/services.rc")
+set_property(SOURCE "${HADRON_ROOT}/modules/services/resources/services.rc" APPEND PROPERTY OBJECT_DEPENDS
+             "${HADRON_ROOT}/modules/services/data/services.db")
+# Windows SDK libraries only (hard rule 3): advapi32 (SCM, registry, tokens), version (VERSIONINFO company),
+# shell32/ole32 (known folders), cfgmgr32/setupapi (devnodes and the boot disk).
+target_link_libraries(mod_services PUBLIC advapi32 version shell32 ole32 cfgmgr32 setupapi)
+
 # --- suite --------------------------------------------------------------------------------------
 # registry.cpp is compiled into the suite exe (not core) so the module factories resolve without a
 # circular static-library dependency.
@@ -75,4 +90,4 @@ add_executable(Hadron WIN32
   app/hadron.cpp
   core/host/registry.cpp
   "${HADRON_SUITE_RC}")
-target_link_libraries(Hadron PRIVATE mod_hello mod_diskmap mod_runas mod_bios hadron_core)
+target_link_libraries(Hadron PRIVATE mod_hello mod_diskmap mod_runas mod_bios mod_services hadron_core)
