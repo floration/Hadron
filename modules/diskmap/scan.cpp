@@ -12,6 +12,7 @@
 #include "modules/diskmap/scan.h"
 #include "core/sys/sys.h"
 #include <algorithm>
+#include <cwchar>
 #include <unordered_map>
 
 namespace hx::diskmap {

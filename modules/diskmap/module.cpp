@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cwctype>
 #include <memory>
 #include <string>
 #include <vector>
@@ -199,6 +200,7 @@ private:
 
     PaintCtx Ctx() const { return PaintCtx{host_->Theme(), host_->Fonts(), host_->Dpi(), host_->Layout()}; }
     int  Sc(int px) const { return S(px, host_ ? host_->Dpi() : 96); }
+    double AreaScale() const { double k = (host_ ? host_->Dpi() : 96) / 96.0; return k * k; }   // px² thresholds
     bool Console() const { return host_ && host_->Layout() == Layout::Console; }
     void Invalidate() { if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
 
@@ -483,9 +485,10 @@ void DiskMapModule::RefreshDrives() {
         ULARGE_INTEGER fa, tot, fr;
         if (!GetDiskFreeSpaceExW(root, &fa, &tot, &fr)) continue;   // e.g. empty card reader
         wchar_t label[64] = {};
-        if (!GetVolumeInformationW(root, label, 64, nullptr, nullptr, nullptr, nullptr, 0) || !label[0])
-            wcscpy(label, t == DRIVE_REMOVABLE ? L"Removable" : L"Local Disk");
-        drives_.push_back({root[0], label, tot.QuadPart, fr.QuadPart, t});
+        std::wstring lab;
+        if (GetVolumeInformationW(root, label, 64, nullptr, nullptr, nullptr, nullptr, 0)) lab = label;
+        if (lab.empty()) lab = t == DRIVE_REMOVABLE ? L"Removable" : L"Local Disk";
+        drives_.push_back({root[0], lab, tot.QuadPart, fr.QuadPart, t});
     }
 }
 
@@ -1256,8 +1259,8 @@ void DiskMapModule::DrawProgress(HDC dc, const RECT& area) {
     RECT fb = bar; fb.right = bar.left + std::max<LONG>(Sc(8), (LONG)((bar.right - bar.left) * frac));
     RoundFill(dc, fb, Sc(4), t.accent);
     y += Sc(22);
-    wchar_t pc[24];
-    if (target_.used) swprintf(pc, 24, L"~%d%%", (int)(frac * 100)); else wcscpy(pc, L"");
+    wchar_t pc[24] = {};
+    if (target_.used) swprintf(pc, 24, L"~%d%%", (int)(frac * 100));
     RECT l1 = {L, y, R - Sc(70), y + Sc(22)}; Text(dc, U64Str(files) + L" files  \x00B7  " + FmtSize(bytes), l1, f.ui, t.text1, TL);
     RECT l2 = {R - Sc(70), y, R, y + Sc(22)}; Text(dc, pc, l2, f.semi, t.accent, TR);
     y += Sc(32);
@@ -1326,7 +1329,7 @@ void DiskMapModule::Leaf(HDC dc, RECT r, COLORREF c) {
     int w = r.right - r.left, h = r.bottom - r.top;
     if (w <= 0 || h <= 0) return;
     if (w >= Sc(3) && h >= Sc(3)) { r.right--; r.bottom--; w--; h--; }
-    if (w * h >= Sc(40) * Sc(1)) GradV(dc, r, Lighten(c, 0.14), Darken(c, 0.16));
+    if ((double)w * h >= 40.0 * AreaScale()) GradV(dc, r, Lighten(c, 0.14), Darken(c, 0.16));
     else FillC(dc, r, c);
 }
 
@@ -1378,7 +1381,7 @@ void DiskMapModule::DrawDir(HDC dc, u32 di, double x, double y, double w, double
     }
 
     // Items that would get under ~30 px² (scaled) fold into one "small items" lump per folder.
-    double thr = (double)d.total / ((double)iw * ih) * 30.0 * (double)Sc(1) * (double)Sc(1);
+    double thr = (double)d.total / ((double)iw * ih) * 30.0 * AreaScale();
     std::vector<Item> items;
     Lump lump; bool haveLump = false;
     for (u32 k = 0; k < d.kidCount; k++) {
