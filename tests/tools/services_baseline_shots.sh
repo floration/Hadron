@@ -1,8 +1,10 @@
 #!/bin/bash
 # Services Baseline design renders under Wine (docs/pipeline/svcdrv/design/baseline.md).
-#   tests/tools/services_baseline_shots.sh <build-dir> <out-dir> [main|extra|focus|all]
+#   tests/tools/services_baseline_shots.sh <build-dir> <out-dir> [main|extra|focus|finalize|all]
 # Fixture mode only: nothing reads or changes a real service. --accent stands in for the Windows accent;
 # --focus draws a keyboard focus state, --sort a sorted list, --plan ti-stop the Stop TrustedInstaller plan.
+# finalize: the Finalize UI pass (docs/pipeline/svcdrv/finalize/ui.md), both layouts: TI on, third-party, protected,
+# drivers (Boot pill), the Console keys page.
 set -uo pipefail
 BUILD="${1:?build dir}"; OUT="${2:?output dir}"; ONLY="${3:-all}"
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -48,5 +50,16 @@ if [ "$ONLY" = all ] || [ "$ONLY" = focus ]; then
     shot baseline-focus-chip-dark "$S" "${A[@]}" --theme dark --focus 2          # TrustedInstaller switch
     shot baseline-focus-preset-light "$S" "${A[@]}" --theme light --focus 5      # Pure bloat removal
     shot baseline-focus-plan-boring "$S" --fixture "$FIX" --accent 0078D7 --theme boring --plan stripped --focus 0   # Cancel
+fi
+if [ "$ONLY" = all ] || [ "$ONLY" = finalize ]; then
+    for ly in baseline console; do
+        shot "fin-$ly-plan-ti-light" "$S" --fixture "$FIX" --select dmwappushservice --accent 0078D7 --theme light --layout "$ly" --ti on --plan stripped
+        shot "fin-$ly-thirdparty-dark" "$S" --fixture "$FIX" --tab drivers --select nvlddmkm --accent 0078D7 --theme dark --layout "$ly"
+        shot "fin-$ly-protected-red" "$S" --fixture "$FIX" --select RpcSs --accent E81123 --theme light --layout "$ly"
+        shot "fin-$ly-drivers-light" "$S" --fixture "$FIX" --tab drivers --accent 0078D7 --theme light --layout "$ly"
+        shot "fin-$ly-interrupted-boring" "$S" --fixture "$FIX/interrupted" --accent 0078D7 --theme boring --layout "$ly"
+    done
+    shot fin-console-help-dark "$S" "${A[@]}" --theme dark --layout console --keys F1
+    shot fin-console-help-plan "$S" "${A[@]}" --theme dark --layout console --plan stripped --keys F1
 fi
 exit $fail
