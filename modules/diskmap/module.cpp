@@ -61,9 +61,6 @@ void FillC(HDC dc, const RECT& r, COLORREF c) {
 void Outline(HDC dc, RECT r, COLORREF c, int width) {
     for (int i = 0; i < width; i++) { FrameRectC(dc, r, c); InflateRect(&r, -1, -1); }
 }
-void RoundOutline(HDC dc, const RECT& r, int radius, COLORREF c) {
-    AaRoundRect(dc, r, radius / 2.0, kNoColor, c);
-}
 void GradV(HDC dc, const RECT& r, COLORREF top, COLORREF bot) {
     TRIVERTEX v[2] = {
         {r.left, r.top, (COLOR16)(GetRValue(top) << 8), (COLOR16)(GetGValue(top) << 8), (COLOR16)(GetBValue(top) << 8), 0},
@@ -934,8 +931,8 @@ void DiskMapModule::Button(HDC dc, RECT r, const wchar_t* label, int id, bool pr
     const Theme& t = host_->Theme();
     bool hv = enabled && IsHover(id);
     COLORREF bg = primary ? (hv ? Lighten(t.accent, 0.12) : t.accent) : (hv ? t.panel3 : t.panel2);
-    RoundFill(dc, r, Sc(8), bg);
-    if (!primary) RoundOutline(dc, r, Sc(8), hv ? Mix(t.border, t.text3, 0.5) : t.border);
+    // One pass for fill and outline, so their anti-aliased edges don't blend twice.
+    RoundFill(dc, r, Sc(8), bg, primary ? kNoColor : (hv ? Mix(t.border, t.text3, 0.5) : t.border));
     COLORREF tc = primary ? (Lum(t.accent) > 140 ? RGB(10, 14, 22) : RGB(245, 247, 250)) : (enabled ? t.text1 : t.text3);
     Text(dc, label, r, host_->Fonts().semi, tc, TC);
     if (enabled) AddClick(r, id);
@@ -978,8 +975,8 @@ void DiskMapModule::DrawToolbar(HDC dc) {
             if (r.right > rcTool_.right - Sc(500)) break;   // legacy: no overflow menu; room for the toggle
             bool active = (st_ != St::Idle && d.letter == target_.letter);
             bool hv = IsHover(ID_DRIVE, (u32)i);
-            RoundFill(dc, r, Sc(8), active ? Mix(t.panel2, t.accent, 0.18) : (hv ? t.panel3 : t.panel2));
-            RoundOutline(dc, r, Sc(8), active ? t.accent : (hv ? Mix(t.border, t.text3, 0.5) : t.border));
+            RoundFill(dc, r, Sc(8), active ? Mix(t.panel2, t.accent, 0.18) : (hv ? t.panel3 : t.panel2),
+                      active ? t.accent : (hv ? Mix(t.border, t.text3, 0.5) : t.border));
             double used = d.total ? (double)UsedOf(d) / (double)d.total : 0;
             if (con) {
                 RECT tr = {r.left + Sc(8), r.top, r.right - Sc(8), r.bottom};
@@ -1014,8 +1011,8 @@ void DiskMapModule::DrawToolbar(HDC dc) {
         int top = streams_ ? cy - Sc(21) : cy - Sc(13);
         RECT b = {tl, top, tr, top + Sc(26)};
         bool hv = IsHover(ID_STREAMS);
-        RoundFill(dc, b, Sc(6), hv ? t.panel3 : t.panel2);
-        RoundOutline(dc, b, Sc(6), streams_ ? t.accent : (hv ? Mix(t.border, t.text3, 0.5) : t.border));
+        RoundFill(dc, b, Sc(6), hv ? t.panel3 : t.panel2,
+                  streams_ ? t.accent : (hv ? Mix(t.border, t.text3, 0.5) : t.border));
         int bx = b.left + Sc(9), bs = Sc(12), by = (b.top + b.bottom) / 2 - bs / 2;
         RECT box = {bx, by, bx + bs, by + bs};
         if (streams_) {

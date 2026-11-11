@@ -59,6 +59,12 @@ struct Result {
 // interrupted once it starts. Dev builds report Available instead of installing.
 Result CheckAndInstall(bool install, const std::atomic<bool>* cancel);
 
+// True only for exactly https://github.com/floration/Hadron/releases/download/<tag>/<file> (case-insensitive).
+bool PinnedUrl(const std::wstring& url, const std::wstring& tag, const std::wstring& file);
+
+// Called from the UI thread: closes the request in flight so a blocking WinHTTP call returns at once.
+void AbortNetwork();
+
 // Headless checks of the parsing and comparison logic (no network). Prints and returns 0 on success.
 int SelfTest();
 

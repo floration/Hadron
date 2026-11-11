@@ -178,6 +178,7 @@ private:
     enum class UpdMode { Ask, On, Off };
     UpdMode updMode_ = UpdMode::Ask;
     bool updReady_ = false;              // a new exe is in place; the chip offers a restart
+    bool updPending_ = false;            // turned back On while a cancelled check was still winding down
     sys::Worker updWorker_;
     sys::update::Result updResult_;
     RECT chipUpd_{}, chipYes_{}, chipNo_{};
@@ -353,12 +354,17 @@ void Host::SetUpdateMode(UpdMode m) {
     if (!store_.Save(&serr)) SetStatus((L"Update setting not saved: " + sys::ErrorText(serr)).c_str());
     sys::Write(LogLevel::Info, m == UpdMode::On ? L"update: automatic updates on" : L"update: automatic updates off");
     if (m == UpdMode::On) StartUpdateCheck(/*install=*/true);
-    else updWorker_.Cancel();   // an opt-out stops a running download (a swap in progress still finishes)
+    else { updPending_ = false; updWorker_.Cancel(); sys::update::AbortNetwork(); }   // opt-out stops a download;
+                                                                                       // a swap in progress still finishes
     InvalidateChrome();
 }
 
 void Host::StartUpdateCheck(bool install) {
-    if (updWorker_.Running() || updReady_) return;
+    if (updReady_) return;
+    if (updWorker_.Running()) {   // e.g. Off then On quickly: start again once the cancelled run ends
+        if (updWorker_.Cancelled()) updPending_ = true;
+        return;
+    }
     if (!updWorker_.Start(frame_, WM_HX_UPDATE_DONE, [this, install] {
             updResult_ = sys::update::CheckAndInstall(install, updWorker_.CancelFlag());
         })) {
@@ -378,6 +384,10 @@ void Host::OnUpdateDone() {
         if (!store_.Save(&serr)) sys::Write(LogLevel::Warn, L"update: last-check time not saved: " + sys::ErrorText(serr));
     }
     if (r.outcome == Outcome::Installed) updReady_ = true;
+    if (updPending_) {
+        updPending_ = false;
+        if (updMode_ == UpdMode::On && r.outcome == Outcome::Cancelled) { StartUpdateCheck(/*install=*/true); return; }
+    }
     sys::Write(r.outcome == Outcome::Failed ? LogLevel::Warn : LogLevel::Info, L"update: " + r.message);
     SetStatus(r.message.c_str());
 }
@@ -388,7 +398,12 @@ void Host::RestartForUpdate() {
     std::wstring exe = sys::ModulePath();
     // Same arguments as this run, plus our PID: the new process waits for this one to exit before it
     // loads settings, so the two never overlap (an older --wait-pid from a previous restart is harmless).
-    std::wstring cmd = std::wstring(GetCommandLineW()) + L" --wait-pid=" + std::to_wstring(GetCurrentProcessId());
+    std::wstring cmd = GetCommandLineW();
+    for (size_t p; (p = cmd.find(L" --wait-pid=")) != std::wstring::npos;) {   // only this process's PID, never stale ones
+        size_t e = cmd.find(L' ', p + 1);
+        cmd.erase(p, e == std::wstring::npos ? std::wstring::npos : e - p);
+    }
+    cmd += L" --wait-pid=" + std::to_wstring(GetCurrentProcessId());
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
@@ -467,6 +482,7 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_DESTROY:
         updWorker_.Cancel();
+        sys::update::AbortNetwork();                  // fail the blocking WinHTTP call now
         updWorker_.Join();                            // cancel is polled per read; each fetch has a 3-minute budget
         for (auto& mod : modules_) mod->Shutdown();   // joins workers before HWNDs die
         PostQuitMessage(0);                           // only the host does this (ARCHITECTURE.md)

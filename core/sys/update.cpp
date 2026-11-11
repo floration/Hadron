@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <mutex>
 
 #ifndef HADRON_VERSION_MAJOR
 #define HADRON_VERSION_MAJOR 0
@@ -191,6 +192,9 @@ struct HInet {
     ~HInet() { if (h) WinHttpCloseHandle(h); }
 };
 
+std::mutex g_netMx;
+HINTERNET g_req = nullptr;   // the request in flight, if any (one updater worker at a time)
+
 std::wstring HttpErr(const wchar_t* step, DWORD e) {
     std::wstring t;
     if (e >= 12000 && e <= 12200) {   // WinHTTP codes live in winhttp.dll's message table
@@ -210,14 +214,15 @@ bool HttpHop(const std::wstring& url, uint64_t maxBytes, uint64_t deadline, std:
              std::wstring* location, std::wstring* err, const std::atomic<bool>* cancel) {
     *status = 0;
     location->clear();
+    if (GetTickCount64() > deadline) { *err = L"download took too long; stopped"; return false; }
+    // Null pointers with length -1: the parts come back as pointers into `url`, so no length limit (the
+    // CDN redirect URLs carry long signed queries).
     URL_COMPONENTS uc{};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {}, path[2048] = {}, extra[2048] = {};
-    uc.lpszHostName = host; uc.dwHostNameLength = 256;
-    uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
-    uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 2048;
-    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) { *err = HttpErr(L"WinHttpCrackUrl", GetLastError()); return false; }
-    std::wstring h(host, uc.dwHostNameLength);
+    uc.dwSchemeLength = uc.dwHostNameLength = uc.dwUserNameLength = uc.dwPasswordLength = (DWORD)-1;
+    uc.dwUrlPathLength = uc.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(url.c_str(), (DWORD)url.size(), 0, &uc)) { *err = HttpErr(L"WinHttpCrackUrl", GetLastError()); return false; }
+    std::wstring h = uc.lpszHostName ? std::wstring(uc.lpszHostName, uc.dwHostNameLength) : std::wstring();
     if (uc.nScheme != INTERNET_SCHEME_HTTPS || uc.nPort != INTERNET_DEFAULT_HTTPS_PORT || uc.dwUserNameLength ||
         uc.dwPasswordLength || !HostAllowed(L"https://" + h + L"/")) {
         *err = L"refused URL outside GitHub: " + url; return false;
@@ -229,10 +234,19 @@ bool HttpHop(const std::wstring& url, uint64_t maxBytes, uint64_t deadline, std:
     if (!WinHttpSetTimeouts(ses.h, 15000, 15000, 30000, 30000)) { *err = HttpErr(L"WinHttpSetTimeouts", GetLastError()); return false; }
     HInet con{WinHttpConnect(ses.h, h.c_str(), uc.nPort, 0)};
     if (!con.h) { *err = HttpErr(L"WinHttpConnect", GetLastError()); return false; }
-    std::wstring obj = std::wstring(path, uc.dwUrlPathLength) + std::wstring(extra, uc.dwExtraInfoLength);
+    std::wstring obj = (uc.lpszUrlPath ? std::wstring(uc.lpszUrlPath, uc.dwUrlPathLength) : std::wstring(L"/")) +
+                       (uc.lpszExtraInfo ? std::wstring(uc.lpszExtraInfo, uc.dwExtraInfoLength) : std::wstring());
     HInet req{WinHttpOpenRequest(con.h, L"GET", obj.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                  WINHTTP_FLAG_SECURE)};
     if (!req.h) { *err = HttpErr(L"WinHttpOpenRequest", GetLastError()); return false; }
+    // Let AbortNetwork() (the UI thread, on close or opt-out) close this request: WinHTTP then fails the
+    // blocking call at once instead of waiting out its timeout.
+    struct Reg {
+        HInet& r;
+        explicit Reg(HInet& x) : r(x) { std::lock_guard<std::mutex> g(g_netMx); g_req = r.h; }
+        ~Reg() { std::lock_guard<std::mutex> g(g_netMx); if (g_req == r.h) g_req = nullptr; else r.h = nullptr; }
+    } reg(req);
+    if (cancel && cancel->load()) { *err = L"cancelled"; return false; }
     DWORD noRedirect = WINHTTP_DISABLE_REDIRECTS;
     if (!WinHttpSetOption(req.h, WINHTTP_OPTION_DISABLE_FEATURE, &noRedirect, sizeof(noRedirect))) {
         *err = HttpErr(L"WinHttpSetOption", GetLastError()); return false;
@@ -310,29 +324,38 @@ Version FileVersion(const std::wstring& path) {
     return v;
 }
 
-// True if `path` (\\?\ form) is a plain directory, not a reparse point, whose final path is itself.
-bool RealDirAt(const std::wstring& path, std::wstring* why) {
-    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (h == INVALID_HANDLE_VALUE) { *why = ToShell(path) + L": " + ErrorText(GetLastError()); return false; }
+std::wstring FinalPath(HANDLE h) {
+    DWORD n = GetFinalPathNameByHandleW(h, nullptr, 0, FILE_NAME_NORMALIZED);
+    if (!n) return {};
+    std::wstring p(n, L'\0');
+    n = GetFinalPathNameByHandleW(h, p.data(), n, FILE_NAME_NORMALIZED);
+    p.resize(n);
+    return p;
+}
+
+// Opens `path` (a \\?\ path) as a plain directory. Refuses a reparse point (rule 1: links are leaves), a
+// non-directory, or one whose final path isn't `<parentFinal>\<leaf>` (an ancestor swapped for a link after
+// the parent was checked). The handle is opened without FILE_SHARE_DELETE, so while the caller holds it the
+// folder can't be renamed or replaced by a junction. parentFinal empty = don't check the location.
+HANDLE OpenRealDir(const std::wstring& path, const std::wstring& parentFinal, const std::wstring& leaf, std::wstring* why) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { *why = ToShell(path) + L": " + ErrorText(GetLastError()); return nullptr; }
     BY_HANDLE_FILE_INFORMATION fi{};
-    bool ok = GetFileInformationByHandle(h, &fi) != FALSE;
-    DWORD e = GetLastError();
-    std::wstring fin;
-    if (ok) {
-        DWORD n = GetFinalPathNameByHandleW(h, nullptr, 0, FILE_NAME_NORMALIZED);
-        if (n) { fin.resize(n); n = GetFinalPathNameByHandleW(h, fin.data(), n, FILE_NAME_NORMALIZED); fin.resize(n); }
-        if (!n) { ok = false; e = GetLastError(); }
+    if (!GetFileInformationByHandle(h, &fi)) {
+        *why = ToShell(path) + L": " + ErrorText(GetLastError()); CloseHandle(h); return nullptr;
     }
-    CloseHandle(h);
-    if (!ok) { *why = ToShell(path) + L": " + ErrorText(e); return false; }
     if ((fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !(fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-        *why = ToShell(path) + L" is a link or not a folder"; return false;
+        *why = ToShell(path) + L" is a link or not a folder"; CloseHandle(h); return nullptr;
     }
-    if (Lower(ToShell(fin)) != Lower(ToShell(path))) {
-        *why = ToShell(path) + L" resolves to " + ToShell(fin); return false;
+    if (!parentFinal.empty()) {
+        std::wstring fin = FinalPath(h), want = parentFinal + L"\\" + leaf;
+        if (fin.empty() || CompareStringOrdinal(fin.c_str(), (int)fin.size(), want.c_str(), (int)want.size(), TRUE) != CSTR_EQUAL) {
+            *why = ToShell(path) + L" resolves to " + (fin.empty() ? std::wstring(L"(unknown)") : ToShell(fin));
+            CloseHandle(h); return nullptr;
+        }
     }
-    return true;
+    return h;
 }
 
 std::wstring Stamp() {
@@ -345,17 +368,22 @@ std::wstring Stamp() {
 
 // Writes the verified bytes next to the exe, checks their VERSIONINFO, then swaps: running exe ->
 // .hadron-old\<stamp>\, new file -> exe path. Every move is same-folder (same volume), never a copy.
-bool Install(const std::vector<uint8_t>& bytes, const Version& want, const std::wstring& exe, std::wstring* err) {
+bool Install(const std::vector<uint8_t>& bytes, const Version& want, const std::wstring& exe, std::wstring* err,
+             const std::atomic<bool>* cancel) {
     size_t slash = exe.find_last_of(L"\\/");
     std::wstring dir = exe.substr(0, slash), name = exe.substr(slash + 1), stamp = Stamp();
 
     // Two instances of the same exe could both find the update: one installs, the other sees it done.
     HANDLE mx = CreateMutexW(nullptr, FALSE, (L"Local\\Hadron.update." + Lower(name)).c_str());
     if (!mx) { *err = L"can't create the update lock: " + ErrorText(GetLastError()); return false; }
-    DWORD wr = WaitForSingleObject(mx, 60000);
+    DWORD wr = WAIT_TIMEOUT;
+    for (int i = 0; i < 120 && wr == WAIT_TIMEOUT && !(cancel && cancel->load()); i++) wr = WaitForSingleObject(mx, 500);
     if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) {
+        DWORD e = GetLastError();
         CloseHandle(mx);
-        *err = L"another Hadron window is installing an update; try again later";
+        *err = wr == WAIT_FAILED ? L"update lock: " + ErrorText(e)
+             : cancel && cancel->load() ? std::wstring(L"cancelled")
+             : L"another Hadron window is installing an update; try again later";
         return false;
     }
     struct Unlock { HANDLE h; ~Unlock() { ReleaseMutex(h); CloseHandle(h); } } unlock{mx};
@@ -382,19 +410,28 @@ bool Install(const std::vector<uint8_t>& bytes, const Version& want, const std::
         dropTmp(); return false;
     }
 
-    std::wstring oldRoot = ToExtended(dir + L"\\.hadron-old"), oldDir = oldRoot + L"\\" + stamp;
+    // The exe's folder, then .hadron-old and the stamp folder, each checked (and held open, so it can't be
+    // swapped for a link) before anything is created inside it.
+    std::wstring dirX = ToExtended(dir), oldRoot = dirX + L"\\.hadron-old", oldDir = oldRoot + L"\\" + stamp;
+    std::wstring why;
+    HANDLE hDir = OpenRealDir(dirX, L"", L"", &why);
+    if (!hDir) { *err = L"refused to keep the old exe: " + why; dropTmp(); return false; }
+    std::wstring dirFinal = FinalPath(hDir);
+    struct Holder { std::vector<HANDLE> h; ~Holder() { for (HANDLE x : h) CloseHandle(x); } } held{{hDir}};
+    if (dirFinal.empty()) { *err = L"can't resolve " + dir + L": " + ErrorText(GetLastError()); dropTmp(); return false; }
     if (!CreateDirectoryW(oldRoot.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
         *err = L"can't create " + ToShell(oldRoot) + L": " + ErrorText(GetLastError()); dropTmp(); return false;
     }
+    HANDLE hRoot = OpenRealDir(oldRoot, dirFinal, L".hadron-old", &why);
+    if (!hRoot) { *err = L"refused to keep the old exe: " + why; dropTmp(); return false; }
+    held.h.push_back(hRoot);
+    std::wstring rootFinal = FinalPath(hRoot);
     if (!CreateDirectoryW(oldDir.c_str(), nullptr)) {
         *err = L"can't create " + ToShell(oldDir) + L": " + ErrorText(GetLastError()); dropTmp(); return false;
     }
-    // Both folders must be real folders exactly where we expect them: an elevated process must not follow a
-    // junction or symlink someone planted at .hadron-old (rule 1: reparse points are leaves).
-    std::wstring why;
-    if (!RealDirAt(oldRoot, &why) || !RealDirAt(oldDir, &why)) {
-        *err = L"refused to keep the old exe: " + why; dropTmp(); return false;
-    }
+    HANDLE hStamp = OpenRealDir(oldDir, rootFinal, stamp, &why);
+    if (!hStamp) { *err = L"refused to keep the old exe: " + why; dropTmp(); return false; }
+    held.h.push_back(hStamp);
     std::wstring exeX = ToExtended(exe), kept = oldDir + L"\\" + name;
     // A running exe can be renamed but not overwritten. No MOVEFILE_COPY_ALLOWED: same folder, same volume.
     if (!MoveFileExW(exeX.c_str(), kept.c_str(), MOVEFILE_WRITE_THROUGH)) {
@@ -418,6 +455,15 @@ bool Install(const std::vector<uint8_t>& bytes, const Version& want, const std::
 }  // namespace
 
 // --- public ---------------------------------------------------------------------------------------
+bool PinnedUrl(const std::wstring& url, const std::wstring& tag, const std::wstring& file) {
+    std::wstring want = Lower(L"https://github.com/floration/hadron/releases/download/" + tag + L"/" + file);
+    return Lower(url) == want;   // exactly that file: no dot segments, escapes, queries or fragments
+}
+
+void AbortNetwork() {
+    std::lock_guard<std::mutex> g(g_netMx);
+    if (g_req) { WinHttpCloseHandle(g_req); g_req = nullptr; }
+}
 Version ParseVersion(const std::wstring& in) {
     Version v;
     std::wstring s = in;
@@ -428,7 +474,7 @@ Version ParseVersion(const std::wstring& in) {
         size_t b = i;
         long n = 0;
         while (i < s.size() && iswdigit(s[i]) && i - b < 6) n = n * 10 + (s[i++] - L'0');
-        if (i == b) return v;
+        if (i == b || n > 65535) return v;   // VERSIONINFO fields are 16-bit
         parts[k++] = (int)n;
         if (k < 3) { if (i >= s.size() || s[i] != L'.') return v; i++; }
     }
@@ -560,9 +606,7 @@ Result CheckAndInstall(bool install, const std::atomic<bool>* cancel) {
     if (rel.assetUrl.empty()) { r.message = L"Update " + ToString(rel.version) + L" has no " + name + L"; not installed"; return r; }
     if (rel.sumsUrl.empty()) { r.message = L"Update " + ToString(rel.version) + L" has no SHA256SUMS; not installed"; return r; }
     {   // Both files must come from this repo's release for this tag.
-        std::wstring want = L"https://github.com/floration/hadron/releases/download/" + Lower(rel.tag) + L"/";
-        auto pinned = [&](const std::wstring& u) { return Lower(u).compare(0, want.size(), want) == 0; };
-        if (!pinned(rel.assetUrl) || !pinned(rel.sumsUrl)) {
+        if (!PinnedUrl(rel.assetUrl, rel.tag, name) || !PinnedUrl(rel.sumsUrl, rel.tag, L"SHA256SUMS")) {
             r.message = L"Update " + ToString(rel.version) + L": download links aren't this repo's release files; not installed";
             return r;
         }
@@ -591,7 +635,7 @@ Result CheckAndInstall(bool install, const std::atomic<bool>* cancel) {
     if (body.size() < 2 || body[0] != 'M' || body[1] != 'Z') { r.message = L"Update isn't a Windows exe; not installed"; return r; }
     if (cancel && cancel->load()) { r.outcome = Outcome::Cancelled; r.message = L"Update cancelled"; return r; }
 
-    if (!Install(body, rel.version, exe, &err)) { r.message = L"Update failed: " + err; return r; }
+    if (!Install(body, rel.version, exe, &err, cancel)) { r.message = L"Update failed: " + err; return r; }
     r.outcome = Outcome::Installed;
     r.message = L"Hadron " + ToString(rel.version) + L" installed. Restart to use it";
     return r;
@@ -606,6 +650,14 @@ int SelfTest() {
           !ParseVersion(L"").ok && !ParseVersion(L"1..3").ok, L"reject malformed versions");
     check(Compare(ParseVersion(L"0.10.0"), ParseVersion(L"0.9.9")) > 0, L"numeric, not lexical, compare");
     check(Compare(ParseVersion(L"1.0.0"), ParseVersion(L"v1.0.0")) == 0, L"equal versions");
+    check(ParseVersion(L"1.2.65535").ok && !ParseVersion(L"1.2.65536").ok, L"VERSIONINFO 16-bit limit");
+    const wchar_t* base = L"https://github.com/floration/Hadron/releases/download/v1.2.3/";
+    check(PinnedUrl(std::wstring(base) + L"Hadron.exe", L"v1.2.3", L"hadron.exe"), L"pinned URL accepted");
+    check(!PinnedUrl(std::wstring(base) + L"../../../evil/Hadron.exe", L"v1.2.3", L"Hadron.exe") &&
+          !PinnedUrl(std::wstring(base) + L"Hadron.exe?x=1", L"v1.2.3", L"Hadron.exe") &&
+          !PinnedUrl(std::wstring(base) + L"%2e%2e/Hadron.exe", L"v1.2.3", L"Hadron.exe") &&
+          !PinnedUrl(L"https://github.com/floration/Hadron/releases/download/v1.2.4/Hadron.exe", L"v1.2.3", L"Hadron.exe"),
+          L"pinned URL refuses other paths, queries, escapes and tags");
 
     check(HostAllowed(L"https://api.github.com/repos/x"), L"api.github.com allowed");
     check(HostAllowed(L"https://objects.githubusercontent.com/a?b"), L"githubusercontent allowed");
@@ -665,10 +717,10 @@ int SelfTest() {
         check(!self.empty() && writeAll(target, "old exe"), L"install fixture");
         Version next = Current(); next.patch++;
         std::wstring ierr;
-        check(!Install(self, next, target, &ierr) && ierr.find(L"says it is version") != std::wstring::npos,
+        check(!Install(self, next, target, &ierr, nullptr) && ierr.find(L"says it is version") != std::wstring::npos,
               L"install refuses an exe whose VERSIONINFO doesn't match the release");
         check(readAll(target) == std::vector<uint8_t>{'o','l','d',' ','e','x','e'}, L"refused install leaves the exe alone");
-        check(Install(self, Current(), target, &ierr), L"install swaps in the new exe");
+        check(Install(self, Current(), target, &ierr, nullptr), L"install swaps in the new exe");
         check(readAll(target) == self, L"new exe in place");
         // The previous exe is under .hadron-old\<stamp>\Fake.exe; leftover temp files: none.
         int kept = 0, tmps = 0;

@@ -41,8 +41,11 @@ inline void FrameRectC(HDC dc, const RECT& r, COLORREF c) {
 
 // Filled rounded rectangle with an optional 1px border (border == kNoColor for none), anti-aliased.
 // `radius` keeps GDI RoundRect's meaning (the corner ellipse's diameter), so callers didn't change.
+// Same footprint as before: GDI RoundRect with no pen filled one pixel short on the right and bottom.
 inline void RoundFill(HDC dc, const RECT& r, int radius, COLORREF fill, COLORREF border = kNoColor) {
-    AaRoundRect(dc, r, radius / 2.0, fill, border);
+    RECT a = r;
+    if (border == kNoColor) { a.right--; a.bottom--; }
+    AaRoundRect(dc, a, radius / 2.0, fill, border);
 }
 
 // DrawTextW wrappers. The caller owns the font (selected into dc); colour and transparent bg set here.
