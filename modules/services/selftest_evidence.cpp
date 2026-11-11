@@ -9,6 +9,7 @@
 #include "core/sys/sys.h"
 #include "modules/services/cli.h"
 #include "modules/services/evidence.h"
+#include "modules/services/evidence_view.h"
 #include "modules/services/hw.h"
 #include "modules/services/plan.h"
 #include "modules/services/regfallback.h"
@@ -317,6 +318,10 @@ void RunEvidenceSelftest(const std::wstring& fixture, const Kb& kb, const std::f
         for (auto& r : on.rows) if (r.viaReg) marked++;
         check(marked == 1 && !on.notes.empty() && on.notes[0].find(L"only after you press Apply") != std::wstring::npos,
               L"registry fallback: only rows the SCM refuses are marked, and the plan says nothing is written before Apply");
+        check(!on.notes.empty() && on.notes[0].find(L"is reasoning") != std::wstring::npos &&
+                  on.notes[0].find(L"check it after a restart") != std::wstring::npos &&
+                  on.notes[0].find(L"Windows Update Medic") != std::wstring::npos,
+              L"registry fallback (rule 7): \"takes effect after restart\" is labelled reasoning, with how to check it");
         Plan ti = StrippedPlan(w, true, true);
         const PlanRow* d2 = Row(ti, L"dmwappushservice");
         check(d2 && !d2->viaReg && d2->needsTi, L"registry fallback: with the TrustedInstaller toggle on, the SCM path is used instead");
@@ -349,15 +354,40 @@ void RunEvidenceSelftest(const std::wstring& fixture, const Kb& kb, const std::f
         }
         std::wstring fe;
         WriteOp w4{4, -1};
-        bool wp = w.fx.backend.WriteRegStart(L"WinDefend", w4, &fe);
-        bool wb = w.fx.backend.WriteRegStart(L"stornvme", w4, &fe);
-        bool wt = w.fx.backend.WriteRegStart(L"dmwappushservice", WriteOp{1, -1}, &fe);
+        auto regNow = [&](const wchar_t* n) { RegStartVals v; std::wstring e0; w.fx.backend.ReadRegStart(n, &v, &e0); return v; };
+        bool wp = w.fx.backend.WriteRegStart(L"WinDefend", w4, regNow(L"WinDefend"), &fe);
+        bool wb = w.fx.backend.WriteRegStart(L"stornvme", w4, regNow(L"stornvme"), &fe);
+        bool wt = w.fx.backend.WriteRegStart(L"dmwappushservice", WriteOp{1, -1}, regNow(L"dmwappushservice"), &fe);
         check(!wp && !wb && !wt && w.fx.backend.faults.regWrites == 0,
               L"registry fallback (backend): a protected service, a Boot-start driver and a System target are refused before any write");
+        {   // R1: under the write handle the values must be exactly the ones logged (raw: an absent DelayedAutostart is not 0)
+            RegStartVals before = regNow(L"dmwappushservice");
+            RegStartVals wrong = before;
+            wrong.delayed = before.delayed < 0 ? 0 : -1;
+            std::wstring e1;
+            bool w1 = w.fx.backend.WriteRegStart(L"dmwappushservice", w4, wrong, &e1);
+            RegStartVals after = regNow(L"dmwappushservice");
+            check(before.delayed == -1 && !w1 && e1.find(L"changed since the re-read") != std::wstring::npos &&
+                      after.start == before.start && after.delayed == before.delayed && w.fx.backend.faults.regWrites == 0,
+                  L"registry fallback (backend): values under the write handle that differ from the logged ones (absent vs 0 "
+                  L"DelayedAutostart) are refused, nothing written: " + e1);
+        }
+        {   // R2: the Start write fails after DelayedAutostart was written: DelayedAutostart goes back to absent
+            RegStartVals before = regNow(L"dmwappushservice");
+            w.fx.backend.faults.regStartFail.insert(L"dmwappushservice");
+            std::wstring e2;
+            bool w2 = w.fx.backend.WriteRegStart(L"dmwappushservice", WriteOp{4, 0}, before, &e2);
+            w.fx.backend.faults.regStartFail.clear();
+            RegStartVals after = regNow(L"dmwappushservice");
+            check(!w2 && after.start == before.start && after.delayed == -1 && before.delayed == -1 &&
+                      e2.find(L"put back") != std::wstring::npos,
+                  L"registry fallback (backend): a failed Start write puts DelayedAutostart back as it was (absent stays absent): " + e2);
+            w.fx.backend.faults.regWrites = 0;
+        }
         {
             std::unique_ptr<Backend> live = MakeLiveBackend();
             std::wstring le;
-            bool lw = live->WriteRegStart(L"HadronSelftestNoSuchService", w4, &le);
+            bool lw = live->WriteRegStart(L"HadronSelftestNoSuchService", w4, RegStartVals{3, -1}, &le);
             check(!lw && le.find(L"not armed") != std::wstring::npos,
                   L"registry fallback (live backend): refused while unarmed, before the registry is opened: " + le);
         }
@@ -484,6 +514,68 @@ void RunEvidenceSelftest(const std::wstring& fixture, const Kb& kb, const std::f
         RunApply(pr, Env(&bk, &st, &w.ctx, true), &pres);
         check(pres.ok == 0 && bk.faults.regWrites == writes && Lines(pres).find(L"launch-protected") != std::wstring::npos,
               L"registry fallback: refusals are checked again on the live item at write time (now launch-protected): " + Lines(pres));
+        for (auto& i : raw) if (IEq(i.name, L"dmwappushservice")) i.protect = 0;
+        bk.SetItems(raw);
+
+        // R1 end to end: another tool writes Start after the re-read and the I record, just before Hadron's write.
+        Plan late = Only(StrippedPlan(w, true, false), L"dmwappushservice");
+        RegStartVals pre;
+        bk.ReadRegStart(L"dmwappushservice", &pre, &err);
+        bk.faults.regDriftAtWrite.insert(L"dmwappushservice");
+        writes = bk.faults.regWrites;
+        ApplyResult lres;
+        RunApply(late, Env(&bk, &st, &w.ctx, true), &lres);
+        RegStartVals post;
+        bk.ReadRegStart(L"dmwappushservice", &post, &err);
+        std::vector<UndoLog> logs3 = LoadLogs(st, nullptr);
+        const UndoLog* l3 = Newest(logs3, lres.stamp);
+        check(lres.ok == 0 && bk.faults.regWrites == writes && post.start != pre.start &&
+                  Lines(lres).find(L"changed since the re-read") != std::wstring::npos && l3 && !l3->rows.empty() &&
+                  l3->rows[0].hasI && l3->rows[0].hasD && l3->rows[0].result != L"ok",
+              L"registry fallback: a value changed between the I record and the write is seen under the write handle and "
+              L"left as the other tool wrote it: " + Lines(lres));
+    }
+
+    // ---- review R4/R5: the signer pass and offline chain statuses ---------------------------------------------
+    {
+        SignerInfo root = SignerFromStatus((long)CERT_E_UNTRUSTEDROOT), chain = SignerFromStatus((long)CERT_E_CHAINING),
+                   sys = SignerFromStatus((long)TRUST_E_SYSTEM_ERROR), dig = SignerFromStatus((long)TRUST_E_BAD_DIGEST),
+                   dis = SignerFromStatus((long)TRUST_E_EXPLICIT_DISTRUST);
+        const std::wstring off = L"offline: the root certificate isn't in the local store";
+        check(root.state == SignState::CantCheck && chain.state == SignState::CantCheck && sys.state == SignState::CantCheck &&
+                  root.detail.find(off) == 0 && chain.detail.find(off) == 0 && sys.detail.find(off) == 0 &&
+                  dig.state == SignState::Untrusted && dis.state == SignState::Untrusted,
+              L"signer: an untrusted root, a chaining error or a system error is Can't check (" + SignerShort(root) +
+                  L"); a bad digest or explicit distrust stays Not trusted");
+        // A replaced pass never blocks the UI thread and its results are dropped: pass A (many items) is replaced by
+        // pass B at once; only B's results arrive, and Shutdown joins whatever is left.
+        EvidencePasses ev;
+        std::vector<SvcItem> a, b;
+        for (int i = 0; i < 400; i++) {
+            SvcItem x;
+            x.name = L"PassA" + std::to_wstring(i);
+            x.type = 0x10;
+            x.image = L"C:\\HadronSelftestNoSuchDir\\a" + std::to_wstring(i) + L".exe";
+            a.push_back(x);
+        }
+        SvcItem y;
+        y.name = L"PassB";
+        y.type = 0x10;
+        y.image = L"C:\\HadronSelftestNoSuchDir\\b.exe";
+        b.push_back(y);
+        std::wstring e1, e2;
+        bool s1 = ev.StartSigners(nullptr, 0, a, &e1);
+        bool s2 = ev.StartSigners(nullptr, 0, b, &e2);
+        bool took = false;
+        for (int k = 0; k < 1000 && !took; k++) {
+            took = ev.OnSigners();
+            if (!took) Sleep(10);
+        }
+        bool onlyB = ev.Signer(L"PassB") != nullptr && ev.Signer(L"PassA0") == nullptr && ev.Signer(L"PassA399") == nullptr;
+        bool cant = onlyB && ev.Signer(L"PassB")->state == SignState::CantCheck;
+        ev.Shutdown();
+        check(s1 && s2 && took && onlyB && cant,
+              L"signer pass: a new pass starts without waiting for the one it replaces, whose results are dropped; Shutdown joins the rest");
     }
 }
 

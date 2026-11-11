@@ -30,7 +30,7 @@ switch and its banner, and `MarkRegFallback` before `MarkTi` in `BuildFrom`.
   `RegSetValueExW` exists only in `backend_live.cpp`, behind `Arm()`.
 
 ## Tests
-- `--selftest`: 334 checks (was 282), standalone and in the suite, under Wine. New: `selftest_evidence.cpp`:
+- `--selftest`: 340 checks (was 282), standalone and in the suite, under Wine. New: `selftest_evidence.cpp`:
   - signer states and labels from `signers.txt`; the attribute rule; UNC refused; an unsigned temp file; the cache;
   - 7040 parsing (single and double quotes, entities, wrong id or provider), newest-wins, match by display name, the
     no-event text;
@@ -65,9 +65,23 @@ In `/mnt/project-files/pipeline/fixes/svcdrv-evidence/`, dark theme, 1280x800:
 - `services-regfallback-plan.png`, `services-console-regfallback-plan.png`: the fallback plan;
 - `services-iface-evidence.png`: FrameServer kept by its trigger.
 
+## Review fixes (R1-R6)
+- R1: `WriteRegStart` takes the values RunApply re-read and logged, and refuses under its write handle (writing
+  nothing) when the key holds anything else, DelayedAutostart compared raw. The fake gains `regDriftAtWrite`, a write
+  by another tool between the `I` record and Hadron's write; a selftest shows it is left as that tool wrote it.
+- R2: a failed `Start` write after DelayedAutostart was written puts DelayedAutostart back on the same handle (deleted
+  when it was absent). Fake fault `regStartFail`, with a selftest.
+- R3: a failed `RegFlushKey` no longer fails a write that happened; it is noted in the `D` text and the read-back
+  decides.
+- R4: the signer and event passes never join on the UI thread. Each pass has its own Worker; a replaced one is
+  cancelled, its results dropped, and it is joined once it has finished (or in Shutdown). A selftest replaces a
+  400-item pass at once and gets only the new pass's results.
+- R5: an untrusted root, a chaining error or `TRUST_E_SYSTEM_ERROR` is "Can't check: offline: the root certificate
+  isn't in the local store"; a bad digest, explicit distrust, revocation, expiry or wrong usage stays "Not trusted".
+- R6: "takes effect after restart" is labelled reasoning, with "check it after a restart; Windows Update Medic can
+  put some of these back", in the plan note, the banner and the row detail.
+
 ## Open items
-- `WriteRegStart` does not take the expected old value. The re-read happens in `RunApply` immediately before the `I`
-  record and the write, so only that short window is unchecked.
 - The live 7040 scan stops after 20,000 events. If no event was found within them, the line still says "no 7040
   event found (log may have rolled over)".
 - Live signer, event and interface reads can't run under Wine. They need a Windows run, for example CI's

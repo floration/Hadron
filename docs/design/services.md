@@ -209,12 +209,23 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   - Same apply order as an SCM row: the pre-apply snapshot, recovery folder and zip, `B` and every `P` (identity
     `reg`) are written first. Per row: the key's Start and DelayedAutostart are read again right before the write and
     the row is skipped if they differ from the plan's "now"; the `I` record with those old values is written and
-    flushed (`FlushFileBuffers`); then `WriteRegStart` (DelayedAutostart when set, then `Start`, `REG_DWORD`, then
-    `RegFlushKey`); then the key is read back, and anything other than what was written is a `D fail` ("Undo puts back
-    the value recorded before"). There is no automatic rollback, as for an SCM row.
+    flushed (`FlushFileBuffers`); then `WriteRegStart`; then the key is read back, and anything other than what was
+    written is a `D fail` ("Undo puts back the value recorded before"). There is no automatic rollback, as for an SCM
+    row.
+  - `WriteRegStart(name, op, expect)`: the launch-protection check through the SCM first, then the key is opened and
+    its values are read again under the write handle; unless they are exactly `expect` (the values logged in the `I`
+    record; raw, so an absent DelayedAutostart is not 0) it refuses, "changed since the re-read", writing nothing.
+    Then DelayedAutostart (when the op sets it) and `Start`, `REG_DWORD`. If `Start` fails after DelayedAutostart was
+    written, DelayedAutostart is put back on the same handle (deleted with `RegDeleteValueW` when it was absent before,
+    the only value delete in Hadron). Then `RegFlushKey`; a failed flush is noted in the `D` text and the write still
+    counts, because the values are in the live hive and the read-back decides.
   - `WriteRegStart` opens `HKLM\SYSTEM\ControlSet00N\Services\<name>` (N from `Select\Current`, not through the
     `CurrentControlSet` link) with `REG_OPTION_OPEN_LINK`, refuses a key with a `SymbolicLinkValue` (a link is a
-    leaf), a name with `\` or `/`, and never creates a key or a value Windows didn't have.
+    leaf), a name with `\` or `/`. It never creates a key or a `Start` value; DelayedAutostart may be created (as 0
+    when Undo restores an absent one, which has the same effect, or as the planned value).
+  - "Takes effect after restart" is reasoning (the service manager reads `Start` when Windows starts), not tested:
+    the plan note, the banner and the row detail say so, and to check it after a restart (Windows Update Medic can put
+    some of these back).
   - Undo and Resume of a `reg` row go back through the registry, read "now" from the key, and need the switch on too
     (left out with a note while it is off). Drift on the list is judged against the registry Start for an item whose
     last write was a registry write, until a restart makes the SCM agree.
