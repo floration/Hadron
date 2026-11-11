@@ -81,11 +81,11 @@ double Contrast(COLORREF a, COLORREF b) {
     double la = RelLum(a), lb = RelLum(b);
     return la > lb ? (la + 0.05) / (lb + 0.05) : (lb + 0.05) / (la + 0.05);
 }
-// Text on a filled control: whichever of black and white contrasts more with the fill (never below 4.58:1).
-// A brightness threshold picked white on light greens; near-black/near-white could fall to 4.2:1 on the default blue.
+// Text on a filled control: white while it reaches 4.5:1 to one decimal (4.50 on the default blue 0078D7), else
+// black (then above 4.6:1). A brightness threshold picked white on light greens; near-white was 4.2:1 on 0078D7.
 COLORREF OnColor(COLORREF fill) {
     const COLORREF dark = RGB(0, 0, 0), light = RGB(255, 255, 255);
-    return Contrast(dark, fill) > Contrast(light, fill) ? dark : light;
+    return Contrast(light, fill) >= 4.45 || Contrast(light, fill) >= Contrast(dark, fill) ? light : dark;   // white while it passes
 }
 // The same hue as fg, moved towards black (light backgrounds) or white (dark ones) in small steps until it
 // reaches `ratio` against every background given. Used for accent and semantic colours drawn as text: the
@@ -323,7 +323,7 @@ private:
     bool shotFocus_ = false;        // --focus in fixture mode: draw focus as if the window had it (design screenshots)
     int pendingStop_ = -1;
     bool centrePending_ = false;    // --select: centre the selected row at the first paint          // --focus <n>: focus the n-th tab stop once the first paint has listed them
-    std::wstring argFocus_;
+    std::wstring argFocus_, argSort_;
     int hoverId_ = 0;
     bool tracking_ = false;
     std::vector<std::wstring> colKeys_;   // what each visible list column shows
@@ -490,6 +490,7 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
     argSelect_ = ArgValue(cl.rest, L"--select");
     argPlan_ = ArgValue(cl.rest, L"--plan");
     argFocus_ = ArgValue(cl.rest, L"--focus");
+    argSort_ = ArgValue(cl.rest, L"--sort");   // fixture renders: <column key>[:desc], e.g. kb:desc
     readOnly_ = HasArg(cl.rest, L"--readonly");
     std::wstring dataDir = ArgValue(cl.rest, L"--data-dir");
     fixture_ = !cl.screenshot.empty() || cl.selftest || !cl.fixture.empty();
@@ -693,6 +694,12 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
         bool denied = false;
         std::wstring e;
         writeAccess_[Lower(s.name)] = fake_->CanWrite(s.name, &denied, &e) ? 0 : (denied ? 1 : -1);
+    }
+    if (!argSort_.empty()) {
+        size_t colon = argSort_.find(L':');
+        sortKey_ = argSort_.substr(0, colon);
+        sortAsc_ = colon == std::wstring::npos || argSort_.substr(colon + 1) != L"desc";
+        Refilter();
     }
     if (!argSelect_.empty()) { SelectName(argSelect_); centrePending_ = true; }   // centred once the list has a size
     if (!argPlan_.empty()) {
@@ -1811,14 +1818,14 @@ bool ServicesModule::SetListColumns(int widthPx) {
     // Column plan (docs/pipeline/svcdrv/design/baseline.md): what to change and whether Hadron would is always
     // shown; Company next (it is how third-party and OEM items stand out, and they are never in the KB); then
     // vs first; Basis, Account and Type last, since the detail pane shows each of them in full. 1280x800
-    // standalone shows vs first and Company, the suite Company; every column needs about 1650 px of window.
+    // standalone shows vs first and Company, the suite Company; every column needs about 1670 px of window.
     static const C kSvc[] = {{L"name", L"Name", 140, 0}, {L"display", L"Display name", 0, 0}, {L"state", L"State", 72, 0},
-                             {L"start", L"Start type", 116, 0}, {L"kb", L"Hadron", 72, 0}, {L"basis", L"Basis", 76, 3},
-                             {L"changed", L"vs first", 70, 4}, {L"company", L"Company", 110, 5},
+                             {L"start", L"Start type", 116, 0}, {L"kb", L"Hadron", 84, 0}, {L"basis", L"Basis", 76, 3},
+                             {L"changed", L"vs first", 70, 4}, {L"company", L"Company", 100, 5},
                              {L"account", L"Account", 110, 2}, {L"type", L"Type", 96, 1}};
     static const C kDrv[] = {{L"name", L"Name", 124, 0}, {L"display", L"Display name", 0, 0}, {L"state", L"State", 72, 0},
-                             {L"start", L"Start type", 90, 0}, {L"kb", L"Hadron", 72, 0}, {L"basis", L"Basis", 76, 2},
-                             {L"changed", L"vs first", 70, 3}, {L"company", L"Company", 110, 5},
+                             {L"start", L"Start type", 90, 0}, {L"kb", L"Hadron", 84, 0}, {L"basis", L"Basis", 76, 2},
+                             {L"changed", L"vs first", 70, 3}, {L"company", L"Company", 100, 5},
                              {L"group", L"Load group", 116, 4}, {L"type", L"Type", 96, 1}};
     const int kFlexMin = 100;
     const C* all = tab_ == TAB_SERVICES ? kSvc : kDrv;
