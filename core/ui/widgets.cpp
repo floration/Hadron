@@ -174,9 +174,11 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
         x += w;
     }
 
-    // Body rows, clipped to the body rect.
-    HRGN clip = CreateRectRgn(body.left, body.top, body.right, body.bottom);
-    SelectClipRgn(dc, clip);
+    // Body rows, clipped to the body rect. IntersectClipRect takes logical coordinates, so the clip
+    // follows the host's SetViewportOrgEx offset in the suite (a region from CreateRectRgn is in
+    // device units and lands off by the content origin). SaveDC/RestoreDC keeps any outer clip.
+    const int savedClip = SaveDC(dc);
+    IntersectClipRect(dc, body.left, body.top, body.right, body.bottom);
     int first = sb_.Offset() / rowH;
     int y0 = body.top - (sb_.Offset() % rowH);
     for (int i = first; i < (int)rows_.size(); i++) {
@@ -206,8 +208,7 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
             FocusRectC(dc, fr, p.accent());
         }
     }
-    SelectClipRgn(dc, nullptr);
-    DeleteObject(clip);
+    RestoreDC(dc, savedClip);
 
     // Scrollbar.
     if (hasSb) {
@@ -363,8 +364,9 @@ void DetailPane::Paint(HDC dc, const RECT& rc, const PaintCtx& c) {
         HLine(dc, rc.left + pad, rc.right - pad, rc.top + titleH - 1, p.border());
     }
 
-    HRGN clip = CreateRectRgn(inner.left, inner.top, rc.right - pad, inner.bottom);
-    SelectClipRgn(dc, clip);
+    // Logical-coordinate clip (see ListView::Paint): correct under the suite's viewport offset.
+    const int savedClip = SaveDC(dc);
+    IntersectClipRect(dc, inner.left, inner.top, rc.right - pad, inner.bottom);
     int keyW = S(c.layout == Layout::Console ? 150 : 170, c.dpi);
     for (int i = 0; i < (int)rows_.size(); i++) {
         int ry = inner.top + i * rowH - sb_.Offset();
@@ -374,8 +376,7 @@ void DetailPane::Paint(HDC dc, const RECT& rc, const PaintCtx& c) {
         TextLeft(dc, rows_[i].first, kr, c.fonts.caption, p.text3());
         TextLeft(dc, rows_[i].second, vr, c.layout == Layout::Console ? c.fonts.mono : c.fonts.ui, p.text1());
     }
-    SelectClipRgn(dc, nullptr);
-    DeleteObject(clip);
+    RestoreDC(dc, savedClip);
 
     if (hasSb) {
         RECT track{rc.right - S(10, c.dpi), inner.top, rc.right, inner.bottom};
