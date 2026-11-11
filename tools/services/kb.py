@@ -337,7 +337,9 @@ E('XboxGipSvc', 'svc', 'Xbox Accessory Management Service',
   hw='svc:xboxgip',
   pbasis='published', pbasis_note=P_XBOX + ' Hadron keeps it when a device whose driver is xboxgip (the Xbox accessory '
                                            'driver) is present or was seen before; which device class such accessories '
-                                           'use is not sourced, so Hadron matches the driver instead.')
+                                           'use is not sourced, so Hadron matches the driver instead (reasoning: the '
+                                           'driver name is not sourced; a Bluetooth-connected controller uses a '
+                                           'different driver, so it does not keep this row).')
 
 E('WSearch', 'svc', 'Windows Search',
   'Indexes files, mail and other content for fast search in Start, Explorer and Outlook.',
@@ -536,7 +538,7 @@ E('SysMain', 'svc', 'SysMain (Superfetch)',
   '"Maintains and improves system performance over time".',
   if_off='Whether turning it off helps or hurts depends on the workload, and Hadron has no measurement either way '
          '(reasoning: it preloads for your usage pattern, so cold launches can get slower): test it.',
-  test='3 restarts each way, same drivers; time cold launches of your usual apps; capture frame times with PresentMon '
+  test='Restart three times each way, same drivers; time cold launches of your usual apps; capture frame times with PresentMon '
        'or CapFrameX over the same game scene; keep whichever is better.',
   basis='published', basis_note='@IOT gives the description quoted above (Windows 10/11 IoT Enterprise). How it '
                                 'decides what to preload is not stated there; the summary is reasoning.',
@@ -817,8 +819,9 @@ info('AppIDSvc', 'Application Identity', 'Determines and verifies the identity o
      '@IOT says disabling it prevents AppLocker from being enforced.', 'DND', 'NG')
 info('Appinfo', 'Application Information',
      'Runs programs with administrator rights after a User Account Control prompt.',
-     '@IOT says users can\'t launch applications with the administrative privileges they need. Hadron itself always '
-     'runs as administrator, so it needs this to start (reasoning).', 'DND', 'NG',
+     '@IOT says users can\'t launch applications with the administrative privileges they need. Hadron asks for '
+     'administrator rights, so starting it from a normal desktop goes through this service\'s UAC prompt '
+     '(reasoning).', 'DND', 'NG',
      note='@WS16 adds that it supports UAC same-desktop elevation.')
 info('ALG', 'Application Layer Gateway Service', 'Protocol plug-ins for Internet Connection Sharing.', '', 'OK', 'NG')
 info('AppMgmt', 'Application Management', 'Installs, removes and lists software deployed through Group Policy.',
@@ -907,14 +910,15 @@ info('IKEEXT', 'IKE and AuthIP IPsec Keying Modules', 'Key exchange (IKE and Aut
      'DND', 'NG')
 info('iphlpsvc', 'IP Helper',
      'IPv6 transition tunnels (6to4, ISATAP, Teredo), IP-HTTPS and port proxy.',
-     '@IOT says the PC loses the connectivity these technologies give. Some Xbox Live multiplayer features use Teredo '
-     '(reasoning).', 'OK', 'NG')
+     '@IOT says the PC loses the connectivity these technologies give. Xbox party chat and some multiplayer games are '
+     'reported to need Teredo (not stated on either page). Test it: compare Settings > Gaming > Xbox Networking before '
+     'and after.', 'OK', 'NG')
 info('PolicyAgent', 'IPsec Policy Agent', 'Enforces IPsec policies.',
      '@IOT says connections that require IPsec fail and remote management of Windows Firewall stops.', 'DND', 'NG')
 info('KtmRm', 'KtmRm for Distributed Transaction Coordinator',
      'Coordinates transactions between the Distributed Transaction Coordinator and the Kernel Transaction Manager.',
-     '@IOT says both start it when needed, and that while it is disabled their transactions with a kernel resource '
-     'manager fail.', 'DND', 'NG')
+     '@IOT says MSDTC and KTM start it when needed, and that while it is disabled any MSDTC transaction that involves '
+     'a kernel resource manager fails.', 'DND', 'NG')
 info('LSM', 'Local Session Manager', 'Manages local user sessions.',
      '@IOT says reconfiguring it causes system instability.', 'DND', 'NG')
 info('diagnosticshub.standardcollector.service', 'Microsoft Diagnostics Hub Standard Collector Service',
@@ -974,7 +978,8 @@ info('RasMan', 'Remote Access Connection Manager', 'Manages dial-up and VPN conn
 info('SessionEnv', 'Remote Desktop Configuration', 'Configuration and session upkeep for Remote Desktop.', '',
      'DND', 'DND')
 info('TermService', 'Remote Desktop Services', 'Lets users connect to this PC with Remote Desktop.',
-     '@IOT says that to prevent remote use, clear the boxes on the Remote tab of System Properties instead.',
+     'Remote Desktop connections to this PC stop (reasoning). @IOT says that to prevent remote use, clear the '
+     'checkboxes on the Remote tab of System Properties rather than disable it.',
      'DND', 'DND')
 info('UmRdpService', 'Remote Desktop Services UserMode Port Redirector',
      'Redirects printers, drives and ports in Remote Desktop sessions.', '', 'DND', 'DND')
@@ -1069,7 +1074,8 @@ info('Winmgmt', 'Windows Management Instrumentation',
 info('WpnUserService', 'Windows Push Notifications User Service (per-user template)',
      'Per-user host for local and push notifications. A per-user service: Hadron would change the template.',
      'Notifications stop (reasoning).', 'DND', 'OK',
-     note='@WS16 rates it for Windows Server; @IOT\'s rating is the client-side one.')
+     note='@WS16 rates it for Windows Server; @IOT\'s rating is for Windows 10/11 IoT Enterprise, the closer of '
+          'the two to a desktop.')
 info('WinRM', 'Windows Remote Management (WS-Management)', 'Remote management over WS-Management.', '', 'DND', 'DND')
 info('W32Time', 'Windows Time', 'Keeps the clock synchronised over the network.',
      '@IOT says date and time synchronisation stops.', 'DND', 'NG')
@@ -1091,7 +1097,7 @@ info('LanmanWorkstation', 'Workstation',
 
 def drv(name, title, expl, if_off='', basis='reasoning', note=''):
     info(name, title, expl, if_off, basis=basis, kind='drv',
-         note=note or 'From the driver\'s role in Windows; Hadron found no Microsoft page that describes it.')
+         note=note or 'Reasoning from the driver\'s role in Windows; Hadron cites no Microsoft page for it.')
 
 
 _BOOT_PATH = ('If the boot disk sits on it, Windows can\'t start without it (Stop 0x7B, reasoning); Hadron never changes '
@@ -1099,7 +1105,8 @@ _BOOT_PATH = ('If the boot disk sits on it, Windows can\'t start without it (Sto
 
 # Storage and disk class.
 drv('storport', 'Storport storage port driver',
-    'The system-supplied storage port driver that most modern storage controller drivers (miniports) plug into.',
+    'The system-supplied storage port driver that storage miniports plug into; Microsoft\'s AHCI driver (StorAHCI) is '
+    'one, and Microsoft encourages vendors to use it.',
     _BOOT_PATH, 'published', '@STORPORT: "a system-supplied storage port driver" for high-performance buses and RAID '
                              'adapters.')
 drv('stornvme', 'Microsoft NVMe driver (StorNVMe)', 'The inbox driver for NVMe SSDs.',
@@ -1124,7 +1131,7 @@ drv('mountmgr', 'Mount Point Manager', 'Assigns drive letters and mount points t
     'Volumes get no drive letters, the Windows volume included (reasoning).')
 drv('fvevol', 'BitLocker Drive Encryption filter', 'Reads and writes BitLocker-encrypted volumes.',
     'BitLocker-encrypted volumes can\'t be read, including a BitLocker system drive (reasoning).')
-drv('USBSTOR', 'USB mass storage driver', 'The inbox driver for USB flash drives and USB disks (Bulk-Only).',
+drv('USBSTOR', 'USB mass storage driver', 'The inbox driver for USB flash drives and USB disks that don\'t use UAS.',
     'USB flash drives and many USB disks stop appearing (reasoning).', 'published',
     '@USBCLASSES lists Usbstor.sys as Windows\' driver for the USB Mass Storage class.')
 drv('UASPStor', 'USB Attached SCSI (UAS) driver', 'The inbox driver for fast USB disks that use the UAS protocol.',
@@ -1167,8 +1174,8 @@ drv('HTTP', 'HTTP service driver (HTTP.sys)', 'The kernel HTTP listener that Win
     'Programs and Windows features that listen for HTTP through it fail (reasoning).')
 
 # USB host and HID input.
-drv('USBXHCI', 'USB xHCI host controller driver', 'Drives USB 3 (xHCI) host controllers, which also run the USB 2 '
-                                                    'ports on modern boards.',
+drv('USBXHCI', 'USB xHCI host controller driver', 'Drives USB 3 (xHCI) host controllers. On boards with no separate '
+                                                    'USB 2 controller it runs the USB 2 ports too (reasoning).',
     'Every USB port on that controller stops, keyboards and mice included (reasoning).', 'published',
     '@USBHOST: "The xHCI driver is the USB 3.0 host controller driver."')
 drv('UCX01000', 'USB Host Controller Extension', 'The common layer between the USB hub driver and the xHCI driver.',
@@ -1203,12 +1210,15 @@ drv('i8042prt', 'PS/2 keyboard and mouse driver', 'The function driver for PS/2-
     '@HIDKBM names I8042prt as the function driver for a PS/2-style keyboard and mouse.')
 
 # Audio.
-drv('HDAudBus', 'High Definition Audio bus driver', 'The bus driver for High Definition Audio controllers: onboard '
-                                                    'audio and GPU HDMI/DisplayPort audio sit on it.',
-    'Onboard audio and HDMI/DisplayPort audio stop (reasoning).')
+drv('HDAudBus', 'High Definition Audio bus driver',
+    'The bus driver for High Definition Audio controllers, such as a GPU\'s HDMI/DisplayPort audio and onboard audio '
+    'that uses Microsoft\'s HD Audio bus.',
+    'Audio devices on that bus stop (reasoning). Some Intel boards run onboard audio on Intel\'s own bus driver '
+    '(Smart Sound Technology) instead, and then it does not depend on this one; the device\'s Driver details in '
+    'Device Manager show which one loads.')
 drv('usbaudio', 'USB Audio driver (class 1)', 'The inbox driver for USB Audio class 1 devices.',
     'USB headsets and DACs that use it stop (reasoning).', 'published',
-    '@USBCLASSES lists Usbaudio.sys for the USB Audio class.')
+    '@USBCLASSES lists Usbaudio.sys for the USB Audio class; @USBAUDIO2 calls it the USB Audio 1.0 driver.')
 drv('usbaudio2', 'USB Audio 2.0 driver', 'The inbox driver for USB Audio 2.0 devices.',
     'USB Audio 2.0 headsets and DACs that use the inbox driver stop (reasoning).', 'published',
     '@USBAUDIO2: "Starting with Windows 10, release 1703, a USB Audio 2.0 driver is shipped with Windows", '
@@ -1221,7 +1231,8 @@ drv('BasicDisplay', 'Microsoft Basic Display Driver', 'The fallback display driv
                                                       'installed or working.',
     'Windows has no fallback picture while a GPU driver is missing, broken or being reinstalled (reasoning).',
     'published', '@BASICDISPLAY: a generic display driver that ships with Windows, used when a vendor graphics driver '
-                 'isn\'t present or isn\'t working, and during a graphics driver reinstall.')
+                 'isn\'t present or isn\'t working, and while a new graphics driver is being installed (from removing the old one '
+                 'to installing the new one).')
 drv('BasicRender', 'Microsoft Basic Render Driver', 'Software rendering (WARP) exposed as a graphics adapter.',
     'Software rendering for systems without a working render driver stops (reasoning).', 'published',
     '@BASICDISPLAY: BasicDisplay is always used with BasicRender, which exposes WARP from an adapter in the kernel.')
@@ -1236,7 +1247,8 @@ drv('CNG', 'Kernel cryptography (CNG)', 'Kernel cryptography for Windows and dri
 drv('KSecDD', 'Kernel security support driver', 'Kernel-side security services for sign-in and secure channels.',
     'Windows can\'t start normally (reasoning).')
 drv('TPM', 'TPM driver', 'Talks to the Trusted Platform Module (firmware TPM or chip).',
-    'BitLocker with TPM, Windows Hello keys and anti-cheats that check the TPM can fail (reasoning).')
+    'BitLocker with a TPM protector and Windows Hello keys fail (reasoning). Some anti-cheats are reported to check '
+    'the TPM (not sourced).')
 drv('mssmbios', 'SMBIOS driver', 'Exposes the firmware\'s SMBIOS tables (board, BIOS and memory details) to Windows.',
     'Tools that read SMBIOS, Hadron\'s BIOS pages included, lose that data (reasoning).')
 drv('Beep', 'Beep driver', 'Plays the legacy system beep.', 'The legacy system beep stops (reasoning).')
@@ -1252,6 +1264,8 @@ drv('WdBoot', 'Defender boot driver', 'Defender Antivirus\'s early-launch anti-m
 drv('WdNisDrv', 'Defender network inspection driver', 'The kernel part of Defender Antivirus\'s network inspection.',
     '@DEFCOMPAT says not to disable, stop or modify the services Defender uses; that this driver is part of that '
     'stack is reasoning.')
-drv('hvservice', 'Hypervisor service driver', 'Starts and manages the Windows hypervisor (Hyper-V, WSL2, Memory '
-                                              'Integrity).',
-    'Features that need the hypervisor stop: Hyper-V, WSL2, Windows Sandbox and Memory Integrity (reasoning).')
+drv('hvservice', 'Hypervisor support driver',
+    'Kernel support driver for the Windows hypervisor and the features built on it (Hyper-V, WSL2, Windows Sandbox, '
+    'Memory Integrity). The boot loader starts the hypervisor itself (reasoning).',
+    'Features that use the hypervisor may fail (reasoning, not tested). Hadron never changes it while the hypervisor '
+    'is running.')

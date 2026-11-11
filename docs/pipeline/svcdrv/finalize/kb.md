@@ -172,3 +172,24 @@ failed, all expected:
   (`services-plan-stripped`, `services-console-plan`, `services-ti-on`).
 
 Every KB diff here goes to `kb-auditor` before merge (rule 7).
+
+## 6. kb-audit-2 should-fix items (S1-S15)
+All applied with the auditor's rewordings; none had a source that said otherwise.
+- S1 storport: no "most"; StorAHCI is a miniport, and Microsoft encourages vendors to use Storport.
+- S2 USBXHCI: the USB 2 ports clause is conditional and labelled reasoning.
+- S3 BasicDisplay: "while a new graphics driver is being installed (from removing the old one to installing the new one)".
+- S4 hvservice: a support driver; the boot loader starts the hypervisor; if_off "may fail (reasoning, not tested)" and Hadron never changes it while the hypervisor runs.
+- S5 HDAudBus: true on either bus: devices on Microsoft's HD Audio bus stop; Intel Smart Sound boards may run onboard audio on Intel's own bus driver; Device Manager's Driver details show which.
+- S6 reasoning drivers: "Reasoning from the driver's role in Windows; Hadron cites no Microsoft page for it." (no search claimed).
+- S7 iphlpsvc: no Xbox page was read, so the unsourced wording: "reported to need Teredo (not stated on either page)", with a test.
+- S8 TPM: anti-cheat clause marked "(not sourced)".
+- S9 Appinfo: the UAC prompt when Hadron is started from a normal desktop.
+- S10 TermService: the effect first, then @IOT's advice.
+- S11 WpnUserService: @IOT's rating is for IoT Enterprise, "the closer of the two to a desktop".
+- S12 gate: the count heuristics are replaced by a digit allow-list (`DIGIT_ALLOW` plus identifiers that start with a letter); word checks stay and gain "one <unit>", any size word, `apps`/`programs`, "of the", stacked modifiers and "points". 12 new must-fail cases (the auditor's 11 texts; "one gigabyte" and "a gigabyte" are two). The only KB digit it caught was SysMain's test "3 restarts", now "Restart three times".
+- S13 KtmRm: "any MSDTC transaction that involves a kernel resource manager fails".
+- S14 usbaudio cites @USBAUDIO2 for "USB Audio 1.0"; USBSTOR says "that don't use UAS" instead of "(Bulk-Only)".
+- S15 XboxGipSvc: the pbasis says the driver name is unsourced and a Bluetooth-connected controller doesn't keep the row.
+
+M1 (goldens) and the selftest.cpp:466 bound are the lead's at merge. The plan goldens will now also differ by the
+XboxGipSvc pbasis sentence and the new SysMain test text (SysMain's test is not in plan dumps; only pbasis is).
