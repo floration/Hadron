@@ -69,8 +69,11 @@ bool RemoveCustomPreset(Store& st, const CustomPreset& p, std::wstring* err);
 // ---- files the user picks (export and import, Browse buttons) ------------------------------------------------
 // Export: CREATE_NEW only. An existing file is never replaced: *exists is set and nothing is written.
 bool ExportPresetFile(const std::wstring& path, const CustomPreset& p, bool* exists, std::wstring* err);
-// Import: reads at most kPresetMaxFile bytes and parses. A cloud placeholder (recall on open or on data access,
-// offline) is refused unread, so picking it never starts a download.
+// Import: one handle opened on the entry itself (FILE_FLAG_OPEN_REPARSE_POINT), its attributes read from that handle
+// before any byte: a folder, a link (reparse point) or a cloud placeholder (recall on open or on data access,
+// offline) is refused unread, so picking it never starts a download. Reads at most kPresetMaxFile bytes and parses.
 bool ImportPresetFile(const std::wstring& path, CustomPreset* out, std::wstring* err);
+// Why an entry with these attributes is refused ("" for a plain file): ImportPresetFile's check, testable alone.
+std::wstring ImportAttrProblem(DWORD attrs, const std::wstring& path);
 
 }  // namespace hx::services

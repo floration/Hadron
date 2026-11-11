@@ -228,7 +228,7 @@ std::vector<CustomPreset> LoadCustomPresets(const Store& st, std::vector<std::ws
     for (auto& f : st.List(L"presets\\removed-*.txt")) {
         std::string text;
         std::wstring err;
-        if (!st.Read(L"presets\\" + f, &text, &err)) { if (problems) problems->push_back(err); continue; }
+        if (!st.Read(L"presets\\" + f, &text, &err)) { if (problems) problems->push_back(L"presets\\" + f + L": " + err); continue; }
         auto lines = Split(FromUtf8(text), L'\n');
         if (lines.size() < 2 || ToUtf8(lines[0]) != kRemovedMagic) {
             if (problems) problems->push_back(L"presets\\" + f + L": not a removal record, ignored");
@@ -312,27 +312,44 @@ bool ExportPresetFile(const std::wstring& path, const CustomPreset& p, bool* exi
     return true;
 }
 
+std::wstring ImportAttrProblem(DWORD attrs, const std::wstring& path) {
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) return path + L" is a folder";
+    if (attrs & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_OFFLINE))
+        return path + L" is a cloud placeholder (not on this PC yet). Hadron doesn't download it: make it available offline first.";
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+        return path + L" is a link (a reparse point). Hadron doesn't follow it: pick the file it points to.";
+    return L"";
+}
+
 bool ImportPresetFile(const std::wstring& path, CustomPreset* out, std::wstring* err) {
-    WIN32_FILE_ATTRIBUTE_DATA ad{};
-    if (!GetFileAttributesExW(sys::ToExtended(path).c_str(), GetFileExInfoStandard, &ad)) {
-        *err = L"Could not read " + path + L": " + sys::ErrorText(GetLastError());
-        return false;
-    }
-    if (ad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { *err = path + L" is a folder"; return false; }
-    if (ad.dwFileAttributes & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_OFFLINE)) {
-        *err = path + L" is a cloud placeholder (not on this PC yet). Hadron doesn't download it: make it available offline first.";
-        return false;
-    }
-    uint64_t size = ((uint64_t)ad.nFileSizeHigh << 32) | ad.nFileSizeLow;
-    if (size > kPresetMaxFile) { *err = path + L" is larger than " + std::to_wstring(kPresetMaxFile / 1024) + L" KiB; a preset file is never that big"; return false; }
-    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // One handle, opened on the entry itself (never through a link), checked by its own attributes before a byte is
+    // read: no gap between the check and the read, and a link to a placeholder can't trigger a recall.
+    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_READ | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (h == INVALID_HANDLE_VALUE) { *err = L"Could not open " + path + L": " + sys::ErrorText(GetLastError()); return false; }
+    FILE_ATTRIBUTE_TAG_INFO ti{};
+    if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &ti, sizeof ti)) {
+        DWORD e = GetLastError();
+        CloseHandle(h);
+        *err = L"Could not read the attributes of " + path + L": " + sys::ErrorText(e);
+        return false;
+    }
+    std::wstring bad = ImportAttrProblem(ti.FileAttributes, path);
+    if (!bad.empty()) { CloseHandle(h); *err = bad; return false; }
+    // Read in a loop up to one byte past the cap, so a larger file is known to be too large without reading it all.
     std::string data(kPresetMaxFile + 1, '\0');
-    DWORD got = 0;
-    BOOL ok = ReadFile(h, &data[0], (DWORD)data.size(), &got, nullptr);
-    DWORD e = GetLastError();
+    size_t got = 0;
+    DWORD e = 0;
+    bool ok = true;
+    while (got < data.size()) {
+        DWORD n = 0;
+        if (!ReadFile(h, &data[got], (DWORD)(data.size() - got), &n, nullptr)) { ok = false; e = GetLastError(); break; }
+        if (n == 0) break;
+        got += n;
+    }
     CloseHandle(h);
     if (!ok) { *err = L"Could not read " + path + L": " + sys::ErrorText(e); return false; }
+    if (got > kPresetMaxFile) { *err = path + L" is larger than " + std::to_wstring(kPresetMaxFile / 1024) + L" KiB; a preset file is never that big"; return false; }
     data.resize(got);
     if (!ParsePreset(data, out, err)) return false;
     out->file.clear();
