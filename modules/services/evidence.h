@@ -49,6 +49,10 @@ std::wstring ItemSignedPath(const SvcItem& item, std::wstring* why);
 // and last-write time for the life of the process, so a second pass costs nothing.
 SignerInfo ReadSigner(const std::wstring& path);
 SignerInfo ItemSigner(const SvcItem& item);   // ItemSignedPath + ReadSigner
+// What a failed WinVerifyTrust status means when no catalog vouches for the file either: a chain the offline check
+// can't finish (untrusted or unreachable root, chaining, system error) is Can't check, never "Not trusted"; a bad
+// digest, explicit distrust, revocation, expiry or wrong usage is Not trusted.
+SignerInfo SignerFromStatus(long status);
 
 // Fixture file signers.txt: "HXSVC\t1\tsigners", then "G\tname\tstate\tsubject\tdetail" (bios escaping).
 bool ParseSigners(const std::string& utf8, std::map<std::wstring, SignerInfo>* out, std::wstring* err);

@@ -161,10 +161,35 @@ bool NoSignature(LONG st) {
 // A signature that is there and fails (as opposed to one Hadron could not evaluate offline).
 bool BadSignature(LONG st) {
     return st == (LONG)TRUST_E_BAD_DIGEST || st == (LONG)TRUST_E_CERT_SIGNATURE || st == (LONG)TRUST_E_EXPLICIT_DISTRUST ||
-           st == (LONG)CERT_E_REVOKED || st == (LONG)CERT_E_UNTRUSTEDROOT || st == (LONG)CERT_E_UNTRUSTEDTESTROOT ||
-           st == (LONG)CERT_E_EXPIRED || st == (LONG)CERT_E_WRONG_USAGE || st == (LONG)TRUST_E_SYSTEM_ERROR;
+           st == (LONG)CERT_E_REVOKED || st == (LONG)CERT_E_UNTRUSTEDTESTROOT || st == (LONG)CERT_E_EXPIRED ||
+           st == (LONG)CERT_E_WRONG_USAGE;
 }
 
+// A chain the offline check could not complete: with no download allowed, a root that Windows would fetch on demand
+// (or an intermediate it can't reach) looks "untrusted" though the signature may be fine. Not a verdict on the file.
+bool OfflineChain(LONG st) {
+    return st == (LONG)CERT_E_UNTRUSTEDROOT || st == (LONG)CERT_E_CHAINING || st == (LONG)TRUST_E_SYSTEM_ERROR;
+}
+
+std::wstring HrText(LONG st);
+}  // namespace
+
+SignerInfo SignerFromStatus(long st) {
+    SignerInfo r;
+    if (OfflineChain(st)) {
+        r.state = SignState::CantCheck;
+        r.detail = L"offline: the root certificate isn't in the local store (" + HrText(st) + L")";
+    } else if (BadSignature(st)) {
+        r.state = SignState::Untrusted;
+        r.detail = HrText(st);
+    } else {
+        r.state = SignState::CantCheck;
+        r.detail = L"WinVerifyTrust: " + HrText(st) + L" (offline check: a certificate chain that needs a download can't be built)";
+    }
+    return r;
+}
+
+namespace {
 std::wstring HrText(LONG st) {
     std::wstring t = sys::ErrorText((DWORD)st);
     while (!t.empty() && (t.back() == L'.' || t.back() == L' ' || t.back() == L'\n' || t.back() == L'\r')) t.pop_back();
@@ -361,12 +386,8 @@ SignerInfo ReadSigner(const std::wstring& path) {
         else if (NoSignature(st)) {
             if (cwhy.empty()) r.state = SignState::Unsigned;
             else { r.state = SignState::CantCheck; r.detail = cwhy; }
-        } else if (BadSignature(st)) {
-            r.state = SignState::Untrusted;
-            r.detail = HrText(st);
         } else {
-            r.state = SignState::CantCheck;
-            r.detail = L"WinVerifyTrust: " + HrText(st) + L" (offline check: a certificate chain that needs a download can't be built)";
+            r = SignerFromStatus(st);
         }
     }
     CloseHandle(h);

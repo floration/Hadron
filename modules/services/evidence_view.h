@@ -22,8 +22,9 @@ namespace hx::services {
 
 class EvidencePasses {
 public:
-    // Live: starts both passes (the previous ones are cancelled and joined first). events: lower-case name ->
-    // display name of the items whose 7040 is wanted. False with *err when a worker can't start.
+    // Live: starts a pass (each replaces the previous one of its kind). events: lower-case name ->
+    // display name of the items whose 7040 is wanted. False with *err when a worker can't start. Never waits for a
+    // previous pass: it is cancelled and left to finish on its own (its results are dropped).
     bool StartSigners(HWND notify, UINT msg, const std::vector<SvcItem>& items, std::wstring* err);
     bool StartEvents(HWND notify, UINT msg, const std::map<std::wstring, std::wstring>& events, std::wstring* err);
     // The workers' done messages: true when this pass's results were taken (the caller refilters and repaints).
@@ -48,7 +49,8 @@ private:
     struct SignerJob {
         std::vector<SvcItem> in;
         std::vector<std::pair<std::wstring, SignerInfo>> out;
-        std::atomic<bool> done{false};
+        std::atomic<bool> done{false};       // results complete (the pass was not cancelled)
+        std::atomic<bool> finished{false};   // the worker function returned: joining it now can't block
     };
     struct EventJob {
         std::map<std::wstring, std::wstring> names;
@@ -56,9 +58,22 @@ private:
         std::wstring err;
         bool ok = false;
         std::atomic<bool> done{false};
+        std::atomic<bool> finished{false};
     };
-    sys::Worker signerW_, eventW_;
-    std::shared_ptr<SignerJob> signerJob_;
+    // One running pass: its own Worker, so a new pass never waits on the old one (Worker::Start joins the thread it
+    // replaces). A replaced pass is cancelled and kept in retired_ until it has finished; it is joined then (which
+    // costs nothing) or in Shutdown. Its results are dropped: only the current job's are taken.
+    template <class J> struct Pass {
+        std::unique_ptr<sys::Worker> w;
+        std::shared_ptr<J> job;
+    };
+    template <class J> static void Retire(Pass<J>* cur, std::vector<Pass<J>>* retired);
+    template <class J> static void Reap(std::vector<Pass<J>>* retired, bool all);
+    Pass<SignerJob> signer_;
+    Pass<EventJob> event_;
+    std::vector<Pass<SignerJob>> retiredSigners_;
+    std::vector<Pass<EventJob>> retiredEvents_;
+    std::shared_ptr<SignerJob> signerJob_;   // the current pass (null: none running)
     std::shared_ptr<EventJob> eventJob_;
     std::map<std::wstring, SignerInfo> signers_;          // lower-case name
     std::map<std::wstring, Ev7040> events_;               // lower-case name -> newest 7040
