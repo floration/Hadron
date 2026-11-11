@@ -20,6 +20,12 @@ disagree, the spec wins.
   and fixture mode never applies.
 - Presets change only `Start` and `DelayedAutostart`. They take effect at the next restart, and Hadron never restarts
   the PC.
+- **Custom presets** (fix `svcdrv-presets`): the plan's ticks are saved under a name, listed on their own page, and
+  opened like a built-in preset. They are exported and imported as plain text. An opened or imported custom preset only
+  fills a plan; the apply, snapshot and undo path is the same one every plan takes.
+- **Measured before/after** (fix `svcdrv-presets`): Measure records RAM in use, committed memory, the process count
+  and the `svchost.exe` count, with when and how long after boot. A "before" taken at plan time and an "after"
+  taken after the next restart are shown side by side, labelled `owner-measured` with their conditions.
 
 ## Files
 | File | Role |
@@ -34,12 +40,14 @@ disagree, the spec wins.
 | `recovery.*` | `restore.cmd`, `restore-online.cmd`, `README.txt` and `.reg` files, plus a stored-only zip writer |
 | `plan.*` | Guards, presets, single/default/undo/resume/control plans, dependency checks, apply order, `RunApply` |
 | `ti.*` | TrustedInstaller impersonation (B6). Token work only; it starts and stops TI through the `Backend` |
+| `custom.*` | Custom presets: the `HXPRESET` text format, its strict parser, the `presets\` store (save, list, tombstone remove), export and import |
+| `measure.*` | Measurements: `TakeMeasurement` (GlobalMemoryStatusEx and a Toolhelp32 walk), the `measure` record, the `measure\` store and before/after pairing |
 | `module.cpp` | The UI (`hx::Module`) |
 | `selftest.cpp`, `cli.h` | `--selftest`, `--dump-plan` and `--live-test` |
 | `standalone.cpp` | `HadronServices.exe`. Intercepts `--dump-plan` and `--live-test` before the GUI starts |
 | `tools/services/kb.py`, `genkb.py` | The KB source and the rule-7 gate (see `tools/services/README.md`) |
 | `tests/fixtures/services/` | The fixture machine (`make_services_fixture.py` writes it; CI compares) |
-| `tests/golden/services/` | 10 plan goldens (`plan-<services\|drivers>-<default\|bloat\|stripped\|minimum\|stock>.txt`), `plan-services-default-delayedlinger.txt`, `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt` |
+| `tests/golden/services/` | 10 plan goldens (`plan-<services\|drivers>-<default\|bloat\|stripped\|minimum\|stock>.txt`), `plan-services-default-delayedlinger.txt`, `plan-services-custom.txt` (the fixture's "Gaming rig"), `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt` |
 
 ## Formats
 All formats share these rules:
@@ -115,6 +123,39 @@ E  stamp ok skipped failed done|cancelled
 
 **hw dump** (fixture `hw.txt`, kind `hw`): devnodes with class, service, filters, the present flag and the
 parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
+
+**Custom preset** (`presets\<yyyyMMdd-HHmmss>.txt`, and every export/import file). Its own format, because the user
+edits and shares it, so it has no escaping and a strict reader (`custom.cpp`, `ParsePreset`):
+```
+HXPRESET<TAB>1
+hadron<TAB><Hadron version>
+build<TAB><Windows build>
+tab<TAB>services|drivers
+name<TAB><preset name>
+<item><TAB>auto|auto-delayed|manual|disabled      one line per item
+```
+- UTF-8 (a BOM is accepted), LF or CRLF, trailing empty lines allowed. Written with LF, no BOM.
+- Refused (a line's error starts `line N: ...`; the whole-file ones say what is wrong): a different magic or a version other than 1; a missing or misordered header line;
+  a line over 512 bytes; invalid UTF-8; a field count other than 2; a start type outside the four words (`boot` and
+  `system` get a note that Hadron never sets them); `auto-delayed` on the drivers tab; a duplicate item; an empty line
+  between items; an item name that is empty, over 256 characters, or holds a control character, `\` or `/`, or
+  starts or ends with a space; a preset name that is empty, over 80 characters, holds a control character, or
+  starts or ends with a space; more than 4096 items; an empty file, no items, or a file over 1 MiB.
+- `ImportPresetFile` checks attributes before it opens the file: a folder, or a file with
+  `RECALL_ON_DATA_ACCESS`, `RECALL_ON_OPEN` or `OFFLINE` (a cloud placeholder), is refused unread (hard rule 1).
+- Removing a preset writes a tombstone `presets\removed-<stamp>.txt` (`HXPRESET-REMOVED\t1`, then the file name);
+  no file in the data folder is ever deleted. The list skips tombstoned files.
+- Export opens with `CREATE_NEW`. If the file exists, it says so and writes nothing; the user picks another name.
+
+**Measurement** (`measure\measure-<yyyyMMdd-HHmmss>[-N].txt`, kind `measure`), in the shared `HXSVC` format:
+- `M` lines: `boot` (UTC boot time, from now minus `GetTickCount64`), `build`, `created` (UTC), `machine`, `phase`
+  (`before` or `after`), `plan` (the plan's title, or empty), `uptime` (whole minutes after boot).
+- `V` lines: `ram_used` and `ram_total` (`ullTotalPhys - ullAvailPhys`, `ullTotalPhys`), `commit` and
+  `commit_limit` (`ullTotalPageFile - ullAvailPageFile`, `ullTotalPageFile`), `processes` and `svchost` (a Toolhelp32
+  snapshot; `svchost.exe` by image name, case-insensitive). Bytes for memory.
+- The reader refuses a record that is missing any of these values.
+- **Pairing:** the newest `after`, with the newest `before` of the same machine taken before that after's boot. "Measure
+  after" is offered only when the newest before was taken before the current boot.
 
 ## Safety mechanics (hard rules 1, 4 and 5; spec §5)
 - **Write path.** `ChangeServiceConfigW` and `ChangeServiceConfig2W` (delayed flag), `StartServiceW` and
@@ -319,6 +360,31 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 - **Pending marker.** A start type that waits for a restart is `(pending)` in Baseline and `!` in Console, by
   design: each layout's legend explains its own mark (Console's cells are fixed-width).
 
+- **Custom presets (fix `svcdrv-presets`).**
+  - *The guard.* A custom preset gets the full built-in preset guard: `CheckGuard`'s never-touch and never-preset items,
+    items Hadron's KB doesn't know (third-party, as for built-in presets: e.g. `Fax` and `nvlddmkm` on the fixture), and
+    drivers the KB doesn't mark safe to change. Each is dropped with one note naming them ("item(s) that every preset
+    leaves alone"). Unlike a built-in preset, a custom one may raise a start type (it is the user's own list).
+  - *Rows Hadron can't do.* Missing items, items of the other tab and unreadable items are counted in notes. A build
+    other than the PC's adds a note. TrustedInstaller-owned rows are blocked unless the TI toggle is on, as in every plan.
+  - *Where a preset comes from.* "Save ticks as custom preset" on a preset or single plan saves the included,
+    unblocked rows' targets (a plan's row set, not the whole tab). An import opens straight into a plan; to keep it,
+    save it from that plan. The undo log's `B` source is `custom:<tab>:<name>`, shown as `the custom preset "<name>"`.
+  - *Names.* A duplicate name (case-insensitive) is refused at save; the default name is `<plan> (<Tab>)`.
+  - *Removing* writes a tombstone instead of deleting a file (hard rule 1 applies to Hadron's own data too).
+  - *Export* never replaces: `CREATE_NEW` only, without an overwrite prompt, so there is one path and no race.
+  - Saving, removing, exporting and importing run on a `Worker`; the Open/Save dialogs run on the UI thread before it
+    starts. Writes are off in fixture mode, read-only mode, without elevation, and when the data folder was refused (A1).
+- **Measure (fix `svcdrv-presets`).**
+  - The only numbers on the page are recorded values and their difference (`After - before`, computed from the two
+    records). No estimate anywhere; the page says Hadron never predicts what a change saves.
+  - "Measure after" requires a before from an earlier boot; the banner offering it shows only in live mode and can
+    be dismissed for the session.
+  - The fairness text is "test it" guidance without numbers: same apps, same minutes after boot, repeat the pair,
+    and test frame rates in the game itself.
+  - Measurements of another machine (machine GUID) are never paired. A pair whose minutes after boot, Windows build
+    or installed memory differ is shown with a warning saying so.
+
 ## Deviations from the spec
 - **Hardware evidence is devnode-based only** (spec §5.5; Analyze docs D3; DECISIONS.md, proxy). Two things the
   research named are not done in this run:
@@ -348,6 +414,11 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 | `--focus list\|search\|detail\|<n>` | module | Draw that focus state, or focus the n-th tab stop (design screenshots) |
 | `--sort <key>[:desc]` | module | Sort the list by a column key, e.g. `kb:desc` |
 | `--keys F1,F2,text:abc,...` | module | Replay keys after the fixture loads (`F1`-`F12`, `up`, `down`, `pgup`, `pgdn`, `home`, `end`, `tab`, `esc`, `space`, `enter`, `text:<chars>`) |
+| `--presets` | module | Open the custom presets page |
+| `--import <file>` | module | Import that file as the Import button does (no dialog): a refusal shows on the presets page, a valid file opens its plan |
+| `--plan custom:<name>` | module | Open the fixture's saved custom preset of that name as a plan |
+| `--save <name>` | module | With `--plan`: open the "save ticks as custom preset" form with that name typed (fixture mode refuses the write) |
+| `--measure` | module | Open the measure page (the fixture's `measure\` pair) |
 | `--ti on` | module | Start with the TrustedInstaller toggle on (fixture renders only; live it is off at every launch) |
 | `--data-dir <dir>` | module, `--live-test` | Use another data folder instead of `%ProgramData%\Hadron\services\` |
 | `--readonly` | module | Never arm the backend. Without `--data-dir` it opens the default data folder read-only, so the first-run snapshot, undo logs and interrupted banner still show |
@@ -360,7 +431,7 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 python3 -I tools/services/genkb.py                     # the KB first: plan text carries pbasis notes
 wine build/HadronServices.exe --selftest --fixture tests/fixtures/services --update-golden
 ```
-`--update-golden` rewrites the 10 plan goldens, `plan-services-default-delayedlinger.txt`, `restore.cmd`,
+`--update-golden` rewrites the 10 plan goldens, `plan-services-default-delayedlinger.txt`, `plan-services-custom.txt`, `restore.cmd`,
 `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt`. Then run `tests/tools/services_check.sh`, which
 compares them again (with `--dump-plan`) and fails on any difference.
 
@@ -371,10 +442,14 @@ compares them again (with `--dump-plan`) and fails on any difference.
 3. both selftests;
 4. the 10 `--dump-plan` comparisons (5 plans on each tab, `stock` included) against `tests/golden/services`, plus
    `plan-services-default-delayedlinger.txt` (the `delayedlinger` fixture);
-5. the screenshots (including the `forged` Undo plan and the `multi` banner).
+5. the screenshots (including the `forged` Undo plan and the `multi` banner, and the presets page, the import
+   refusal, the custom plan, the save form and the measure page in both layouts).
 
 Regression fixtures from Analyze (written by `make_services_fixture.py`, compared by CI): `delayedlinger/` (A7),
-`forged/` (A4), `multi/` (an interrupted undo of an interrupted apply). The selftest also writes and compares
+`forged/` (A4), `multi/` (an interrupted undo of an interrupted apply).
+Hand-written fixtures for custom presets and measurements (not generated, and not compared by step 2): `presets/`
+(two saved presets), `import/bad-start.txt` (refused at line 8) and `measure/` (a before/after pair). The selftest
+compares the custom plan with `plan-services-custom.txt`. The selftest also writes and compares
 `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt`.
 
 CI runs it in the Wine job. The MSVC job runs:
