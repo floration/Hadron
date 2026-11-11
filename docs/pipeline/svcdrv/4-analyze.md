@@ -88,3 +88,44 @@ This thread couldn't reach James's PC this round (that needs a message from him 
 ## Hand-off
 Back to **Build** for A1–A7. When they're fixed, Build sends it to Analyze again; the re-check will rerun the sniffer
 and logic probes in `analyze/tools/` against the fixes plus the selftest and goldens.
+
+## Round 2 (a8303b7), 2026-11-11
+
+Re-checked by the Win32, bug-sniffer and logic analysts against Build's round-2 fixes (reports `analyze/a-*-r2.md`;
+new probe and random-plan fuzzer in `analyze/tools/probe.cpp`, `fuzz.cpp`, `fuzz_lower.cpp`). Selftest 178/178
+standalone and `--solo services`; the 8 plan goldens unchanged.
+
+| Item | Result |
+|---|---|
+| A1 restore.cmd metacharacters | **fixed**: allow-list `CmdSafeName`, one `:put` with `goto` only, every `reg add` and `reg unload` checked; hostile names go to .reg/README. CI echo-only step runs the same `:put` text on real cmd. |
+| A2 first-run recovery writes boot drivers | **fixed**: 96 of 160 fixture rows, no Boot/System, storage, floor or protected items; no drivers when hardware info is missing. |
+| A3 TI stopped when Hadron didn't start it | **fixed**: claim reset per apply, set only after Hadron's own start from STOPPED; TI released on every return path. |
+| A4 Undo unguarded, foreign logs | **fixed**: CheckGuard per row; wrong/missing machine or build refused for Undo and Resume. |
+| A5 data folder trusted as is | **fixed** for the folder: reparse check on every component, owner Administrators/SYSTEM, protected DACL re-applied. Owner check needs a Windows run. |
+| A6 dependency check | **mostly fixed**: fixed-point loop, terminates on cycles, re-run on toggle with warnings, enable-direction check, skipped dependents protect. Two leftovers, below. |
+| A7 delayed linger | **fixed**: all 81 Default-first combinations, plus Undo, Resume and stock. |
+
+Store's test hooks `AcceptTokenUserAsOwner` and `InjectedReparsePoint` are set only in selftest.cpp, which is reached only
+through `--selftest` and exits before the GUI; the owner hook is set only under Wine. Not reachable in a release run.
+(Minor: put both behind a selftest-only build flag so it's structural.)
+
+### Serious, round 2 (back to Build)
+Rated serious for the same reason as A6: Apply can write a configuration where an enabled service depends on one
+Hadron disabled.
+| # | Problem | Fix |
+|---|---|---|
+| A8 | `MarkTi` runs after the dependency check and never re-runs it. aaa <- bbb with bbb left out because it needs TI and the toggle is off: aaa stays ticked with no warning and is disabled under an enabled bbb. | Re-run `DependencyCheck` at the end of `MarkTi` (and on toggling TI). Selftest the aaa <- bbb(TI) case. |
+| A9 | Plans that both raise and lower start types (Default-first, stock, Resume) can bounce until the round limit and end in a dependency conflict with no warning: 209 of 52,177 fuzzed mixed plans (0.4%) after build, 259 after a toggle; 0 of 36,803 lower-only preset plans. A non-converging 68-row plan also takes 1.7 s on the UI thread after a toggle. Undo plans don't run the check at all. | When the round limit is hit, finish with an untick-only pass (always settles, ends consistent) and show a warning; run the check on Undo plans too. Add `fuzz.cpp`'s failing seeds as a selftest. |
+
+### Minor, round 2
+- First-run recovery judges exclusions against the state at first run: a third-party storage driver (e.g. amdsata) that was Manual then and Boot now is still written. Have `:put` skip a key whose current Start is 0 or 1. (sniffer m1, logic)
+- `Control` ignores ERROR_SERVICE_ALREADY_RUNNING, so a TI start racing Windows is claimed as Hadron's; STOP_PENDING TI fails the TI rows instead of waiting. (win32)
+- `ProgramData\Hadron` parent ownership isn't checked; a standard user who creates it first could swap or rename `services` (undo logs lost; a doctored restore.cmd could be run from WinRE before Hadron's next start). Require the parent owned by Administrators/SYSTEM too. (win32, sniffer m3)
+- DACL re-applied to every file on each load and apply; skip when already correct. (win32)
+- CI: the echo-only `:dry` always exits 0, so miss/fail branches never run on real cmd; `restore-online.cmd` isn't run in CI. The live test's data folder may fail the new owner check on the runner: watch the first CI run. (win32)
+- Undo/Resume allow duplicate rows for one service; refuse such logs. Names with `( ) ' ! & %` (likely the owner's `Intel(R)` services) now need the manual regedit route in WinRE: safe, but harder. (sniffer m2, m4)
+- Still open from round 1: M3 (after Resume, rows the interrupted apply wrote aren't undoable or drift-tracked), M8 (no guard re-check at apply time), M12 (VM hint from SMBIOS only), F3 (load now heavier: ~650 extra service opens for the write check before the list shows), F4 (company read before the list shows), F5 (detail pane rebuilt each paint), `FileCompany`'s unchecked `ExpandEnvironmentStringsW`, canonical en-us KB URLs, UNC data dir.
+- Cost of the stabilising loop: 3x BuildPreset 2 -> 39 ms; a toggle 12 ms on a 66-row plan over 755 items (Wine).
+
+### Hand-off
+Back to **Build** for A8 and A9 (both small). Round 3 will rerun the probe and the fuzzer.
