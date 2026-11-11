@@ -7,7 +7,7 @@ The KB has three files:
 
 Commands:
 ```
-python3 tools/services/genkb.py --selftest          # 38 must-fail cases, 15 ok texts, a warning case, the committed KB
+python3 tools/services/genkb.py --selftest          # 50 must-fail cases, 15 ok texts, a warning case, the committed KB
 python3 tools/services/genkb.py                     # regenerates modules/services/data/services.db
 python3 tools/services/genkb.py /tmp/services.db    # writes elsewhere (CI then runs cmp against the committed file)
 ```
@@ -57,13 +57,17 @@ Sources:
 Numbers:
 - No numbers about savings: no RAM, CPU, FPS or latency figures.
 - Any number in the text needs an `owner-measured` or `published` basis. The gate rejects it otherwise. On top of
-  the bios unit check (`2 s`, `120 MB`, `5%`) it rejects:
-  - counts: a whole number or a number word before processes, services, drivers, threads, handles, instances,
-    tasks or svchosts (`40 processes`, `thirty services`);
-  - sizes and durations in words (`200 megabytes`, `two seconds`, `ten percent`);
-  - fractions (`half`, `a third`, `a quarter`).
-- Not counted: version and build numbers (`USB Audio 2.0 driver`, `Windows Server 2016 services`, `Windows 10/11`),
-  and "one" on its own ("one instance per user").
+  the bios unit check (`2 s`, `120 MB`, `5%`), every digit fails unless it is:
+  - inside a `[[shown|kind|@KEY]]` marker;
+  - part of an identifier that starts with a letter (`IPv6`, `usbaudio2`, `Wdf01000`, `dot1x`);
+  - on the allow-list `DIGIT_ALLOW` in `genkb.py`: `Windows 10`, `Windows 10/11`, `Server 2016`, `20H2`, `1607`,
+    `1703`, `1903`, `2004`, `0x...` codes, `USB 2`/`USB 3.0`/`USB Audio 2.0`, `PS/2`, `class 1`,
+    `subclass N, protocol N`, `32-bit`/`64-bit`, `6to4`, `Start value must be 0`.
+
+  A new identifier with digits goes on the allow-list in the same change, with a selftest ok text. Number words
+  can't be listed that way, so the gate also rejects counts and units in words (`forty processes`, `two seconds`,
+  `one second`, `ten percent`), any size word (`a gigabyte`) and fractions (`half`, `a third`, `a quarter`).
+  "one" on its own is not a count ("one instance per user"); write instructions in words ("restart three times").
 - A number with a basis is marked `[[shown|published|@KEY]]`, as in the bios KB.
 - The KB needs at least 60 entries; there is no upper bound.
 

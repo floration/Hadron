@@ -13,10 +13,11 @@ stock basis; a `bloat` entry that is contested; a later level with a softer targ
 note that does not name sources on both sides; duplicate names; fewer than 60 entries.
 
 The bios number check only knows units ("2 s", "120 MB"). This module is about counts and sizes, so the services gate
-also fails on (kb-audit F7): a count of processes, services, drivers, threads, handles or instances ("40 processes",
-"30 services"); a size or a duration written in words ("200 megabytes", "two seconds", "ten percent"); and a fraction
-("half", "a third", "a quarter"). A number marked [[shown|published|@KEY]] passes, as in the bios KB. The bios
-soft-quantity check ("twice", "tens of", ...) is reported as warnings, which never fail the build.
+also fails on (kb-audit F7, kb-audit-2 S12) any digit that is not an identifier on DIGIT_ALLOW (Windows 10/11,
+Server 2016, 20H2, 1607/1703/1903/2004, 0x codes, USB 2/3, PS/2, 32-/64-bit, ...) or inside a word that starts with a
+letter (IPv6, usbaudio2); on counts and units in words ("forty processes", "two seconds", "one second"); on any
+size word ("a gigabyte"); and on fractions ("half", "a third"). A number marked [[shown|published|@KEY]] passes, as
+in the bios KB. The bios soft-quantity check ("twice", "tens of", ...) is reported as warnings, which never fail.
 
 Format (UTF-8, LF, TAB-separated, bios escaping): see tools/services/README.md.
 """
@@ -56,25 +57,32 @@ HW_RE = re.compile(r'^(?:class:[A-Za-z0-9]+|svc:[A-Za-z0-9_.-]+|self|vmguest|hvh
 NAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
 CFG_RE = re.compile(r'^[0-4]/[-01]$')
 
-# Counts, sizes in words and fractions (kb-audit F7). Years and builds before a noun ("Windows Server 2016 services")
-# and version numbers ("USB Audio 2.0 driver") are names, not counts.
-# "one" alone is left out: "one instance per user" is a description, not a quantity.
+# Numbers (kb-audit F7, kb-audit-2 S12). Heuristics for "a count" kept missing forms ("1.5 gigabytes", "30+
+# services", "from 120 to 80", "by 3 points"), so digits work the other way round: every digit in KB text fails
+# unless it is inside a [[shown|kind|@KEY]] marker, part of an identifier that starts with a letter (IPv6,
+# usbaudio2, Wdf01000, dot1x), or one of the identifiers on DIGIT_ALLOW. Number words can't be listed that way, so
+# they keep their own checks: counts and units in words, any size word, "one second"-style quantities, fractions.
+DIGIT_ALLOW = re.compile(
+    r'\bWindows\s+1[01](?:/1[01])?\b|\bServer\s+2016\b|\b20H2\b|\b(?:1607|1703|1903|2004)\b|\b0x[0-9A-Fa-f]+\b|'
+    r'\bUSB(?:\s+Audio)?\s+[123](?:\.0)?\b|\bPS/2\b|\bclass\s+1\b|\bsubclass\s+\d+,\s+protocol\s+\d+\b|'
+    r'\b(?:32|64)-bit\b|\b6to4\b|\bStart\s+value\s+must\s+be\s+0\b', re.I)
+IDENT_RE = re.compile(r'\b[A-Za-z][A-Za-z0-9_]*\d[A-Za-z0-9_]*\b')
 WORD_NUM = (r'(?:zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|'
             r'sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|'
             r'thousands?|millions?|dozens?|a\s+dozen)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine|'
             r'hundred|thousand|million))*')
-COUNT_NOUN = (r'(?:processe?s?|services?|drivers?|threads?|handles?|instances?|tasks?|svchosts?|'
-              r'(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)bytes?)')
-COUNT_RE = re.compile(
-    r'(?<![\w./])(?<!Server )(?<!Windows )(?<!build )(?<!version )'
-    r'(?:\d+(?:,\d{3})*(?![.\d])|' + WORD_NUM + r')(?:\s+(?:of\s+)?(?:or\s+so\s+)?)?[\s-]*'
-    r'(?:more\s+|fewer\s+|less\s+|extra\s+|additional\s+|background\s+|running\s+)?' + COUNT_NOUN + r'(?!\w)', re.I)
+# "one" alone is left out of WORD_NUM: "one instance per user" is a description, not a quantity.
+COUNT_NOUN = r'(?:processe?s?|services?|drivers?|threads?|handles?|instances?|tasks?|svchosts?|apps?|programs?)'
+WORD_COUNT_RE = re.compile(r'(?<![\w-])' + WORD_NUM + r'(?:\s+of\s+the)?(?:[\s-]+(?:more|fewer|less|extra|additional|'
+                           r'background|running|Windows|Microsoft))*[\s-]+' + COUNT_NOUN + r'(?!\w)', re.I)
 # Units spelled out after a number word. "three times" is left to the bios soft check (it warns on "N times faster").
 WORD_UNIT = (r'(?:(?:milli|micro|nano)?seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|'
-             r'per\s*cent|percent(?:age\s+points?)?|ms|KB|MB|GB|TB|KiB|MiB|GiB|watts?|volts?|degrees?|frames?|fps|'
-             r'hertz|[kMG]?Hz)')
-WORD_UNIT_RE = re.compile(r'(?<![\w-])' + WORD_NUM + r'[\s-]+(?:more\s+|fewer\s+|less\s+)?' + WORD_UNIT + r'(?!\w)',
-                          re.I)
+             r'per\s*cent|percent(?:age\s+points?)?|points?|ms|KB|MB|GB|TB|KiB|MiB|GiB|watts?|volts?|degrees?|'
+             r'frames?|fps|hertz|[kMG]?Hz)')
+WORD_UNIT_RE = re.compile(r'(?<![\w-])(?:' + WORD_NUM + r'|one)[\s-]+(?:more\s+|fewer\s+|less\s+)?' + WORD_UNIT +
+                          r'(?!\w)', re.I)
+# The KB states no sizes at all, so a size word is a quantity wherever it stands ("frees a gigabyte").
+SIZE_WORD_RE = re.compile(r'\b(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)bytes?\b', re.I)
 FRACTION_RE = re.compile(r'\b(?:half|halves|halved|halving|one[\s-]+third|a\s+third|two[\s-]+thirds|'
                          r'one[\s-]+quarter|a\s+quarter|three[\s-]+quarters|quarter\s+of)\b(?![\s-]*part(?:y|ies))', re.I)
 
@@ -84,8 +92,12 @@ def check_quantities(text, where, errors, warnings):
     masked = B.MARK_RE.sub(lambda m: '\x00' * len(m.group(0)), text)
     masked = B.KEY_RE.sub(lambda m: '\x00' * len(m.group(0)), masked)
     plain = B.MARK_RE.sub(lambda m: m.group(1), text)
-    for rx, what in ((COUNT_RE, 'unsourced count'), (WORD_UNIT_RE, 'unsourced quantity in words'),
-                     (FRACTION_RE, 'unsourced fraction')):
+    digits = IDENT_RE.sub(lambda m: '\x00' * len(m.group(0)), DIGIT_ALLOW.sub(lambda m: '\x00' * len(m.group(0)), masked))
+    for m in re.finditer(r'\d[\d.,]*', digits):
+        errors.append('%s: number %r is not on the identifier allow-list (mark it with a published or owner-measured '
+                      'basis) in: %s' % (where, m.group(0).rstrip('.,'), plain))
+    for rx, what in ((WORD_COUNT_RE, 'unsourced count in words'), (WORD_UNIT_RE, 'unsourced quantity in words'),
+                     (SIZE_WORD_RE, 'unsourced size'), (FRACTION_RE, 'unsourced fraction')):
         for m in rx.finditer(masked):
             errors.append('%s: %s %r in: %s' % (where, what, m.group(0).strip(), plain))
     if warnings is not None:
@@ -347,6 +359,19 @@ def selftest():
         ('count in a basis note', good(basis_note='@IOT; frees 50 megabytes.')),
         ('count in a pbasis note', good(pbasis_note='Removes 30 services.')),
         ('count in a contested note', good(contested='@IOT says keep; @VDOT disables 20 services.')),
+        # kb-audit-2 S12: texts the earlier heuristics let through.
+        ('decimal before a size word', good(expl='Frees about 1.5 gigabytes.')),
+        ('count with two modifiers', good(expl='40 fewer running processes.')),
+        ('count with a qualifier noun', good(expl='Removes 30 Windows services.')),
+        ('count with "of the"', good(expl='Removes 30 of the services.')),
+        ('count with a plus', good(expl='Removes 30+ services.')),
+        ('count after the noun', good(expl='Cuts the process count by 40.')),
+        ('from-to numbers', good(expl='Process count drops from 120 to 80.')),
+        ('count of apps', good(expl='40 apps stop.')),
+        ('one size word', good(expl='Frees one gigabyte.')),
+        ('a size word', good(expl='Saves a gigabyte.')),
+        ('one second', good(expl='One second faster.')),
+        ('points', good(expl='Lowers CPU use by 3 points.')),
     ]
     for what, e in bad:
         expect(errors_for(e, base) != [], 'fails: ' + what)
