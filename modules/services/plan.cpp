@@ -467,6 +467,19 @@ Plan BuildCustom(const CustomPreset& cp, const std::vector<SvcItem>& items, cons
         else if (c.tiOn && IEq(s->name, L"TrustedInstaller")) r.blocked = L"Not while the TrustedInstaller toggle is on: the toggle needs this service";
         else if (ci.target.Delayed() && !s->group.empty())
             r.blocked = L"Windows doesn't allow a delayed auto-start service in a load-order group (" + s->group + L"): use Auto";
+        // The hardware guard built-in presets get (BuildPreset): a stricter start for an item whose KB entry names
+        // hardware is kept while that hardware is in use or was seen, and offered unticked for a hot-plug class.
+        if (r.blocked.empty() && ci.target.start > s->cfg.start) {
+            const KbEntry* e = c.kb ? c.kb->Find(s->name) : nullptr;
+            if (e && !e->hw.empty()) {
+                std::wstring ev;
+                int h = c.hw ? HwEvidence(*c.hw, e->hw, s->name, &ev) : 0;
+                if (!c.hw) ev = L"no hardware information: kept";
+                r.evidence = ev;
+                if (h == 0) r.blocked = L"Kept: hardware in use or seen before. " + ev;
+                else if (h == 2) r.include = false;
+            }
+        }
         if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
         p.rows.push_back(std::move(r));
     }

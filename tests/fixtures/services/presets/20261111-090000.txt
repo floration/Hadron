@@ -14,3 +14,5 @@ WinDefend	disabled
 RpcSs	disabled
 HxNotOnThisPc	manual
 nvlddmkm	disabled
+bthserv	disabled
+FrameServer	disabled
