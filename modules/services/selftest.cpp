@@ -1696,6 +1696,62 @@ int RunSelftest(const std::vector<std::wstring>& args) {
         check(okDeep && again && DirExists(base + L"\\a\\b\\c"),
               L"A5: a \\\\?\\-prefixed root with missing parents is created, then re-checked and accepted (owner, DACL)" +
                   (okDeep ? L"" : L": " + e3) + (again ? L"" : L": " + e4));
+        // R1: an existing folder is never re-secured. One that lets Everyone write is refused and keeps its DACL; one that
+        // is already admin-only is accepted and keeps its DACL too.
+        auto daclOf = [](const std::wstring& path) {
+            PSECURITY_DESCRIPTOR sd = nullptr;
+            std::wstring s;
+            if (GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, nullptr, &sd) ==
+                ERROR_SUCCESS) {
+                LPWSTR t = nullptr;
+                if (ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &t, nullptr)) { s = t; LocalFree(t); }
+                LocalFree(sd);
+            }
+            return s;
+        };
+        auto mkWith = [](const std::wstring& path, const wchar_t* sddl) {
+            PSECURITY_DESCRIPTOR sd = nullptr;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr)) return false;
+            SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+            BOOL ok = CreateDirectoryW(path.c_str(), &sa);
+            LocalFree(sd);
+            return ok != FALSE;
+        };
+        std::wstring open = base + L"\\open", tight = base + L"\\tight";
+        bool mo = mkWith(open, L"O:BAD:(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)");
+        bool mt = mkWith(tight, L"O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)");
+        std::wstring d0 = daclOf(open), t0 = daclOf(tight), e5, e6;
+        bool okOpen = Store(open).EnsureRoot(true, &e5);
+        bool okTight = Store(tight).EnsureRoot(true, &e6);
+        if (mo && d0.find(L";FA;;;WD)") == std::wstring::npos) {
+            info(L"R1: this system does not keep a folder's DACL (" + d0 + L"; Wine), so the existing-folder DACL check is not "
+                 L"exercised here (Windows CI runs it)");
+        } else {
+            check(mo && mt && !okOpen && e5.find(L"already exists") != std::wstring::npos && daclOf(open) == d0,
+                  L"R1: an existing data folder that lets Everyone write is refused and its permissions are left as they were (" +
+                      d0 + L"): " + e5);
+        }
+        check(mo && mt && okTight && daclOf(tight) == t0, L"R1: an existing admin-only data folder is accepted, its permissions unchanged" +
+                                                              (okTight ? L"" : L": " + e6));
+        // The DACL test itself, on descriptors built from SDDL (runs under Wine too).
+        auto problem = [](const wchar_t* sddl) {
+            PSECURITY_DESCRIPTOR sd = nullptr;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr)) return std::wstring(L"(bad sddl)");
+            std::wstring w = Store::WriteAccessProblem(sd);
+            LocalFree(sd);
+            return w;
+        };
+        check(problem(L"O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)").empty() &&
+                  problem(L"O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)").empty() &&
+                  !problem(L"O:BAD:(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)").empty() &&
+                  !problem(L"O:BAD:(A;OICI;FA;;;BA)(A;OICIIO;GA;;;CO)").empty() &&
+                  !problem(L"O:BAD:(A;OICI;FA;;;BA)(A;CI;0x2;;;BU)").empty(),
+              L"R1: the existing-folder test accepts admin-only (plus read) DACLs and refuses Users write and an inherit-only "
+              L"CREATOR OWNER entry (as under C:\\ProgramData)");
+        SECURITY_DESCRIPTOR nullSd;
+        bool nullOk = InitializeSecurityDescriptor(&nullSd, SECURITY_DESCRIPTOR_REVISION) && SetSecurityDescriptorDacl(&nullSd, TRUE, nullptr, FALSE);
+        check(nullOk && Store::WriteAccessProblem(&nullSd).find(L"no DACL") != std::wstring::npos,
+              L"R1: the existing-folder test refuses a null DACL (everyone has full access)");
         check(Store::Plain(L"\\\\?\\UNC\\srv\\share\\x") == L"\\\\srv\\share\\x" && Store::Plain(L"\\\\?\\C:\\x") == L"C:\\x",
               L"Store::Plain strips \\\\?\\ and \\\\?\\UNC\\ (--data-dir is kept without the prefix)");
     }

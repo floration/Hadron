@@ -352,7 +352,56 @@ std::wstring SidText(PSID sid) {
     if (ConvertSidToStringSidW(sid, &s)) { std::wstring r = s; LocalFree(s); return r; }
     return L"(unknown)";
 }
+
+bool IsAdminSystemOrTi(PSID sid) {
+    // HookOwner: test builds under Wine only, where every DACL reads back as "this user: full control".
+    return IsWellKnownSid(sid, WinBuiltinAdministratorsSid) || IsWellKnownSid(sid, WinLocalSystemSid) || IsTiSid(sid) || HookOwner(sid);
+}
+
+// The DACL of the folder open in h, read by handle and checked by Store::WriteAccessProblem. Nothing is changed.
+std::wstring DaclProblem(HANDLE h) {
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    DWORD e = GetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr, &sd);
+    if (e != ERROR_SUCCESS) return L"its permissions could not be read (" + sys::ErrorText(e) + L")";
+    std::wstring why = Store::WriteAccessProblem(sd);
+    if (sd) LocalFree(sd);
+    return why;
+}
 }  // namespace
+
+// The same test as modules/bios's backup folder (SdTrusted): every allowed entry with a write, delete or re-permission
+// right, inherit-only ones included (they reach the files Hadron writes there).
+std::wstring Store::WriteAccessProblem(PSECURITY_DESCRIPTOR sd) {
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = nullptr;
+    if (!sd || !GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted))
+        return L"its DACL could not be read (" + sys::ErrorText(GetLastError()) + L")";
+    if (!present || !dacl) return L"it has no DACL, so everyone has full access";
+    const ACCESS_MASK kWrite = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD |
+                               DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED;
+    ACL_SIZE_INFORMATION info{};
+    if (!GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation))
+        return L"its DACL could not be read (" + sys::ErrorText(GetLastError()) + L")";
+    for (DWORD i = 0; i < info.AceCount; i++) {
+        void* p = nullptr;
+        if (!GetAce(dacl, i, &p) || !p) return L"an entry of its DACL could not be read";
+        const BYTE t = static_cast<const ACE_HEADER*>(p)->AceType;
+        const bool allowed = t == ACCESS_ALLOWED_ACE_TYPE || t == ACCESS_ALLOWED_CALLBACK_ACE_TYPE ||
+                             t == ACCESS_ALLOWED_OBJECT_ACE_TYPE || t == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE ||
+                             t == ACCESS_ALLOWED_COMPOUND_ACE_TYPE;
+        if (!allowed) continue;   // deny and audit entries grant nothing
+        // Every allowed entry layout has the mask right after the header.
+        ACCESS_MASK mask = *reinterpret_cast<const ACCESS_MASK*>(static_cast<const BYTE*>(p) + sizeof(ACE_HEADER));
+        if (!(mask & kWrite)) continue;
+        if (t != ACCESS_ALLOWED_ACE_TYPE && t != ACCESS_ALLOWED_CALLBACK_ACE_TYPE)
+            return L"an object or compound entry in its DACL grants write access (access mask 0x" + Hex8(mask) + L")";
+        PSID sid = (PSID)&static_cast<ACCESS_ALLOWED_ACE*>(p)->SidStart;
+        if (IsAdminSystemOrTi(sid)) continue;
+        return L"its permissions let " + SidText(sid) + L" change it (access mask 0x" + Hex8(mask) + L")";
+    }
+    return L"";
+}
 
 bool Store::EnsureRoot(bool secure, std::wstring* err) {
     if (root_.empty()) { *err = L"no data folder"; return false; }
@@ -370,6 +419,7 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
         if (n > pos) chain.push_back(plain.substr(0, n));
         pos = n + 1;
     }
+    bool createdRoot = false;   // this call created the root, with kRootSddl
     for (size_t i = 0; i < chain.size(); i++) {
         const bool last = i + 1 == chain.size();
         // The folder that holds the root (%ProgramData%\Hadron by default; never a volume or share root): its owner
@@ -415,6 +465,7 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
             e = GetLastError();
             if (sd) LocalFree(sd);
             if (!ok && e != ERROR_ALREADY_EXISTS) { *err = L"Could not create " + chain[i] + L": " + sys::ErrorText(e); return false; }
+            if (ok && last) createdRoot = true;   // ERROR_ALREADY_EXISTS: someone made it meanwhile; checked as existing
             a = GetFileAttributesW(ext.c_str());
             if (a == INVALID_FILE_ATTRIBUTES) { *err = L"Could not read " + chain[i] + L": " + sys::ErrorText(GetLastError()); return false; }
         }
@@ -427,9 +478,11 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
     }
     if (!secure) return true;
 
-    // The root itself, opened as itself (never what a reparse point names): check again, then its owner, then
-    // put the protected DACL back, whoever made the folder.
-    HANDLE h = CreateFileW(sys::ToExtended(plain).c_str(), READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
+    // The root itself, opened as itself (never what a reparse point names), read-only: check again, then its owner,
+    // then its DACL. Hadron sets permissions only when it creates the root (kRootSddl in CreateDirectoryW above) and
+    // never changes the security of a folder that already existed (Review R1: --data-dir C:\ProgramData would
+    // otherwise have been re-secured, children included). An existing folder must already be admin-only.
+    HANDLE h = CreateFileW(sys::ToExtended(plain).c_str(), READ_CONTROL | FILE_READ_ATTRIBUTES,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h == INVALID_HANDLE_VALUE) { *err = L"Could not open " + plain + L" to check its owner: " + sys::ErrorText(GetLastError()); return false; }
@@ -447,22 +500,12 @@ bool Store::EnsureRoot(bool secure, std::wstring* err) {
                    L"writes there. Changes are off. Rename it aside as an administrator and restart Hadron, or give it another --data-dir.";
     }
     if (fail.empty()) {
-        PSECURITY_DESCRIPTOR sd = nullptr;
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kRootSddl, SDDL_REVISION_1, &sd, nullptr)) {
-            fail = L"Could not build the data folder's DACL: " + sys::ErrorText(GetLastError());
-        } else {
-            BOOL present = FALSE, defaulted = FALSE;
-            PACL dacl = nullptr;
-            if (!GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) || !present || !dacl)
-                fail = L"Could not read the data folder's DACL: " + sys::ErrorText(GetLastError());
-            else {
-                DWORD e = SetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                          nullptr, nullptr, dacl, nullptr);
-                if (e != ERROR_SUCCESS)
-                    fail = L"Could not set the Administrators-and-SYSTEM-only permissions on " + plain + L": " + sys::ErrorText(e);
-            }
-            LocalFree(sd);
-        }
+        std::wstring why = DaclProblem(h);
+        if (!why.empty())
+            fail = plain + (createdRoot ? L" was just created by Hadron, but " : L" already exists and ") + why +
+                   L". Hadron sets permissions only on a data folder it creates itself and never changes the permissions of "
+                   L"an existing folder, so changes are off. Give Hadron a --data-dir that doesn't exist yet (it is created "
+                   L"admin-only), or, if this is Hadron's own folder, rename it aside as an administrator and restart Hadron.";
     }
     CloseHandle(h);
     if (!fail.empty()) { *err = fail; return false; }
