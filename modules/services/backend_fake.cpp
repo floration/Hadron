@@ -169,7 +169,7 @@ bool FakeBackend::ReadRegStart(const std::wstring& name, RegStartVals* out, std:
     return true;
 }
 
-bool FakeBackend::WriteRegStart(const std::wstring& name, const WriteOp& w, std::wstring* err) {
+bool FakeBackend::WriteRegStart(const std::wstring& name, const WriteOp& w, const RegStartVals& expect, std::wstring* err) {
     SvcItem* i = Find(name);
     if (!i || faults.vanish.count(Lower(name))) { *err = L"The system cannot find the file specified."; return false; }
     // The same refusals as the live backend (backend_live.cpp), so the selftest exercises them.
@@ -177,11 +177,25 @@ bool FakeBackend::WriteRegStart(const std::wstring& name, const WriteOp& w, std:
     int now = i->regStart >= 0 ? i->regStart : i->cfg.start;
     if (now < 2) { *err = L"refused: its registry Start is Boot or System"; return false; }
     if (i->protect != 0) { *err = L"refused: a launch-protected service is never written through the registry"; return false; }
+    if (faults.regDeny.count(Lower(name))) { *err = L"RegOpenKeyEx: Access is denied."; return false; }
+    if (faults.regDriftAtWrite.erase(Lower(name)))   // another tool, between RunApply's re-read and this handle
+        i->regStart = (i->regStart >= 0 ? i->regStart : i->cfg.start) == 3 ? 4 : 3;
+    // As the live backend: the values under the write handle must be the ones RunApply logged (raw delayed).
+    int cur = i->regStart >= 0 ? i->regStart : i->cfg.start;
+    if (cur != expect.start || i->cfg.delayed != expect.delayed) {
+        *err = L"refused: changed since the re-read (now Start " + std::to_wstring(cur) + L"): nothing written";
+        return false;
+    }
     if (faults.onRegWrite) faults.onRegWrite(name);
     faults.regWrites++;
-    if (faults.regDeny.count(Lower(name))) { *err = L"RegOpenKeyEx: Access is denied."; return false; }
     if (faults.regReadBack.count(Lower(name))) return true;   // "succeeded", but something else put the old value back
+    const int oldDelayed = i->cfg.delayed;
     if (w.delayed >= 0) i->cfg.delayed = w.delayed;
+    if (faults.regStartFail.count(Lower(name))) {
+        i->cfg.delayed = oldDelayed;   // put back as it was (-1: the value is deleted again)
+        *err = L"RegSetValueEx(Start): Access is denied.; DelayedAutostart was put back as it was, so nothing changed";
+        return false;
+    }
     i->regStart = w.start;   // the service manager's start type (cfg.start) changes at the next restart, not now
     return true;
 }

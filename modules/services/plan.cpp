@@ -1127,7 +1127,8 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
         std::wstring werr, ident = L"admin";
         if (row.viaReg) {
             ident = L"registry (takes effect after restart)";
-            ok = b.WriteRegStart(row.name, row.op, &werr);
+            ok = b.WriteRegStart(row.name, row.op, rv, &werr);   // rv: the values just re-read and logged in I
+            if (ok && !werr.empty()) ident += L"; " + werr;      // a note on a write that happened (a failed flush)
         } else if (row.needsTi) {
             if (!env.tiOn) werr = L"needs TrustedInstaller and the toggle is off";
             else if (!tiReady) werr = L"TrustedInstaller unavailable: " + tiErr;

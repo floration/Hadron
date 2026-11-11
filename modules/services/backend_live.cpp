@@ -390,7 +390,7 @@ public:
         return ok;
     }
 
-    bool WriteRegStart(const std::wstring& name, const WriteOp& w, std::wstring* err) override {
+    bool WriteRegStart(const std::wstring& name, const WriteOp& w, const RegStartVals& expect, std::wstring* err) override {
         if (!armed_) { *err = kNotArmed; return false; }
         if (w.start < 2 || w.start > 4) { *err = L"refused: Hadron never writes Boot or System start through the registry"; return false; }
         if (w.delayed > 1) { *err = L"invalid DelayedAutostart value"; return false; }
@@ -428,6 +428,11 @@ public:
         if (!ReadValues(k, &now, &re)) return fail(re);
         if (now.start < 0) return fail(L"refused: the key has no Start value (Hadron never creates one)");
         if (now.start < 2) return fail(L"refused: its registry Start is Boot or System");
+        // The values under this handle must be the ones RunApply re-read and logged as "before" in the I record:
+        // anything else (another tool wrote in between) is not overwritten. Raw: an absent DelayedAutostart is not 0.
+        if (now.start != expect.start || now.delayed != expect.delayed)
+            return fail(L"refused: changed since the re-read (now Start " + std::to_wstring(now.start) + L", DelayedAutostart " +
+                        (now.delayed < 0 ? std::wstring(L"absent") : std::to_wstring(now.delayed)) + L"): nothing written");
         if (w.delayed >= 0) {
             DWORD v = (DWORD)w.delayed;
             e = RegSetValueExW(k, L"DelayedAutostart", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
@@ -435,12 +440,27 @@ public:
         }
         DWORD v = (DWORD)w.start;
         e = RegSetValueExW(k, L"Start", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
-        if (e != ERROR_SUCCESS)
-            return fail(L"RegSetValueEx(Start): " + sys::ErrorText((DWORD)e) +
-                        (w.delayed >= 0 ? L" (DelayedAutostart was already written; Undo puts it back)" : L""));
-        e = RegFlushKey(k);   // on disk before the D record says it happened
+        if (e != ERROR_SUCCESS) {
+            std::wstring t = L"RegSetValueEx(Start): " + sys::ErrorText((DWORD)e);
+            if (w.delayed >= 0) {   // put DelayedAutostart back as it was, on the same handle: nothing half-written
+                LSTATUS r2;
+                if (now.delayed < 0) {
+                    r2 = RegDeleteValueW(k, L"DelayedAutostart");   // it was absent: the value Hadron just created goes
+                } else {
+                    DWORD old = (DWORD)now.delayed;
+                    r2 = RegSetValueExW(k, L"DelayedAutostart", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&old), sizeof(old));
+                }
+                t += r2 == ERROR_SUCCESS ? std::wstring(L"; DelayedAutostart was put back as it was, so nothing changed")
+                                         : L"; DelayedAutostart could not be put back (" + sys::ErrorText((DWORD)r2) +
+                                               L"): Undo writes the value recorded before";
+            }
+            return fail(t);
+        }
+        // Flush to disk. A failed flush leaves the written values in the live hive (the service manager reads them at
+        // the next boot unless the hive write fails then too): the write counts, and the read-back decides.
+        e = RegFlushKey(k);
         RegCloseKey(k);
-        if (e != ERROR_SUCCESS) { *err = L"RegFlushKey: " + sys::ErrorText((DWORD)e) + L" (the values are written; the read-back decides)"; return false; }
+        if (e != ERROR_SUCCESS) *err = L"RegFlushKey: " + sys::ErrorText((DWORD)e) + L" (written; the read-back decides)";
         return true;
     }
 
