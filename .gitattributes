@@ -1,0 +1,4 @@
+# Goldens and fixtures are compared byte for byte, so no checkout may rewrite their line endings
+# (windows-latest's git has core.autocrlf=true, which turned LF plan goldens into CRLF).
+tests/golden/** -text
+tests/fixtures/** -text

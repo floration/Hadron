@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <aclapi.h>
+#include <shlobj.h>
 #include <sddl.h>
 #include <cstdio>
 #include <cstring>
@@ -118,10 +119,34 @@ bool WriteAll(const std::wstring& path, const std::string& data) {   // test out
 // EnsureRoot requires of every folder above a data folder (mini-analyze A1). %TEMP% sits in the user's profile, which
 // the user (a non-admin principal) may rename, so EnsureRoot refuses it; it is the fallback only where there is no
 // %SystemRoot%\Temp. No trailing backslash.
+// True when a folder's own DACL passes the data folder's ancestor test (Store::RenameAccessProblem). Some machines
+// (GitHub's windows-latest image) give BUILTIN\Users full control of %SystemRoot%\Temp, so it can't hold a test data
+// folder there: EnsureRoot rightly refuses it.
+static bool AncestorOk(const std::wstring& dir) {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (GetNamedSecurityInfoW(dir.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, nullptr,
+                              &sd) != ERROR_SUCCESS)
+        return false;
+    bool ok = Store::RenameAccessProblem(sd).empty();
+    LocalFree(sd);
+    return ok;
+}
+
 std::wstring TestTempBase() {
+    bool wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
     wchar_t win[MAX_PATH];
     UINT w = GetSystemWindowsDirectoryW(win, MAX_PATH);
-    if (w && w < MAX_PATH && DirExists(std::wstring(win) + L"\\Temp")) return std::wstring(win) + L"\\Temp";
+    if (w && w < MAX_PATH && DirExists(std::wstring(win) + L"\\Temp") && (wine || AncestorOk(std::wstring(win) + L"\\Temp")))
+        return std::wstring(win) + L"\\Temp";
+    // Else %ProgramData%, the parent of Hadron's own default data folder, which the same test must accept.
+    PWSTR pd = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &pd)) && pd) {
+        std::wstring b = pd;
+        CoTaskMemFree(pd);
+        if (DirExists(b)) return b;
+    } else if (pd) {
+        CoTaskMemFree(pd);
+    }
     wchar_t tmp[MAX_PATH];
     DWORD n = GetTempPathW(MAX_PATH, tmp);
     std::wstring base = (n && n < MAX_PATH) ? std::wstring(tmp) : L".\\";

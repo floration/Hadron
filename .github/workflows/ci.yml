@@ -196,8 +196,9 @@ jobs:
           "ok: the generated restore.cmd runs to the end on real cmd.exe"
       # The one test that writes a real service: a throwaway HadronTestSvc this step creates and deletes.
       # Hadron sets its start type, verifies, undoes and verifies (--live-test refuses any other name). The data
-      # folder goes under %SystemRoot%\Temp, not RUNNER_TEMP: every folder above it must be one only administrators
-      # can rename (store.cpp AncestorProblem), and RUNNER_TEMP belongs to the runner account.
+      # folder goes under %ProgramData%, the parent of Hadron's default data folder: every folder above it must be one
+      # only administrators can rename (store.cpp RenameAccessProblem). RUNNER_TEMP belongs to the runner account,
+      # and the hosted image gives BUILTIN\Users full control of %SystemRoot%\Temp, so both are refused.
       - name: Services live test (dummy service)
         shell: pwsh
         run: |
@@ -205,7 +206,7 @@ jobs:
           if ($LASTEXITCODE) { throw "sc.exe create failed" }
           try {
             $p = Start-Process build-svctest\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live.txt `
-              -ArgumentList '--live-test','HadronTestSvc','--data-dir',"$env:SystemRoot\Temp\hadron-live-$env:GITHUB_RUN_ID\services"
+              -ArgumentList '--live-test','HadronTestSvc','--data-dir',"$env:ProgramData\HadronCI\live-$env:GITHUB_RUN_ID\services"
             Get-Content live.txt
             if ($p.ExitCode) { throw "live test exited $($p.ExitCode)" }
           } finally {
@@ -221,7 +222,7 @@ jobs:
           if ($LASTEXITCODE) { throw "sc.exe create failed" }
           try {
             $p = Start-Process build-svctest\HadronServices.exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput live-ti.txt `
-              -ArgumentList '--live-test','HadronTestSvc','--ti','--data-dir',"$env:SystemRoot\Temp\hadron-live-ti-$env:GITHUB_RUN_ID\services"
+              -ArgumentList '--live-test','HadronTestSvc','--ti','--data-dir',"$env:ProgramData\HadronCI\live-ti-$env:GITHUB_RUN_ID\services"
             Get-Content live-ti.txt
             if ($p.ExitCode) { throw "TI live test exited $($p.ExitCode)" }
           } finally {
