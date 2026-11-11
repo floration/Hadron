@@ -128,3 +128,25 @@ write order, WaitState and the stop fallback run only in CI or on Windows.
 
 Checks: MinGW build 0 new warnings; `services_check.sh` rc 0 (genkb selftest + cmp, fixtures cmp, selftest 178/178 standalone and
 `--solo`, 8 plan goldens + delayedlinger, 12 screenshots in shared `pipeline/svcdrv/build/`). MSVC still CI-only.
+
+## Round 3: fixes for Analyze round 2 (2026-11-11)
+Analyze (d658c54) confirmed A1–A7 and sent back A8 and A9. Fixed in 28816b2 and cd4e2a6; re-run by the Build thread on clean
+default and test-hook builds.
+
+| # | Fix | Test |
+|---|---|---|
+| A8 | `MarkTi` ends with `DependencyCheck`; a TI toggle change rebuilds the plan, so the check re-runs | aaa←bbb with bbb TI-only, toggle off/on/off; user override keeps the warning; invariant over every fixture plan × toggle |
+| A9 | `DependencyCheck` detects a repeated state or the round limit and finishes with untick-only rounds, a plan note ("The dependency check did not settle") and a warning per unticked row; `BuildUndo` now runs the check | independent `DepViolation` evaluator; minimal circle; Analyze's case 53 over all 16 tick patterns; built-in fuzzer, seed 12345 (52,177 mixed + 36,803 lower-only plans, 0 violations; was 209 and 259); 30,000 extra plans with groups and toggles; Undo case |
+
+Minors fixed: offline `:put` leaves keys whose current Start is 0/1 alone and counts them; `Control` reports whether its own call
+started a service, so TI is claimed only then (start race and STOP_PENDING tested); the holding folder `%ProgramData%\Hadron` must be
+owned by Administrators, SYSTEM or TrustedInstaller; the Store test hooks exist only with the CMake option
+`HADRON_SERVICES_TEST_HOOKS` (off by default; no hook symbols in the release exe), and CI runs the services check in a separate
+flagged build folder.
+
+Behaviour to know: if `%ProgramData%\Hadron` already exists owned by a user account, Hadron turns changes off and says to rename it aside.
+
+Checks: MinGW default and flagged builds, no new warnings; `services_check.sh` on the flagged build rc 0, selftest 189/189 standalone
+and `--solo`, 8 plan goldens + delayedlinger unchanged; `restore.cmd`, `first-restore.cmd` and `restore-dryrun.cmd` goldens changed for
+the Start 0/1 skip. Still only in CI: real cmd.exe, Windows owner checks, MSVC. Still open (Design/Finalize): logic M3, M8, M12,
+load cost F3–F5, canonical URLs, UNC data dir, DACL re-apply cost.
