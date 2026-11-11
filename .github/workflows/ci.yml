@@ -6,18 +6,22 @@ on:
   pull_request:
 
 jobs:
-  # Hard rule 2: firmware is read-only. Fail if the suite source writes firmware. Scans core/,
-  # modules/ and app/ only (CLAUDE.md and the workflow name the banned APIs on purpose).
+  # Hard rule 2: firmware writes only through the guarded path in modules/bios/fwwrite.cpp. Scans
+  # core/, modules/ and app/ only (CLAUDE.md and the workflow name the APIs on purpose).
   firmware-guard:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: No firmware-write APIs in the source
         run: |
-          if grep -rnE 'SetFirmwareEnvironmentVariable|NtSetSystemEnvironmentValue' core modules app; then
-            echo "::error::firmware-write API found (hard rule 2)"; exit 1
+          # Rule 2 (2026-11-11): the one guarded write path is modules/bios/fwwrite.cpp; nowhere else.
+          if grep -rnE 'NtSetSystemEnvironmentValue|ZwSetSystemEnvironmentValue' core modules app; then
+            echo "::error::NtSetSystemEnvironmentValue found (hard rule 2)"; exit 1
           fi
-          echo "ok: no firmware-write APIs"
+          if grep -rnE 'SetFirmwareEnvironmentVariable' core modules app | grep -v '^modules/bios/fwwrite\.cpp:'; then
+            echo "::error::firmware-write API outside modules/bios/fwwrite.cpp (hard rule 2)"; exit 1
+          fi
+          echo "ok: firmware writes only in modules/bios/fwwrite.cpp"
 
   linux-mingw:
     runs-on: ubuntu-latest
@@ -161,6 +165,9 @@ jobs:
             }
           }
           build\Hadron.exe --module bios --snapshot biosfix\snap --screenshot "shots\bios-suite-baseline.png"
+          # Guarded writes: the plan overlay and value editor over a MockBackend built from the fixture.
+          build\HadronBios.exe --fixture biosfix\snap --write-demo plan --screenshot "shots\bios-write-plan.png"
+          build\HadronBios.exe --fixture biosfix\snap --write-demo edit --screenshot "shots\bios-write-edit-dark.png"
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-windows

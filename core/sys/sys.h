@@ -25,4 +25,10 @@ std::wstring ToShell(const std::wstring& path);
 // FormatMessageW for a Win32 error, trimmed. Used wherever an error is surfaced to the user.
 std::wstring ErrorText(DWORD err);
 
+// Process-wide "no firmware writes" latch (docs/design/bios-write.md "Test mode latch"). The host sets
+// it before any module code runs when the process is a test or fixture run (--selftest, --screenshot,
+// --fixture, --snapshot). It is never cleared. The firmware write path refuses every write while it is set.
+void SetNoFirmwareWrites();
+bool NoFirmwareWrites();
+
 }  // namespace hx::sys

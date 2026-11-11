@@ -1,4 +1,5 @@
 #include "core/sys/sys.h"
+#include <atomic>
 #include <vector>
 
 namespace hx::sys {
@@ -84,5 +85,12 @@ std::wstring ErrorText(DWORD err) {
     if (out.empty()) out = L"Error " + std::to_wstring(err);
     return out;
 }
+
+namespace {
+std::atomic<bool> g_noFirmwareWrites{false};
+}
+
+void SetNoFirmwareWrites() { g_noFirmwareWrites.store(true); }
+bool NoFirmwareWrites() { return g_noFirmwareWrites.load(); }
 
 }  // namespace hx::sys

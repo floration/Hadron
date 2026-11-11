@@ -1,5 +1,6 @@
 // modules/bios/firmware.cpp — see firmware.h. Read-only: UEFI variable reads, variable-name
-// enumeration and the SMBIOS table. Hard rule 2: nothing in this module writes firmware.
+// enumeration and the SMBIOS table. Hard rule 2: nothing in this file writes firmware; the one guarded
+// write path is fwwrite.cpp.
 #include "modules/bios/firmware.h"
 #include "core/sys/sys.h"
 #include <cstdio>
