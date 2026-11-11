@@ -14,6 +14,10 @@
 #   sysok (drivers: may be in a level), never (explanation only, no preset), hw (hardware hint),
 #   contested (text naming the sources on both sides with @KEYs), stock (+ stock_basis, stock_note).
 #
+# "No guidance" is a keep-the-default rating (DECISIONS.md 2026-11-11, proxy). The client-OS @IOT page is the
+# primary source: an IoT No guidance keeps an item out of Pure bloat (Stripped at most); a @WS16 No guidance alone
+# does not, but the pbasis says so. Every pbasis names a WS16 No guidance where r3 §2.2 (or kb-auditor) records one.
+#
 # hw hints: class:<DeviceClass> (any devnode of that class, present or seen before, keeps the item),
 #           svc:<service> / self (a devnode whose function driver or filter is that service), vmguest, hvhost.
 
@@ -50,8 +54,8 @@ SOURCES = {
 LABELS = {
     'IOT': 'Microsoft\'s IoT Enterprise services page',
     'WS16': 'Microsoft\'s Windows Server 2016 service guidance',
-    'VDI': 'Microsoft\'s Windows 10 2004 VDI guide',
-    'VDOT': 'Microsoft\'s VDI optimization tool',
+    'VDI': 'Microsoft\'s Windows 10 2004 VDI guide (archived)',
+    'VDOT': 'Microsoft\'s VDI optimization tool (Windows 10 20H2+ virtual desktops)',
     'VDOTREADME': 'the VDI optimization tool\'s README',
     'RTLF': 'Microsoft\'s restricted-traffic baseline',
     'PERUSER': 'Microsoft\'s per-user services page',
@@ -69,6 +73,8 @@ LABELS = {
 
 ENTRIES = []
 
+NG_WS16 = '@WS16 gives No guidance (Server 2016: leave at default).'
+
 LEVELS = ('bloat', 'stripped', 'minimum')
 
 # Reusable membership notes. Each names the sources and the OS they were written for (r3 §2.1).
@@ -77,7 +83,7 @@ P_BLOAT_IOT = ('@IOT rates it OK to disable on Windows 10/11 IoT Enterprise (a d
 P_BLOAT_IOT_VDOT = ('@IOT rates it OK to disable (Windows 10/11 IoT Enterprise) and @VDOT disables it '
                     'for virtual desktops; no Microsoft source Hadron checked says to keep it.')
 P_XBOX = ('@IOT rates it Should be disabled (Windows 10/11 IoT Enterprise) and @VDOT disables it for virtual desktops; '
-          'both assume nobody games on the device.')
+          'both are written for managed enterprise devices and virtual desktops, not gaming PCs.')
 P_STRIP_IOT = ('@IOT rates it OK to disable on Windows 10/11 IoT Enterprise, meaning useful to some devices but not all; '
                'Hadron adds it only where the hardware or use is absent.')
 P_STRIP_IOT_WS16 = ('@IOT (Windows 10/11 IoT Enterprise) and @WS16 (Windows Server 2016) both rate it OK to disable; '
@@ -96,11 +102,12 @@ def E(name, kind, title, expl, if_off='', test='', basis='reasoning', basis_note
 
 
 def iot(extra=''):
-    return '@IOT describes this service (Windows 10/11 IoT Enterprise services page).' + (' ' + extra if extra else '')
+    return ('@IOT describes this service (Windows 10/11 IoT Enterprise services page). What breaks is Hadron\'s '
+            'reasoning unless a source is named.' + (' ' + extra if extra else ''))
 
 
 # =====================================================================================================
-# Pure bloat removal (services). r3 §2.2: no Microsoft source says to keep these.
+# Pure bloat removal (services). r3 §2.2: @IOT rates each OK or Should disable, and no source rates it Do not disable.
 
 E('DiagTrack', 'svc', 'Connected User Experiences and Telemetry',
   'Collects and sends Windows diagnostic and usage data to Microsoft.',
@@ -108,16 +115,18 @@ E('DiagTrack', 'svc', 'Connected User Experiences and Telemetry',
   test='Disable, restart, use the PC as usual for a few days; check that Windows Update still runs.',
   basis='published', basis_note=iot(),
   levels={'bloat': (4, 'telemetry upload, not needed for anything on the PC itself')},
-  pbasis='published', pbasis_note=P_BLOAT_IOT_VDOT + ' @VDI lists it as a candidate on disconnected networks.')
+  pbasis='published', pbasis_note='@IOT rates it OK to disable (Windows 10/11 IoT Enterprise) and @VDOT disables it; '
+                                  + NG_WS16 + ' @VDI lists it as a candidate on disconnected networks.')
 
 E('dmwappushservice', 'svc', 'Device Management WAP Push message Routing Service',
   'Routes device-management push messages, used when a PC is enrolled in Intune or another MDM.',
   if_off='MDM enrolment and pushes stop. A home PC that is not managed by an organisation is unaffected.',
   test='Disable only if this PC is not managed by work or school (Settings > Accounts > Access work or school).',
   basis='published', basis_note='@WS16 says it is required on client devices for Intune and MDM (Windows Server 2016 page).',
-  levels={'bloat': (4, 'only used by work or school device management')},
-  pbasis='published', pbasis_note='@WS16 rates it OK to disable (Windows Server 2016) and names MDM as its only use; '
-                                  'no Microsoft source Hadron checked says to keep it on an unmanaged PC.')
+  levels={'stripped': (4, 'work or school device management; leave unticked if this PC is managed (Intune/MDM)')},
+  pbasis='published', pbasis_note='@WS16 rates it OK to disable (Windows Server 2016) and names MDM and Unified Write '
+                                  'Filter as its uses; @IOT gives No guidance (leave at default), so it is not in Pure '
+                                  'bloat removal.')
 
 E('MapsBroker', 'svc', 'Downloaded Maps Manager',
   'Lets apps reach downloaded offline maps.',
@@ -173,7 +182,8 @@ E('SEMgrSvc', 'svc', 'Payments and NFC/SE Manager',
 
 E('PhoneSvc', 'svc', 'Phone Service',
   'Manages the telephony state of the device (cellular and VoIP calling for apps).',
-  if_off='Apps that place calls through Windows telephony lose it. Discord, Teams and similar apps do their own calling.',
+  if_off='Apps that place calls through Windows telephony lose it. Many desktop VoIP apps don\'t use it (reasoning): '
+         'test your calling app.',
   basis='published', basis_note=iot(),
   levels={'bloat': (4, 'Windows telephony state for cellular or VoIP apps')},
   pbasis='published', pbasis_note=P_BLOAT_IOT + ' @WS16 also rates it OK to disable.')
@@ -301,7 +311,7 @@ E('WSearch', 'svc', 'Windows Search',
          'disabling it.',
   test='Disable, restart, and search in Start and Explorer for a while before deciding.',
   basis='published', basis_note=iot('@VDI adds a test-first note (Windows 10 2004 VDI guide).'),
-  levels={'stripped': (4, 'search indexing; use cannot be detected, untick if you search from Start or Outlook')},
+  levels={'stripped': (4, 'search indexing; leave unticked if you search from Start or Outlook')},
   pbasis='published', pbasis_note='@IOT rates it OK to disable (Windows 10/11 IoT Enterprise); @VDI lists it as a '
                                   'VDI candidate with a test-first note.')
 
@@ -309,21 +319,21 @@ E('CDPSvc', 'svc', 'Connected Devices Platform Service',
   'Connects to other devices: Phone Link, Nearby sharing, Bluetooth and Cast discovery.',
   if_off='Phone Link, Nearby sharing and cross-device features stop.',
   basis='published', basis_note=iot(),
-  levels={'stripped': (4, 'cross-device features; use cannot be detected')},
-  pbasis='published', pbasis_note=P_STRIP_IOT + ' @VDI lists it as a VDI candidate.')
+  levels={'stripped': (4, 'cross-device features (Phone Link, Nearby sharing)')},
+  pbasis='published', pbasis_note=P_STRIP_IOT + ' ' + NG_WS16 + ' @VDI lists it as a VDI candidate.')
 
 E('CDPUserSvc', 'svc', 'Connected Devices Platform User Service (per-user template)',
   'Per-user part of the Connected Devices Platform. A per-user service: Hadron changes the template.',
   if_off='Phone Link, Nearby sharing and clipboard sync stop.',
   basis='published', basis_note=iot('@PERUSER lists it as a per-user service.'),
-  levels={'stripped': (4, 'cross-device features; use cannot be detected')},
+  levels={'stripped': (4, 'cross-device features (Phone Link, Nearby sharing)')},
   pbasis='published', pbasis_note=P_STRIP_IOT_WS16)
 
 E('OneSyncSvc', 'svc', 'Sync Host (per-user template)',
   'Syncs mail, contacts, calendar and other user data. A per-user service: Hadron changes the template.',
   if_off='@VDI says Mail and other UWP apps will not work properly.',
   basis='published', basis_note=iot('@VDI states the Mail effect.'),
-  levels={'stripped': (4, 'Mail/Calendar/People sync; untick if you use those apps')},
+  levels={'stripped': (4, 'Mail/Calendar/People sync; leave unticked if you use those apps')},
   pbasis='published', pbasis_note=P_STRIP_IOT_WS16 + ' @VDI lists it as a VDI candidate.')
 
 E('PimIndexMaintenanceSvc', 'svc', 'Contact Data (per-user template)',
@@ -337,7 +347,7 @@ E('SharedAccess', 'svc', 'Internet Connection Sharing (ICS)',
   'Shares an internet connection with other devices; also used by Mobile hotspot and Miracast.',
   if_off='@WS16 says it is required for Wi-Fi hotspots and both ends of Miracast projection.',
   basis='published', basis_note='@WS16 states what needs it (Windows Server 2016 page). ' + iot(),
-  levels={'stripped': (4, 'connection sharing, hotspot and Miracast; use cannot be detected')},
+  levels={'stripped': (4, 'connection sharing, hotspot and Miracast')},
   pbasis='published', pbasis_note=P_STRIP_IOT_WS16)
 
 E('RmSvc', 'svc', 'Radio Management Service',
@@ -365,9 +375,10 @@ for _n, _t, _d in (('SensorService', 'Sensor Service', 'Manages sensors such as 
 
 E('SSDPSRV', 'svc', 'SSDP Discovery',
   'Discovers UPnP devices on the network (media players, some printers and NAS boxes).',
-  if_off='UPnP device discovery stops; network devices may not show up in Explorer\'s Network view.',
+  if_off='UPnP device discovery stops; network devices may not show up in Explorer\'s Network view. Apps or games '
+         'that use Windows\' UPnP API to open router ports can lose it; test online play.',
   basis='published', basis_note=iot(),
-  levels={'stripped': (4, 'UPnP discovery; use cannot be detected')},
+  levels={'stripped': (4, 'UPnP discovery')},
   pbasis='published', pbasis_note=P_STRIP_IOT_WS16)
 
 E('upnphost', 'svc', 'UPnP Device Host',
@@ -419,14 +430,17 @@ E('ShellHWDetection', 'svc', 'Shell Hardware Detection',
   levels={'stripped': (4, 'AutoPlay')},
   pbasis='published', pbasis_note=P_STRIP_IOT_WS16)
 
-for _n, _t, _d in (('ScDeviceEnum', 'Smart Card Device Enumeration Service', 'Creates software devices for smart cards.'),
-                   ('SCardSvr', 'Smart Card', 'Manages access to smart cards.'),
-                   ('SCPolicySvc', 'Smart Card Removal Policy', 'Locks the PC when a smart card is removed, if a policy says so.')):
+for _n, _t, _d, _w in (('ScDeviceEnum', 'Smart Card Device Enumeration Service', 'Creates software devices for smart cards.',
+                        '@WS16 also rates it OK to disable.'),
+                       ('SCardSvr', 'Smart Card', 'Manages access to smart cards.',
+                        '@WS16 lists it as Already disabled (Server 2016).'),
+                       ('SCPolicySvc', 'Smart Card Removal Policy',
+                        'Locks the PC when a smart card is removed, if a policy says so.', NG_WS16)):
     E(_n, 'svc', _t, _d,
       if_off='Smart card sign-in and smart card readers stop.',
       basis='published', basis_note=iot(),
       levels={'stripped': (4, 'smart cards; kept when a reader was ever seen')}, hw='class:SmartCardReader',
-      pbasis='published', pbasis_note=P_STRIP_IOT)
+      pbasis='published', pbasis_note=P_STRIP_IOT + ' ' + _w)
 
 for _n, _t in (('vmickvpexchange', 'Hyper-V Data Exchange Service'), ('vmicguestinterface', 'Hyper-V Guest Service Interface'),
                ('vmicshutdown', 'Hyper-V Guest Shutdown Service'), ('vmicheartbeat', 'Hyper-V Heartbeat Service'),
@@ -453,17 +467,16 @@ E('HvHost', 'svc', 'HV Host Service',
 E('RasAuto', 'svc', 'Remote Access Auto Connection Manager',
   'Dials a remote-access connection when a program asks for an address that needs one.',
   if_off='Automatic dial-up and VPN connections on demand stop; VPN apps with their own client are unaffected.',
-  basis='reasoning', basis_note='From how the Remote Access Connection Manager works; no Microsoft desktop guidance found.',
+  basis='published', basis_note=iot(),
   levels={'stripped': (4, 'dial-up and on-demand VPN connections')},
-  pbasis='reasoning', pbasis_note='Not named in the Microsoft sources Hadron checked; included because on-demand dial-up is rare '
-                                  'on a desktop. Test it if you use the built-in Windows VPN client.')
+  pbasis='published', pbasis_note=P_STRIP_IOT + ' ' + NG_WS16 + ' Test it if you use the built-in Windows VPN client.')
 
 E('RemoteAccess', 'svc', 'Routing and Remote Access',
   'Routing services for businesses on local and wide-area networks. Disabled by default on Windows 10.',
   if_off='Routing and Remote Access features stop.',
   basis='published', basis_note=iot(),
   levels={'stripped': (4, 'LAN/WAN routing for businesses')},
-  pbasis='published', pbasis_note=P_STRIP_IOT_WS16)
+  pbasis='published', pbasis_note='@IOT and @WS16 list it as Already disabled (disabled by default).')
 
 E('cphs', 'svc', 'Intel Content Protection HECI Service',
   'Intel graphics content protection (protected video playback) on Intel integrated graphics.',
@@ -479,13 +492,14 @@ E('cphs', 'svc', 'Intel Content Protection HECI Service',
 # Minimum (services): contested items Microsoft sources disagree on. Never the never-in-preset set.
 
 E('SysMain', 'svc', 'SysMain (Superfetch)',
-  'Preloads often-used programs into memory and maintains memory compression and placement.',
-  if_off='App launches can be slower on a hard disk; on an SSD the effect is small. Workload-dependent: measure it.',
-  test='Test it: time the launch of your usual apps and watch a game\'s frame times before and after, with the same '
-       'drivers and settings. Keep whichever is better.',
+  'Preloads often-used programs into memory. It also maintains memory compression and placement (reasoning: from '
+  'how Windows memory management uses it).',
+  if_off='Effect is workload-dependent and can be negative: test it.',
+  test='3 restarts each way, same drivers; time cold launches of your usual apps; capture frame times with PresentMon '
+       'or CapFrameX over the same game scene; keep whichever is better.',
   basis='published', basis_note=iot(),
   levels={'minimum': (4, 'memory preloading; contested, test it')},
-  pbasis='published', pbasis_note=P_CONTESTED,
+  pbasis='published', pbasis_note=P_CONTESTED + ' ' + NG_WS16,
   contested='@IOT rates SysMain Do not disable (Windows 10/11 IoT Enterprise); @VDOT disables it for virtual desktops '
             'and @VDI says to evaluate it in each environment.')
 
@@ -494,7 +508,7 @@ E('DPS', 'svc', 'Diagnostic Policy Service',
   if_off='Windows troubleshooters and problem detection stop.',
   basis='published', basis_note=iot(),
   levels={'minimum': (4, 'diagnostics; contested')},
-  pbasis='published', pbasis_note=P_CONTESTED,
+  pbasis='published', pbasis_note=P_CONTESTED + ' ' + NG_WS16,
   contested='@IOT rates DPS Do not disable (Windows 10/11 IoT Enterprise); @VDOT disables it for virtual desktops.')
 
 E('WdiSystemHost', 'svc', 'Diagnostic System Host',
@@ -502,17 +516,17 @@ E('WdiSystemHost', 'svc', 'Diagnostic System Host',
   if_off='System diagnostics stop.',
   basis='published', basis_note=iot(),
   levels={'minimum': (4, 'diagnostics; contested')},
-  pbasis='published', pbasis_note=P_CONTESTED,
+  pbasis='published', pbasis_note=P_CONTESTED + ' ' + NG_WS16,
   contested='@IOT rates WdiSystemHost Do not disable (Windows 10/11 IoT Enterprise); @VDOT disables it for virtual '
             'desktops.')
 
 E('WdiServiceHost', 'svc', 'Diagnostic Service Host',
   'Hosts service-level diagnostics for the Diagnostic Policy Service.',
-  if_off='Service diagnostics stop.',
-  basis='published', basis_note=iot(),
-  levels={'minimum': (4, 'diagnostics')},
-  pbasis='published', pbasis_note='@VDI lists it as a VDI candidate (Windows 10 2004 virtual desktops); not needed to '
-                                  'boot, network or play.')
+  if_off='Service-level problem detection for the Diagnostic Policy Service stops.',
+  basis='reasoning', basis_note='From its registered Windows description. @IOT, @VDI and @VDOT do not rate it and '
+                                '@WS16 gives No guidance; it hosts diagnostics for DPS, which @IOT rates Do not disable, '
+                                'so Hadron keeps it out of the presets.',
+  never=True)
 
 E('WerSvc', 'svc', 'Windows Error Reporting Service',
   'Collects crash and hang reports and sends them to Microsoft when allowed.',
@@ -544,16 +558,16 @@ E('UnistoreSvc', 'svc', 'User Data Storage (per-user template)',
   if_off='Mail, Calendar and People lose their data store.',
   basis='published', basis_note=iot(),
   levels={'minimum': (4, 'user data store for the Mail, Calendar and People apps')},
-  pbasis='published', pbasis_note='@IOT rates it OK to disable (Windows 10/11 IoT Enterprise); @VDI lists the user-data '
-                                  'services as VDI candidates.')
+  pbasis='published', pbasis_note='@IOT rates it OK to disable (Windows 10/11 IoT Enterprise); @PERUSER warns that '
+                                  'dependent apps might not work correctly and says to test changes.')
 
 E('UserDataSvc', 'svc', 'User Data Access (per-user template)',
   'Gives apps access to structured user data. A per-user service: Hadron changes the template.',
   if_off='Apps lose access to contacts, calendars and messages.',
   basis='published', basis_note=iot(),
   levels={'minimum': (4, 'user data access for the Mail, Calendar and People apps')},
-  pbasis='published', pbasis_note='@IOT rates it OK to disable (Windows 10/11 IoT Enterprise); @VDI lists the user-data '
-                                  'services as VDI candidates.')
+  pbasis='published', pbasis_note='@IOT rates it OK to disable (Windows 10/11 IoT Enterprise); @PERUSER warns that '
+                                  'dependent apps might not work correctly and says to test changes.')
 
 E('NcbService', 'svc', 'Network Connection Broker',
   'Brokers network connections for Store apps that need to be woken by network traffic.',
@@ -568,7 +582,7 @@ E('dot3svc', 'svc', 'Wired AutoConfig',
   if_off='Wired networks that require port authentication refuse the connection. A home router does not use it.',
   basis='published', basis_note=iot('@IOT notes that wired port authentication needs it.'),
   levels={'minimum': (4, 'wired port authentication; home networks do not use it')},
-  pbasis='published', pbasis_note='@IOT rates it OK to disable (Windows 10/11 IoT Enterprise).')
+  pbasis='published', pbasis_note='@IOT rates it OK to disable (Windows 10/11 IoT Enterprise). ' + NG_WS16)
 
 # =====================================================================================================
 # Drivers with a preset level (sysok): the hardware-absent cases. PnP loads a driver only for devices it finds, and
@@ -624,8 +638,8 @@ E('luafv', 'drv', 'UAC file virtualization',
   test='Test it: run your older games and tools (especially ones that save settings next to their exe) after a restart.',
   basis='reasoning', basis_note='From how User Account Control virtualization works; no Microsoft desktop guidance found.',
   levels={'minimum': (4, 'only old programs without a manifest need it; test it')}, sysok=True,
-  pbasis='reasoning', pbasis_note='Not named in the Microsoft sources Hadron checked; programs built for Windows Vista or later do '
-                                  'not use it.')
+  pbasis='reasoning', pbasis_note='Not named in the Microsoft sources Hadron checked. Programs with a UAC manifest, '
+                                  '64-bit programs and programs run as administrator are never virtualized.')
 
 # =====================================================================================================
 # Explanation-only entries (never in a preset). Why each stays on, with the source.
@@ -636,46 +650,58 @@ def keep(name, title, expl, why, basis='published', note='', kind='svc'):
 
 keep('TabletInputService', 'Touch Keyboard and Handwriting Panel Service',
      'Touch keyboard, handwriting and some input-method (IME) features.',
-     'The touch keyboard and some IMEs stop. @WS16 rates it Do not disable when Desktop Experience is installed.',
+     '@IOT rates it OK to disable; Hadron keeps it because the touch keyboard and some IMEs stop without it '
+     '(reasoning), and @WS16 rates it Do not disable when Desktop Experience is installed.',
      note=iot('@WS16 gives the Do not disable rating (Windows Server 2016).'))
 keep('WpnService', 'Windows Push Notifications System Service', 'Delivers push notifications to apps and the Action Center.',
      'Notifications stop. @IOT rates it Do not disable.', note=iot())
 keep('wlidsvc', 'Microsoft Account Sign-in Assistant', 'Signs in with a Microsoft account.',
-     '@RTLF warns that without it Windows Update stops offering feature updates and apps that need a Microsoft account '
-     'break, which includes the Xbox app and Game Pass.',
+     'Without it Windows Update stops offering feature updates, and apps that need a Microsoft account may lose '
+     'functionality (@RTLF). The Xbox app and Game Pass sign in with a Microsoft account (reasoning).',
      note='@RTLF (Windows 10/11 Enterprise privacy baseline).')
 keep('LicenseManager', 'Windows License Manager Service', 'Licensing for Microsoft Store apps.',
-     'Store apps and games can fail their licence check.', note=iot('@RTLF disables it only in its privacy baseline.'))
+     '@IOT rates it OK to disable; Hadron keeps it because Store apps and games check their licence through it '
+     '(reasoning). @RTLF disables it only in its privacy baseline.',
+     note=iot('@RTLF disables it only in its privacy baseline.'))
 keep('CaptureService', 'CaptureService (per-user template)', 'Screen capture for apps through Windows.Graphics.Capture.',
-     'Screen capture in Snipping Tool and in OBS\'s Windows capture mode can break.',
+     '@IOT rates it OK to disable; Hadron keeps it because apps that use Windows.Graphics.Capture (e.g. OBS\'s '
+     '\'Windows 10 (1903 and up)\' capture method) can lose optional capture features; test it.',
      basis='reasoning', note='@VDI lists it as a VDI candidate and names the Windows.Graphics.Capture API; the effect on '
                               'capture tools is inferred from that.')
 keep('NgcSvc', 'Microsoft Passport', 'Windows Hello and PIN sign-in keys.',
-     'PIN and Windows Hello sign-in stop. @WS16 rates it OK only because Windows Server does not support Windows Hello.',
+     '@IOT rates it OK to disable; Hadron keeps it because PIN and Windows Hello sign-in stop without it (reasoning). '
+     '@WS16 rates it OK only because Windows Server does not support Windows Hello.',
      note='@WS16 (Windows Server 2016 page).')
 keep('defragsvc', 'Optimize drives', 'Scheduled drive optimisation, which on an SSD sends TRIM (retrim).',
-     'Scheduled TRIM through Optimize Drives stops.',
-     basis='reasoning', note='How Optimize Drives treats SSDs; @VDI only suggests it for virtual desktops.')
+     '@IOT rates it OK to disable; Hadron keeps it because scheduled TRIM through Optimize Drives stops without it '
+     '(reasoning).',
+     basis='reasoning', note='How Optimize Drives treats SSDs; @IOT gives the rating and @VDI only suggests it for '
+                             'virtual desktops.')
 keep('WlanSvc', 'WLAN AutoConfig', 'Wi-Fi.', '@IOT says disabling it is not recommended if the computer has a WLAN '
      'adapter.', note=iot())
-keep('wuauserv', 'Windows Update', 'Windows Update.', '@RTLF says Microsoft does not recommend disabling Windows Update; '
-     'with it off Windows Update fails with error 0x80070422 (@WUERR).', note='@RTLF and @WUERR.')
+keep('wuauserv', 'Windows Update', 'Windows Update.', '@IOT rates it OK to disable; Hadron keeps it because @RTLF says '
+     'Microsoft does not recommend disabling Windows Update, and with it off Windows Update fails with error 0x80070422 '
+     '(@WUERR).', note='@IOT, @RTLF and @WUERR.')
 keep('UsoSvc', 'Update Orchestrator Service', 'Schedules and runs Windows Update scans and installs.',
      '@WS16 and @IOT say Windows Update depends on it.', note=iot())
 keep('WaaSMedicSvc', 'Windows Update Medic Service', 'Repairs Windows Update components.',
-     '@IOT rates it Do not disable; Windows also refuses the write to administrators.', note=iot())
+     '@IOT rates it Do not disable. Windows may refuse this write to administrators; Hadron checks it live and marks '
+     'the row.', note=iot())
 keep('InstallService', 'Microsoft Store Install Service', 'Installs and updates Store apps.',
-     '@VDOTREADME warns that without it the Store cannot update apps and their dependencies.',
-     note='@VDOTREADME (Microsoft VDI team tool).')
+     '@IOT rates it OK to disable; Hadron keeps it because @VDOTREADME warns that without it the Store cannot update '
+     'apps and their dependencies.',
+     note='@IOT and @VDOTREADME (Microsoft VDI team tool).')
 keep('TrustedInstaller', 'Windows Modules Installer', 'Installs and removes Windows updates and optional components.',
      'Windows updates and optional features stop installing, and Hadron\'s TrustedInstaller toggle needs it. @IOT rates '
      'it Do not disable.', note=iot())
 keep('VSS', 'Volume Shadow Copy', 'Shadow copies, which System Restore uses.',
-     'System Restore points stop. @REGBACK makes System Restore the recovery path for the registry.',
+     '@IOT rates it OK to disable; Hadron keeps it because System Restore needs it, and restore points are '
+     'Microsoft\'s registry recovery path (@REGBACK).',
      note=iot('@REGBACK states the recovery role.'))
 keep('WinDefend', 'Microsoft Defender Antivirus Service', 'Microsoft Defender Antivirus.',
-     '@DEFCOMPAT says not to disable, stop or modify the Defender services; @TAMPER blocks changes; @PROTSVC: a '
-     'protected service can only be reconfigured by itself.', note='@DEFCOMPAT, @TAMPER and @PROTSVC.')
+     '@DEFCOMPAT says not to disable, stop or modify the Defender services. When Tamper Protection is on, it blocks '
+     'registry changes to Defender Antivirus settings (@TAMPER). @PROTSVC: a protected service can only be '
+     'reconfigured by itself.', note='@DEFCOMPAT, @TAMPER and @PROTSVC.')
 keep('SecurityHealthService', 'Windows Security Service', 'Windows Security app and health reporting.',
      '@DEFCOMPAT names SecurityHealthService among the services not to disable.', note='@DEFCOMPAT.')
 keep('wscsvc', 'Security Center', 'Tracks antivirus and firewall status.',
@@ -685,8 +711,11 @@ keep('BrokerInfrastructure', 'Background Tasks Infrastructure Service', 'Runs ba
      '@STARTMENU: the Start menu is unstable when it is not running.', note='@STARTMENU.')
 
 # Drivers, explanation only.
-keep('WdFilter', 'Defender mini-filter', 'Defender\'s file-system filter.', '@DEFCOMPAT: Defender components are not to '
-     'be disabled.', note='@DEFCOMPAT.', kind='drv')
+keep('WdFilter', 'Defender mini-filter', 'Defender Antivirus\'s file-system minifilter.',
+     'Defender Antivirus\'s file-system minifilter. @DEFCOMPAT says not to disable or modify the services Defender uses; '
+     'this driver is part of that stack (reasoning).',
+     basis='reasoning', note='@DEFCOMPAT names the Defender services; that the minifilter belongs to the same stack is '
+                             'reasoning.', kind='drv')
 keep('CldFlt', 'Cloud Files filter', 'File-system filter for OneDrive Files On-Demand and other cloud files.',
      'Cloud placeholders stop opening.', basis='reasoning', note='From its filter role.', kind='drv')
 keep('intelppm', 'Intel processor power driver', 'Processor power management (idle states and frequency).',
