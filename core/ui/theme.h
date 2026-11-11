@@ -40,6 +40,13 @@ COLORREF      FallbackAccent(ThemeId id);     // the theme's own accent for the 
 bool     IsAchromatic(COLORREF c);            // grey/black/white: low saturation or extreme lightness
 COLORREF RotateHue(COLORREF c, double degrees);
 
+// WCAG 2 contrast ratio of two colours (1..21), from sRGB relative luminance.
+double   Contrast(COLORREF a, COLORREF b);
+// Text on a filled control (a selection, an accent button, a chip): `light` while it reaches 4.5:1 on the fill
+// (to one decimal, so >= 4.45: white on Windows' default blue 0078D7 is 4.50), else whichever of light and dark
+// contrasts more. One rule for every module, so the suite agrees with itself on any Windows accent.
+COLORREF OnFill(COLORREF fill, COLORREF light = RGB(255, 255, 255), COLORREF dark = RGB(0, 0, 0));
+
 // The live Windows accent colour. Sets *achromatic when it is grey/black/white or can't be read
 // (e.g. under Wine), so the caller knows to use FallbackAccent. Reads the DWM accent, then the
 // colorization colour, then DwmGetColorizationColor.
