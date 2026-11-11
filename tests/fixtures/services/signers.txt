@@ -90,6 +90,7 @@ G	WdNisSvc	signed	Microsoft Windows
 G	SecurityHealthService	signed	Microsoft Windows	
 G	wscsvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
 G	BrokerInfrastructure	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
+G	TimeBrokerSvc	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
 G	RpcSs	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
 G	RpcEptMapper	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
 G	DcomLaunch	catalog	Microsoft Windows	catalog Microsoft-Windows-Client-Features-Package.cat
