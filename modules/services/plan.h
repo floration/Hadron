@@ -44,6 +44,9 @@ struct Guard {
 };
 Guard CheckGuard(const SvcItem& s, const Ctx& c);
 bool IsStorageDriver(const std::wstring& name);   // never given a Windows-stock value (spec §0.5)
+// The named never-in-preset set (Defender/Security, TrustedInstaller, VSS, the file-system filters Store apps and cloud
+// files sit on): the registry fallback never writes them either.
+bool IsNamedNeverPreset(const std::wstring& name);
 
 // An item's Windows-stock value (fix/svcdrv-stock; DECISIONS 2026-11-11, owner). This PC's own WinSxS manifests come
 // first (owner-measured, read on this PC), cross-checked with the KB's value (two agreeing third-party tables, a
@@ -79,6 +82,11 @@ struct PlanRow {
     bool depUnticked = false;          // DependencyCheck unticked it (ticked again when the reason goes)
     bool depKept = false;              // the user ticked it while it had a dependency warning: never unticked by the check
     bool needsTi = false;
+    // Registry fallback (regfallback.h): the SCM refused this write and the per-apply toggle is on, or this row undoes
+    // or resumes a registry write. Written to the service key directly; identity "reg" in the undo log.
+    bool viaReg = false;
+    std::wstring regNote;              // the plan's own line for it ("SCM refused; will write registry Start directly, ...")
+    std::wstring regRefused;           // toggle on, but this row may not use it: why (shown with its TI warning)
     int seq = 0;                       // undo/resume: the original log sequence
     Op ctl = Op::Stop;                 // control plans: the operation for this row
 };
@@ -179,6 +187,11 @@ struct ApplyEnv {
     // R12: every plan but an Undo is refused while the data folder has no first.txt (it failed to write, or was
     // removed): a change with no record of the state before Hadron is never made. The selftest's fixtures turn it off.
     bool requireFirst = true;
+    // The registry fallback's per-apply toggle (never persisted): rows marked viaReg are written only while it is on.
+    bool regFallbackOn = false;
+    // The guards' context for the registry rows' re-check at write time (never-touch, boot path); null skips that part
+    // (the live item's protection and Boot/System start are re-checked regardless).
+    const Ctx* ctx = nullptr;
 };
 
 struct ApplyResult {

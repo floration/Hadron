@@ -32,9 +32,12 @@ disagree, the spec wins.
 |---|---|
 | `model.*` | Pure data: `SvcItem`, `StartCfg` (start + delayed, where delayed is -1 when absent), names, image paths, folding |
 | `kb.*` | Loads the embedded `services.db` (RCDATA `SERVICES_KB`) |
-| `hw.*` | Hardware evidence. The pure part reads a dump; the live part uses CfgMgr32 over every devnode, present or not |
+| `hw.*` | Hardware evidence. The pure part reads a dump; the live part uses CfgMgr32 over every devnode, present or not, with its last-arrival date, and SetupAPI for the devices of each device-interface class a service's arrival trigger names (`AddLiveIfaceEvidence`). `HwEvidenceEx` / `IfaceEvidence` may only keep more |
+| `evidence.*` | Read-only evidence: the Authenticode signer of an item's file (`ReadSigner`, offline, cached) and the System log's event 7040 (`ReadLive7040`, `ParseEvent7040`), plus their fixture formats |
+| `evidence_view.*` | The page's two evidence Worker passes (signer, event 7040), so `module.cpp` holds one member and a few hooks |
+| `regfallback.*` | The registry fallback's planning side: `RegRowRefusal`, `MarkRegFallback`, the plan lines; the write is `RunApply`'s through `Backend::WriteRegStart` |
 | `backend.h` | The `Backend` interface: Enumerate, Query, CanWrite, SetStart, Control, Arm/Disarm |
-| `backend_live.cpp` | **The only file that writes to the SCM.** Every write refuses until `Arm()` |
+| `backend_live.cpp` | **The only file that writes to the SCM or the registry** (`WriteRegStart`, the registry fallback). Every write refuses until `Arm()` |
 | `backend_fake.cpp` | In-memory backend for the selftest, `--dump-plan` and screenshots. Supports fault injection |
 | `store.*` | The data dir, the snapshot and undo-log formats, `CREATE_NEW` writers, the apply lock |
 | `recovery.*` | `restore.cmd`, `restore-online.cmd`, `README.txt` and `.reg` files, plus a stored-only zip writer |
@@ -44,9 +47,10 @@ disagree, the spec wins.
 | `measure.*` | Measurements: `TakeMeasurement` (GlobalMemoryStatusEx and a Toolhelp32 walk), the `measure` record, the `measure\` store and before/after pairing |
 | `module.cpp` | The UI (`hx::Module`) |
 | `selftest.cpp`, `cli.h` | `--selftest`, `--dump-plan` and `--live-test` |
+| `selftest_evidence.*` | The selftest part for follow-ups 6-9 (signer, 7040, interface evidence, registry fallback), on the fake backend |
 | `standalone.cpp` | `HadronServices.exe`. Intercepts `--dump-plan` and `--live-test` before the GUI starts |
 | `tools/services/kb.py`, `genkb.py` | The KB source and the rule-7 gate (see `tools/services/README.md`) |
-| `tests/fixtures/services/` | The fixture machine (`make_services_fixture.py` writes it; CI compares) |
+| `tests/fixtures/services/` | The fixture machine (`make_services_fixture.py` writes it; CI compares), with `signers.txt`, `events7040.txt`, `sxs\`, `presets\`, `measure\` and `import\` |
 | `tests/golden/services/` | 10 plan goldens (`plan-<services\|drivers>-<default\|bloat\|stripped\|minimum\|stock>.txt`), `plan-services-default-delayedlinger.txt`, `plan-services-custom.txt` (the fixture's "Gaming rig"), `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt` |
 
 ## Formats
@@ -77,13 +81,15 @@ B  stamp source count machine build order  begin; source = preset:<lvl>:<tab> | 
                                           default-stock:<tab> | undo:<stamp> | resume:<stamp> |
                                           dismiss:<stamp> | ti-resolved:<stamp>
 P  seq name start before after identity  every plan row, written before any change; the 4th field is the
-                                          literal word `start`; identity is `ti` or `admin` (planned)
+                                          literal word `start`; identity is `ti`, `admin` or `reg` (planned;
+                                          `reg` = the registry fallback)
 T  starting                              flushed BEFORE Hadron may start the TrustedInstaller service (R22)
 T  started pid pstart                    Hadron's own request started it: its pid and process creation time
 T  notstarted                            it was running already, or someone else started it: not Hadron's
 T  stopped | stopfailed text             Hadron stopped it again / could not (with the reason)
-I  seq observed identity                 flushed BEFORE the SCM call; identity is the planned `ti|admin`,
-                                          not a verified one
+I  seq observed identity                 flushed BEFORE the SCM call (or the registry write); identity is the
+                                          planned `ti|admin|reg`, not a verified one. For `reg`, observed is the
+                                          key's own Start/DelayedAutostart read just before
 D  seq ok|skip|fail afterObserved text   flushed after the call and a re-read; on `ok` the text is the
                                           identity the write ran as, otherwise the reason
 N  text                                  a resolution record: what happened, in words
@@ -123,6 +129,16 @@ E  stamp ok skipped failed done|cancelled
 
 **hw dump** (fixture `hw.txt`, kind `hw`): devnodes with class, service, filters, the present flag and the
 parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
+- `N` lines may carry a 10th field, the devnode's last-arrival date (`DEVPKEY_Device_LastArrivalDate`, a UTC
+  FILETIME in hex); a node without one keeps 9 fields.
+- `I guid`: a device-interface class with a device present now. `F guid devId`: a device (present or not) that
+  registered an interface of that class; written in that order (V, B, C, I, F, N), so a dump round-trips.
+
+**Signers** (fixture `signers.txt`, kind `signers`): `G name state subject detail`, state one of `signed`,
+`catalog`, `unsigned`, `untrusted`, `cantcheck`. Live data never goes to a file.
+
+**Events** (fixture `events7040.txt`, kind `events`): `A sid account` (how the fixture resolves a SID) and
+`E <event XML>` (one rendered System-log event per line, bios-escaped).
 
 **Custom preset** (`presets\<yyyyMMdd-HHmmss>.txt`, and every export/import file). Its own format, because the user
 edits and shares it, so it has no escaping and a strict reader (`custom.cpp`, `ParsePreset`):
@@ -161,9 +177,10 @@ name<TAB><preset name>
   after" is offered only when the newest before was taken before the current boot.
 
 ## Safety mechanics (hard rules 1, 4 and 5; spec §5)
-- **Write path.** `ChangeServiceConfigW` and `ChangeServiceConfig2W` (delayed flag), `StartServiceW` and
-  `ControlServiceExW` appear only in `backend_live.cpp`. Each refuses until `Arm()`. A stop whose reason code
-  `ControlServiceExW` refuses (`ERROR_INVALID_PARAMETER`) is retried with plain `ControlService`.
+- **Write path.** `ChangeServiceConfigW` and `ChangeServiceConfig2W` (delayed flag), `StartServiceW`,
+  `ControlServiceExW` and `RegSetValueExW` (the registry fallback) appear only in `backend_live.cpp`. Each refuses
+  until `Arm()`. A stop whose reason code `ControlServiceExW` refuses (`ERROR_INVALID_PARAMETER`) is retried with
+  plain `ControlService`.
   - The UI arms the backend after the user confirms a plan, and disarms it when the apply ends.
   - Selftest and screenshot modes use the fake backend.
   - CI fails on `DeleteService`, `CreateService`, `RegDeleteKey`, `RegDeleteTree` or a firmware-write API under
@@ -217,6 +234,52 @@ name<TAB><preset name>
 
   Undo and Resume rows pass the same guards on the live item (a log has a CRC, not an author): never-touch
   items, Boot start, Boot/System on a service and a System-start driver without `sysok` are blocked.
+- **Registry fallback** (follow-up 9; `regfallback.*`, `RunApply`, `backend_live.cpp` `WriteRegStart`). For start
+  types the SCM refuses to administrators (`CanWrite` denied, e.g. a service whose security descriptor withholds
+  `SERVICE_CHANGE_CONFIG`):
+  - Off by default, behind the plan screen's "Registry fallback" switch (Console F9; F7 and F8 are Save as preset and Measure before). The switch is per apply: never
+    persisted, off at every launch, and off again when the plan closes or an apply ends. It is shown only on a plan
+    with rows the SCM refuses (or registry rows to undo). With the TrustedInstaller toggle on, TI's SCM write is used
+    instead.
+  - Each such row gets its own plan line: "SCM refused; will write registry Start directly, takes effect after
+    restart". Nothing is written until Apply.
+  - Never for: a per-user instance, an item whose configuration can't be read, never-touch items (`CheckGuard`: the
+    floor, the boot path, filters, Critical, Boot start), launch-protected services (`protect != 0`, read again from
+    the SCM inside `WriteRegStart`, failing closed), the named never-preset set (Defender/Security, TrustedInstaller,
+    VSS, swprv, the file-system filters), Boot/System-start drivers, a service whose registry Start is Boot or System,
+    a Boot or System target, a key with no `Start` value, and a key whose Start already differs from the SCM's (a
+    change waiting for a restart). `RegRowRefusal` is checked when the plan is built and again on the live item at
+    write time.
+  - Same apply order as an SCM row: the pre-apply snapshot, recovery folder and zip, `B` and every `P` (identity
+    `reg`) are written first. Per row: the key's Start and DelayedAutostart are read again right before the write and
+    the row is skipped if they differ from the plan's "now"; the `I` record with those old values is written and
+    flushed (`FlushFileBuffers`); then `WriteRegStart`; then the key is read back, and anything other than what was
+    written is a `D fail` ("Undo puts back the value recorded before"). There is no automatic rollback, as for an SCM
+    row.
+  - `WriteRegStart(name, op, expect)`: the launch-protection check through the SCM first, then the key is opened and
+    its values are read again under the write handle; unless they are exactly `expect` (the values logged in the `I`
+    record; raw, so an absent DelayedAutostart is not 0) it refuses, "changed since the re-read", writing nothing.
+    Then DelayedAutostart (when the op sets it) and `Start`, `REG_DWORD`. If `Start` fails after DelayedAutostart was
+    written, DelayedAutostart is put back on the same handle (deleted with `RegDeleteValueW` when it was absent before,
+    the only value delete in Hadron). Then `RegFlushKey`; a failed flush is noted in the `D` text and the write still
+    counts, because the values are in the live hive and the read-back decides.
+  - `WriteRegStart` opens `HKLM\SYSTEM\ControlSet00N\Services\<name>` (N from `Select\Current`, not through the
+    `CurrentControlSet` link) with `REG_OPTION_OPEN_LINK`, refuses a key with a `SymbolicLinkValue` (a link is a
+    leaf), a name with `\` or `/`. It never creates a key or a `Start` value; DelayedAutostart may be created (as 0
+    when Undo restores an absent one, which has the same effect, or as the planned value).
+  - "Takes effect after restart" is reasoning (the service manager reads `Start` when Windows starts), not tested:
+    the plan note, the banner and the row detail say so, and to check it after a restart (Windows Update Medic can put
+    some of these back).
+  - Undo and Resume of a `reg` row go back through the registry, read "now" from the key, and need the switch on too
+    (left out with a note while it is off). Drift on the list is judged against the registry Start for an item whose
+    last write was a registry write, until a restart makes the SCM agree.
+  - The selftest exercises all of it on the fake backend only (its in-memory registry); the one live call is an
+    unarmed `WriteRegStart`, refused before the registry is opened.
+- **Signer and event 7040 are read only.** The signer pass opens each file with
+  `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS` only after its path passed the Company lookup's
+  checks (a local drive, not a network drive, no reparse point on the path, no `RECALL_ON_DATA_ACCESS`,
+  `RECALL_ON_OPEN` or `OFFLINE`), checks the attributes again on the handle, and verifies with `WTD_REVOKE_NONE` and
+  `WTD_CACHE_ONLY_URL_RETRIEVAL` (no network). The event pass is `EvtQuery` on the System log, newest first.
 
   An item whose configuration could not be read (R2) is shown as "unknown (could not be read)", never as a start
   type, and is in no plan: every guard refuses it, Default skips it with a note, and the first-run recovery leaves
@@ -437,14 +500,14 @@ name<TAB><preset name>
   - The basis reads "owner-measured (measured on this PC by you)".
 
 ## Deviations from the spec
-- **Hardware evidence is devnode-based only** (spec §5.5; Analyze docs D3; DECISIONS.md, proxy). Two things the
-  research named are not done in this run:
-  - services are not mapped to hardware through their device-interface triggers (`ifaces` is read and shown but
-    not used as evidence);
-  - the devnode last-arrival date is not read, so "seen before" has no age.
-
-  Both only make the evidence less specific: a hardware-bound KB entry still needs a devnode hint, and
-  present or phantom hardware still keeps the item. Follow-up idea.
+- **Hardware evidence** (spec §5.5; Analyze docs D3; DECISIONS.md, proxy). The devnode-only deviation is closed by
+  follow-up 8 (docs/pipeline/fixes/svcdrv-evidence.md):
+  - a service's device-interface arrival triggers (`SERVICE_TRIGGER_TYPE_DEVICE_INTERFACE_ARRIVAL`, the `ifaces`
+    field) are mapped to the devices that registered that interface class (SetupAPI, present or not). A match keeps
+    the item: a hinted row the hint alone would offer, and a Stripped/Minimum row with no hint whose use "cannot be
+    detected". It never frees a row;
+  - the devnode last-arrival date (`DEVPKEY_Device_LastArrivalDate`) is read and shown with "present" and "seen
+    before" ("last arrived 2026-03-02"). It is text only: an old date never loosens a keep.
 - **TrustedInstaller is started before the token work** (2-research §B6 lists SeDebug, impersonate SYSTEM, then
   start TI). Hadron starts TI through the `Backend` as the administrator first, then enables SeDebugPrivilege and
   impersonates SYSTEM only to duplicate TI's token (reasoning: starting a service through the SCM needs no SYSTEM
@@ -471,6 +534,7 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 | `--save <name>` | module | With `--plan`: open the "save ticks as custom preset" form with that name typed (fixture mode refuses the write) |
 | `--measure` | module | Open the measure page (the fixture's `measure\` pair) |
 | `--ti on` | module | Start with the TrustedInstaller toggle on (fixture renders only; live it is off at every launch) |
+| `--regfallback on` | module | Start with the registry fallback switch on (fixture renders only; live it is off at every launch and after every apply) |
 | `--data-dir <dir>` | module, `--live-test` | Use another data folder instead of `%ProgramData%\Hadron\services\` |
 | `--readonly` | module | Never arm the backend. Without `--data-dir` it opens the default data folder read-only, so the first-run snapshot, undo logs and interrupted banner still show |
 | `--selftest [--update-golden] [--golden <dir>]` | selftest | Run the selftest. `--golden` points at another golden folder (default `<fixture>\..\..\golden\services`); `--update-golden` rewrites every golden it compares instead of comparing |

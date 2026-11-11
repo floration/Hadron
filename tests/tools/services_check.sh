@@ -22,7 +22,7 @@ echo "ok: services.db is what genkb.py generates"
 
 echo "== fixture"
 python3 -I "$HERE/tests/fixtures/services/make_services_fixture.py" "$TMP/fix" > /dev/null
-for f in snapshot.txt hw.txt first.txt interrupted/snapshot.txt interrupted/hw.txt interrupted/first.txt \
+for f in snapshot.txt hw.txt first.txt signers.txt events7040.txt interrupted/snapshot.txt interrupted/hw.txt interrupted/first.txt \
          interrupted/undo-20261110-213012.log delayedlinger/snapshot.txt delayedlinger/hw.txt delayedlinger/first.txt \
          forged/snapshot.txt forged/hw.txt forged/first.txt forged/undo-20261110-210000.log \
          multi/snapshot.txt multi/hw.txt multi/first.txt multi/undo-20261110-210000.log multi/undo-20261110-220000.log; do
@@ -80,6 +80,16 @@ shot services-console-plan "$S" --fixture "$FIX" --layout console --plan strippe
 shot services-console-keys "$S" --fixture "$FIX" --layout console --keys F1
 shot services-console-f9 "$S" --fixture "$FIX" --layout console --theme light --keys F2,F9
 shot services-console-suite "$BUILD/Hadron.exe" --module services --fixture "$FIX" --layout console --select DiagTrack
+# Follow-ups 6-9 (docs/pipeline/fixes/svcdrv-evidence.md): the Signer column (sorted by it), the drift detail with event
+# 7040, interface evidence on the plan, and the registry fallback's plan line. --regfallback on is fixture-only.
+shot services-signer "$S" --fixture "$FIX" --sort signer --select ExampleAudioFlt --tab drivers
+shot services-signer-svc "$S" --fixture "$FIX" --sort signer:desc --select ExampleUpdater
+shot services-drift-7040 "$S" --fixture "$FIX" --select DiagTrack
+shot services-iface-evidence "$S" --fixture "$FIX" --plan stripped --select FrameServer
+shot services-regfallback-plan "$S" --fixture "$FIX" --plan stripped --regfallback on --select dmwappushservice
+shot services-console-signer "$S" --fixture "$FIX" --layout console --sort signer --select ExampleUpdater
+shot services-console-drift-7040 "$S" --fixture "$FIX" --layout console --select XblGameSave
+shot services-console-regfallback-plan "$S" --fixture "$FIX" --layout console --plan stripped --regfallback on --select dmwappushservice
 # Custom presets and measured before/after (docs/pipeline/fixes/svcdrv-presets.md); fixture mode writes nothing.
 for L in baseline console; do
     shot services-presets-$L "$S" --fixture "$FIX" --layout $L --presets

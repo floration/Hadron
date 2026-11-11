@@ -1,6 +1,7 @@
 // modules/services/plan.cpp — guards, plan building and the apply engine (spec §5.3, §5.4, §6).
 #include "modules/services/plan.h"
 #include "modules/services/recovery.h"
+#include "modules/services/regfallback.h"
 #include "core/sys/sys.h"
 #include <algorithm>
 #include <functional>
@@ -155,6 +156,8 @@ bool IsStorageDriver(const std::wstring& name) {
     return false;
 }
 
+bool IsNamedNeverPreset(const std::wstring& name) { return Lookup(NeverPreset(), Lower(name)) != nullptr; }
+
 void Ctx::Prepare() {
     filters.clear();
     bootChain.clear();
@@ -259,13 +262,19 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
             r.blocked = kSysStartKept;
         else if (r.driver && !e->sysok)
             r.blocked = kDriverKept;
+        std::wstring iev;   // device-interface trigger evidence (follow-up 8): it can only keep a row, never free one
         if (r.blocked.empty() && !e->hw.empty()) {
             std::wstring ev;
-            int h = c.hw ? HwEvidence(*c.hw, e->hw, s.name, &ev) : 0;
+            int h = c.hw ? HwEvidenceEx(*c.hw, e->hw, s, &ev) : 0;
             if (!c.hw) ev = L"no hardware information: kept";
             r.evidence = ev;
             if (h == 0) r.blocked = L"Kept: hardware in use or seen before. " + ev;
             else if (h == 2) r.include = false;
+        } else if (r.blocked.empty() && e->JoinLevel() == LV_STRIPPED && c.hw && IfaceEvidence(*c.hw, s, &iev) == 0) {
+            // Use was "not detectable" without a hint, but a device-interface trigger names hardware that is here or
+            // was here: Windows would start the item for it, so it is kept like a hinted row.
+            r.evidence = iev;
+            r.blocked = L"Kept: hardware in use or seen before. " + iev;
         } else if (r.blocked.empty() && e->JoinLevel() == LV_STRIPPED) {
             // Spec 5.3: Stripped applies only where hardware or use is absent with evidence shown. Use without a
             // hardware hint cannot be detected, so at Stripped the row is offered unticked, like a hot-plug class.
@@ -800,6 +809,11 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items
     for (auto& t : rows) {
         const UndoRow& u0 = t.oldest;   // what to restore: the value before Hadron's first write in the chain
         const UndoRow& u = t.newest;    // Hadron's last write, for the reason and the drift check
+        // A registry-fallback write is undone through the registry too (regfallback.h): until a restart the service
+        // manager still reports the old start type, so "now" is the key's own value.
+        bool viaReg = false;
+        for (auto* l : all)
+            for (auto& x : l->rows) if (x.hasI && IEq(x.name, u.name) && IsRegRow(x)) viaReg = true;
         PlanRow r;
         r.name = u.name; r.seq = u.seq; r.after = u0.before;
         r.reason = u.hasD ? L"undo: Hadron set it to " + StartLabel(u.after, false) : L"undo: interrupted during the write";
@@ -813,18 +827,36 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items
             continue;
         }
         r.display = live.display; r.driver = IsDriverType(live.type); r.deps = live.deps; r.group = live.group;
-        r.before = live.cfg;
-        if (SameStart(live.cfg, u0.before)) { p.alreadySet++; continue; }
-        r.op = OpTo(live.cfg, u0.before);
-        r.after = AfterOf(live.cfg, r.op);
+        StartCfg now = live.cfg;
+        RegStartVals rv;
+        if (viaReg) {
+            std::wstring re;
+            if (!b.ReadRegStart(u.name, &rv, &re)) {
+                r.blocked = L"Its registry Start could not be read: " + re; r.include = false; r.canToggle = false;
+                p.rows.push_back(r);
+                continue;
+            }
+            now = rv.Cfg();
+            r.viaReg = true;
+            r.regNote = kRegUndoLine;
+        }
+        r.before = now;
+        if (SameStart(now, u0.before)) { p.alreadySet++; continue; }
+        r.op = OpTo(now, u0.before);
+        r.after = AfterOf(now, r.op);
         if (r.op.delayed == 0 && u0.before.delayed < 0)
             r.evidence = L"DelayedAutostart was absent before; it is written as 0, which has the same effect";
         bool hadronWrote = u.hasD && u.result == L"ok";
-        if (hadronWrote && !SameStart(live.cfg, u.afterObs)) {
+        if (hadronWrote && !SameStart(now, u.afterObs)) {
             r.include = false;
-            r.warning = L"changed since Hadron set it: now " + StartLabel(live.cfg, false) + L" (unticked; tick to restore anyway)";
+            r.warning = L"changed since Hadron set it: now " + StartLabel(now, false) + L" (unticked; tick to restore anyway)";
         }
         if (std::wstring g = TargetGuard(live, u0.before, c); !g.empty()) { r.blocked = g; r.include = false; r.canToggle = false; }
+        else if (viaReg) {
+            if (std::wstring w = RegRowRefusal(live, rv, now, u0.before, &c); !w.empty()) {
+                r.blocked = L"Registry fallback refused: " + w; r.include = false; r.canToggle = false;
+            }
+        }
         p.rows.push_back(r);
     }
     // Undo raises rows back; a row blocked or unticked for drift can leave a raised dependent without its
@@ -857,15 +889,34 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
             continue;
         }
         r.display = live.display; r.driver = IsDriverType(live.type); r.deps = live.deps; r.group = live.group;
-        r.before = live.cfg;
-        if (SameStart(live.cfg, u.after)) { p.alreadySet++; continue; }
-        r.op = OpTo(live.cfg, u.after);
-        r.after = AfterOf(live.cfg, r.op);
-        if (!SameStart(live.cfg, u.before)) {
+        StartCfg now = live.cfg;
+        RegStartVals rv;
+        const bool viaReg = IsRegRow(u);   // planned as a registry write: resumed the same way
+        if (viaReg) {
+            std::wstring re;
+            if (!b.ReadRegStart(u.name, &rv, &re)) {
+                r.blocked = L"Its registry Start could not be read: " + re; r.include = false; r.canToggle = false;
+                p.rows.push_back(r);
+                continue;
+            }
+            now = rv.Cfg();
+            r.viaReg = true;
+            r.regNote = kRegLine;
+        }
+        r.before = now;
+        if (SameStart(now, u.after)) { p.alreadySet++; continue; }
+        r.op = OpTo(now, u.after);
+        r.after = AfterOf(now, r.op);
+        if (!SameStart(now, u.before)) {
             r.include = false;
-            r.warning = L"changed since the plan: now " + StartLabel(live.cfg, false) + L" (unticked)";
+            r.warning = L"changed since the plan: now " + StartLabel(now, false) + L" (unticked)";
         }
         if (std::wstring g = TargetGuard(live, u.after, c); !g.empty()) { r.blocked = g; r.include = false; r.canToggle = false; }
+        else if (viaReg) {
+            if (std::wstring w = RegRowRefusal(live, rv, now, u.after, &c); !w.empty()) {
+                r.blocked = L"Registry fallback refused: " + w; r.include = false; r.canToggle = false;
+            }
+        }
         p.rows.push_back(r);
     }
     DependencyCheck(&p, items);
@@ -878,6 +929,7 @@ void MarkTi(Plan* p, Backend& b, bool tiOn, const std::vector<SvcItem>& items) {
     int needTi = 0;
     for (auto& r : p->rows) {
         if (!r.blocked.empty() || p->kind == PlanKind::Control) continue;
+        if (r.viaReg) continue;   // the registry fallback writes it (MarkRegFallback): not the SCM, not TrustedInstaller
         if (tiOn && IEq(r.name, L"TrustedInstaller")) {
             r.blocked = L"Not while the TrustedInstaller toggle is on: the toggle needs this service";
             r.include = false; r.canToggle = false;
@@ -892,6 +944,7 @@ void MarkTi(Plan* p, Backend& b, bool tiOn, const std::vector<SvcItem>& items) {
             r.include = false;
             r.canToggle = false;
             r.warning = L"needs TrustedInstaller: Windows refuses this write to administrators, and the toggle is off";
+            if (!r.regRefused.empty()) r.warning += L"; the registry fallback can't be used here: " + r.regRefused;
         } else {
             r.warning = L"needs TrustedInstaller: Hadron writes it as TrustedInstaller (toggle on)";
         }
@@ -1115,6 +1168,7 @@ std::string DumpPlan(const Plan& p) {
         if (!r.warning.empty()) o += L"    warning: " + r.warning + L"\n";
         if (!r.depWarning.empty()) o += L"    warning: " + r.depWarning + L"\n";
         if (r.needsTi) o += L"    needs TrustedInstaller\n";
+        if (r.viaReg) o += L"    registry: " + r.regNote + L"\n";
     }
     return ToUtf8(o);
 }
@@ -1220,7 +1274,7 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     for (size_t k = 0; k < order.size(); k++) {
         const PlanRow& row = p.rows[order[k]];
         if (!put(Record({L"P", Num((int)k + 1), Esc(row.name), L"start", CfgText(row.before), CfgText(row.after),
-                         row.needsTi ? L"ti" : L"admin"})))
+                         row.viaReg ? kRegIdentity : row.needsTi ? L"ti" : L"admin"})))
             return false;
     }
 
@@ -1276,11 +1330,34 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
         SvcItem live;
         bool lowering = row.after.start > row.before.start;
         if (!b.Query(row.name, &live, &err)) { if (!done(L"skip", row.before, L"vanished since the plan: " + err)) return false; continue; }
-        if (!SameStart(live.cfg, row.before) || (live.cfg.delayed == 1) != (row.before.delayed == 1)) {
+        // What the write starts from: the service manager's value, or for a registry row the key's own values, read
+        // again right before the write so a value that changed since the plan is never overwritten.
+        StartCfg have = live.cfg;
+        RegStartVals rv;
+        if (row.viaReg) {
+            std::wstring re;
+            if (!b.ReadRegStart(row.name, &rv, &re)) {
+                if (lowering) failedLowering.insert(Lower(row.name));
+                if (!done(L"skip", row.before, L"its registry Start could not be read: " + re)) return false;
+                continue;
+            }
+            have = rv.Cfg();
+        }
+        if (!SameStart(have, row.before) || (have.delayed == 1) != (row.before.delayed == 1)) {
             // A dependent that is not Disabled after all keeps protecting what it depends on (M1).
-            if (lowering && live.cfg.start != 4) failedLowering.insert(Lower(row.name));
-            if (!done(L"skip", live.cfg, L"changed since the plan: now " + StartLabel(live.cfg, false))) return false;
+            if (lowering && have.start != 4) failedLowering.insert(Lower(row.name));
+            if (!done(L"skip", have, L"changed since the plan: now " + StartLabel(have, false) + (row.viaReg ? L" (registry Start)" : L"")))
+                return false;
             continue;
+        }
+        if (row.viaReg) {   // the toggle, and every refusal, checked again on the live item at write time
+            std::wstring why = !env.regFallbackOn ? std::wstring(L"the registry fallback is off for this apply")
+                                                  : RegRowRefusal(live, rv, row.before, row.after, env.ctx);
+            if (!why.empty()) {
+                if (lowering) failedLowering.insert(Lower(row.name));
+                if (!done(L"skip", have, L"not written to the registry: " + why)) return false;
+                continue;
+            }
         }
         if (lowering) {
             std::wstring blocker;
@@ -1297,10 +1374,15 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
             }
         }
         // I is flushed BEFORE the write: a crash after this line leaves "unknown, re-read" for recovery.
-        if (!put(Record({L"I", Num(seq), CfgText(live.cfg), row.needsTi ? L"ti" : L"admin"}))) return false;
+        // For a registry row this is the undo entry with the old Start/DelayedAutostart, flushed before the write.
+        if (!put(Record({L"I", Num(seq), CfgText(have), row.viaReg ? kRegIdentity : row.needsTi ? L"ti" : L"admin"}))) return false;
         bool ok = false;
         std::wstring werr, ident = L"admin";
-        if (row.needsTi) {
+        if (row.viaReg) {
+            ident = L"registry (takes effect after restart)";
+            ok = b.WriteRegStart(row.name, row.op, rv, &werr);   // rv: the values just re-read and logged in I
+            if (ok && !werr.empty()) ident += L"; " + werr;      // a note on a write that happened (a failed flush)
+        } else if (row.needsTi) {
             if (!env.tiOn) werr = L"needs TrustedInstaller and the toggle is off";
             else if (!tiReady) werr = L"TrustedInstaller unavailable: " + tiErr;
             else {
@@ -1315,17 +1397,28 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
             ok = b.SetStart(row.name, row.op, Identity::Admin, &werr);
         }
         if (env.crashAfterBegin == seq) { tiBack.f = nullptr; r->crashed = true; log.Close(); return false; }   // simulated power loss
-        SvcItem after;
         std::wstring qerr;
-        bool reread = b.Query(row.name, &after, &qerr);
-        StartCfg obs = reread ? after.cfg : live.cfg;
+        bool reread = false;
+        StartCfg obs = have;
+        if (row.viaReg) {   // read back from the key: the service manager shows it only after a restart
+            RegStartVals back;
+            reread = b.ReadRegStart(row.name, &back, &qerr);
+            if (reread) obs = back.Cfg();
+        } else {
+            SvcItem after;
+            reread = b.Query(row.name, &after, &qerr);
+            if (reread) obs = after.cfg;
+        }
         if (ok && reread && obs.start == row.op.start && (row.op.delayed < 0 || obs.Delayed() == (row.op.delayed == 1 && obs.start == 2) ||
                                                            (row.op.delayed >= 0 && obs.delayed == row.op.delayed))) {
             if (!done(L"ok", obs, ident)) return false;
         } else {
             if (lowering) failedLowering.insert(Lower(row.name));
-            std::wstring why = !ok ? werr : (!reread ? L"re-read failed: " + qerr
-                                                     : L"Windows did not keep this change (now " + StartLabel(obs, false) + L")");
+            std::wstring why = !ok ? werr
+                               : !reread ? L"re-read failed: " + qerr
+                               : row.viaReg ? L"the registry read back " + CfgText(obs) + L", not what Hadron wrote (" + CfgText(row.after) +
+                                                  L"): something else changed it; Undo puts back the value recorded before"
+                                            : L"Windows did not keep this change (now " + StartLabel(obs, false) + L")";
             if (!done(L"fail", obs, why)) return false;
         }
     }

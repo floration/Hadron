@@ -19,12 +19,14 @@
 #include "core/ui/widgets.h"
 #include "modules/services/backend.h"
 #include "modules/services/cli.h"
+#include "modules/services/evidence_view.h"
 #include "modules/services/custom.h"
 #include "modules/services/hw.h"
 #include "modules/services/kb.h"
 #include "modules/services/measure.h"
 #include "modules/services/model.h"
 #include "modules/services/plan.h"
+#include "modules/services/regfallback.h"
 #include "modules/services/store.h"
 #include "modules/services/ti.h"
 
@@ -55,6 +57,9 @@ constexpr UINT WM_SVC_LOADED = WM_MODULE_BASE + 1;    // load worker -> view
 constexpr UINT WM_SVC_APPLIED = WM_MODULE_BASE + 2;   // apply worker -> view
 constexpr UINT WM_SVC_PLANNED = WM_MODULE_BASE + 3;   // plan worker -> view
 constexpr UINT WM_SVC_COMPANY = WM_MODULE_BASE + 4;   // company worker -> view
+// The evidence passes (evidence_view.h). Numbered apart from the others so a message added elsewhere never shares one.
+constexpr UINT WM_SVC_SIGNER = WM_MODULE_BASE + 20;   // signer worker -> view
+constexpr UINT WM_SVC_EVENTS = WM_MODULE_BASE + 21;   // event 7040 worker -> view
 constexpr UINT WM_SVC_SXS = WM_MODULE_BASE + 5;       // WinSxS manifest worker -> view
 constexpr UINT WM_SVC_FILE = WM_MODULE_BASE + 6;      // preset/measurement file worker -> view
 constexpr UINT_PTR kProgressTimer = 1;
@@ -73,6 +78,7 @@ enum ClickId {
     ID_FOCUS_LIST = 900, ID_FOCUS_DETAIL, ID_FOCUS_DETAIL_L,   // tab stops that are not click targets (L: Console's left column)
     ID_CONKEY = 400,   // + a Console action (CA_*), the F-key bar's click targets
 };
+constexpr int ID_REG = 960;   // the registry fallback's per-apply switch (regfallback.h), on the plan screen only
 // Keyboard focus. Control = a chip or button (focusId_), reached with Tab/Shift+Tab in reading order and
 // activated with Enter or Space. Apply is never a tab stop: a plan is applied by a mouse click only.
 enum class Focus { List, Search, Detail, DetailLeft, Control, Name };   // Name: the custom preset name field
@@ -260,6 +266,7 @@ struct PlanJob {
     Snapshot first;
     std::wstring build, machine;
     bool tiOn = false;
+    bool regOn = false;   // the registry fallback's per-apply toggle
     std::shared_ptr<const SxsStock> sxs;   // immutable once read: shared, never copied
     bool sxsPending = false;
     Plan out;
@@ -283,6 +290,11 @@ struct Job {
     bool control = false;
     size_t total = 0;
     ApplyResult res;
+    // The guards' context for the registry rows' re-check at write time: copies, so the worker never reads what the
+    // UI thread may replace.
+    HwInfo hw;
+    Snapshot first;
+    services::Ctx ctx;
 };
 
 std::wstring ShortLevel(int lv) {
@@ -319,6 +331,7 @@ public:
     void Shutdown() override {
         cancelApply_.store(true);
         loadW_.Cancel(); applyW_.Cancel(); planW_.Cancel(); companyW_.Cancel(); sxsW_.Cancel(); fileW_.Cancel();
+        ev_.Shutdown();
         loadW_.Join(); applyW_.Join(); planW_.Join(); companyW_.Join(); sxsW_.Join(); fileW_.Join();
         if (hwnd_) KillTimer(hwnd_, kProgressTimer);
     }
@@ -350,6 +363,11 @@ private:
     void OnLoaded();
     void StartCompany();
     void OnCompany();
+    void StartEvidence();   // the signer and event-7040 passes (evidence_view.h), after each load
+    std::map<std::wstring, std::wstring> EventNames() const;   // items whose 7040 is looked for
+    std::wstring SignerCell(const SvcItem& s) const;
+    bool RegRelevant() const;   // the plan has rows the SCM refuses (or registry rows): the fallback switch is shown
+    int RegToggle(HDC dc, int right, int y, int h);   // that switch, right-anchored; returns its width
     void TakeData(std::vector<SvcItem> items, const HwInfo& hw, std::wstring build, std::wstring machine);
     void PrepareCtx();
     void Refilter();
@@ -381,7 +399,8 @@ private:
     void StartSxs();
     void OnSxs();
     static Plan BuildFrom(PlanJob& j, Backend* b, const Kb* kb);
-    void ClosePlan() { mode_ = Mode::List; planReq_ = PlanReq{}; focus_ = Focus::List; replan_ = false; saving_ = false; fromPlan_ = false; }
+    // The registry fallback switch is per apply: closing a plan turns it off.
+    void ClosePlan() { mode_ = Mode::List; planReq_ = PlanReq{}; focus_ = Focus::List; replan_ = false; saving_ = false; fromPlan_ = false; regOn_ = false; }
     void RefreshPlanList();
     void TogglePlanRow(int row);
     void StartApply();
@@ -523,6 +542,9 @@ private:
     Mode mode_ = Mode::List;
     int tab_ = TAB_SERVICES;
     bool tiOn_ = false;   // never persisted (spec §5.6)
+    bool regOn_ = false;  // the registry fallback: never persisted, off at every launch, after every apply and plan close
+    std::set<std::wstring> regApplied_;   // items whose last verified write went through the registry (LastAppliedViaReg)
+    EvidencePasses ev_;   // signer and event 7040 (evidence_view.h)
     UINT seenDpi_ = 96;   // the DPI the scroll offsets are in (OnDpiChanged rescales them)
     bool revealPending_ = false;   // after a DPI change: show the selected row again once the list has its new size
     Focus focus_ = Focus::List;
@@ -686,6 +708,8 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SVC_APPLIED: OnApplied(); return 0;
     case WM_SVC_PLANNED: OnPlanned(); return 0;
     case WM_SVC_COMPANY: OnCompany(); return 0;
+    case WM_SVC_SIGNER: if (ev_.OnSigners()) { Refilter(); Invalidate(); } return 0;
+    case WM_SVC_EVENTS: if (ev_.OnEvents()) Invalidate(); return 0;
     case WM_SVC_SXS: OnSxs(); return 0;
     case WM_SVC_FILE: OnFileDone(); Invalidate(); return 0;
     case WM_RBUTTONDOWN: SetFocus(h); return 0;
@@ -789,6 +813,8 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
     fixture_ = !cl.screenshot.empty() || cl.selftest || !cl.fixture.empty();
     // --ti on is for fixture renders only: on live services the toggle is off at every launch (spec 5.6).
     if (fixture_ && ArgValue(cl.rest, L"--ti") == L"on") tiOn_ = true;
+    // --regfallback on likewise: fixture renders of the fallback plan only. Live, the switch is off until clicked.
+    if (fixture_ && ArgValue(cl.rest, L"--regfallback") == L"on") regOn_ = true;
     if (fixture_) {
         // Fixture mode: the fake backend, the fixture folder as a read-only data dir. Nothing is written,
         // nothing touches real services or %ProgramData%. --screenshot loads through LoadFixture (host).
@@ -859,6 +885,9 @@ void ServicesModule::StartLoad() {
         if (!b->Enumerate(&out->items, &err)) { out->err = L"Could not read the services: " + err; return; }
         // Company is read in a second pass once the list is shown (StartCompany), not here.
         b->ReadHw(&out->hw);
+        // Follow-up 8: the device classes the items' interface-arrival triggers name, present or seen before. Evidence
+        // that can only keep more (HwEvidenceEx, IfaceEvidence), read here with the device list.
+        if (b->IsLive() && out->hw.ok) AddLiveIfaceEvidence(out->items, &out->hw);
         out->build = b->Build();
         out->machine = b->MachineGuid();
         FoldInstances(&out->items);
@@ -961,6 +990,7 @@ void ServicesModule::OnLoaded() {
     TakeData(std::move(o.items), o.hw, o.build, o.machine);
     writeAccess_ = std::move(keep);
     StartCompany();
+    StartEvidence();
     if (!sxs_ && !sxsPending_) StartSxs();
     if (planReq_.type != PlanReq::None && !applyW_.Running()) OpenPlan(planReq_, true);
     if (!dismissStamp_.empty() && !applyW_.Running()) StartLoad();   // a Dismiss pressed during this load (A2)
@@ -1059,6 +1089,32 @@ void ServicesModule::OnCompany() {
     Invalidate();
 }
 
+void ServicesModule::StartEvidence() {
+    if (fake_) {   // fixture: signers.txt and events7040.txt, at once
+        ev_.FromFixture(*fake_, EventNames());
+        Refilter();
+        return;
+    }
+    if (!backend_ || !backend_->IsLive()) return;
+    std::wstring err;
+    if (!ev_.StartSigners(hwnd_, WM_SVC_SIGNER, items_, &err))
+        Status(L"Services: could not start the worker that checks each file's signer: " + err);
+    if (!ev_.StartEvents(hwnd_, WM_SVC_EVENTS, EventNames(), &err))
+        Status(L"Services: could not start the worker that reads the System log: " + err);
+}
+
+std::map<std::wstring, std::wstring> ServicesModule::EventNames() const {
+    std::map<std::wstring, std::wstring> m;
+    for (auto& s : items_)
+        if (ChangedText(s) == L"changed" || drift_.count(Lower(s.name))) m[Lower(s.name)] = s.display;
+    return m;
+}
+
+std::wstring ServicesModule::SignerCell(const SvcItem& s) const {
+    if (const SignerInfo* g = ev_.Signer(s.name)) return SignerShort(*g);
+    return ev_.SignersPending() ? L"…" : L"";
+}
+
 void ServicesModule::TakeData(std::vector<SvcItem> items, const HwInfo& hw, std::wstring build, std::wstring machine) {
     items_ = std::move(items);
     hw_ = hw;
@@ -1072,9 +1128,15 @@ void ServicesModule::TakeData(std::vector<SvcItem> items, const HwInfo& hw, std:
     writeAccess_.clear();
     nameKey_ = {-1, -1};   // new names: measure the Name column again
     drift_.clear();
+    // A start type Hadron wrote to the registry (the fallback) shows in the service manager only after a restart:
+    // until then it is judged by the registry Start, and an unread one is never called drift.
+    regApplied_ = LastAppliedViaReg(logs_);
     for (auto& s : items_) {
         auto it = lastApplied_.find(Lower(s.name));
-        if (it != lastApplied_.end() && !s.cfg.SameEffect(it->second)) drift_.insert(Lower(s.name));
+        if (it == lastApplied_.end()) continue;
+        if (regApplied_.count(Lower(s.name))) {
+            if (s.regStart >= 0 && s.regStart != it->second.start) drift_.insert(Lower(s.name));
+        } else if (!s.cfg.SameEffect(it->second)) drift_.insert(Lower(s.name));
     }
     PrepareCtx();
     Refilter();
@@ -1136,6 +1198,7 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
         std::wstring e;
         writeAccess_[Lower(s.name)] = fake_->CanWrite(s.name, &denied, &e) ? 0 : (denied ? 1 : -1);
     }
+    StartEvidence();
     if (!argSort_.empty()) {
         size_t colon = argSort_.find(L':');
         sortKey_ = argSort_.substr(0, colon);
@@ -1193,8 +1256,11 @@ ServicesModule::Verdict ServicesModule::KbVerdict(const SvcItem& s) const {
     if (IsDriverType(s.type) && !e->sysok) return {L"no preset", 4};
     if (!e->hw.empty()) {
         std::wstring ev;
-        int h = ctx_.hw ? HwEvidence(*ctx_.hw, e->hw, s.name, &ev) : 0;
+        int h = ctx_.hw ? HwEvidenceEx(*ctx_.hw, e->hw, s, &ev) : 0;
         if (h == 0) return {L"kept (hw)", 3};   // hardware in use or seen before: "kept by every preset" in the detail
+    } else if (j == LV_STRIPPED && ctx_.hw) {   // as BuildPreset: an interface trigger's hardware keeps it
+        std::wstring ev;
+        if (IfaceEvidence(*ctx_.hw, s, &ev) == 0) return {L"kept (hw)", 3};
     }
     return {ShortLevel(j), j};
 }
@@ -1247,6 +1313,7 @@ void ServicesModule::Refilter() {
         if (key == L"start") return std::to_wstring(s.cfg.start) + (s.cfg.Delayed() ? L"1" : L"0");
         if (key == L"kb") { Verdict v = KbVerdict(s); return std::to_wstring(v.rank) + v.label; }
         if (key == L"company") return Lower(CompanyShort(s.company));
+        if (key == L"signer") return Lower(SignerCell(s));
         if (key == L"account") return Lower(s.account);
         if (key == L"group") return Lower(s.group);
         if (key == L"type") return TypeName(s.type);
@@ -1286,6 +1353,7 @@ void ServicesModule::Refilter() {
             else if (k == L"start") r.push_back(startCell(s));
             else if (k == L"kb") r.push_back(KbVerdict(s).label);
             else if (k == L"company") r.push_back(CompanyShort(s.company));
+            else if (k == L"signer") r.push_back(SignerCell(s));
             else if (k == L"account") r.push_back(s.account);
             else if (k == L"group") r.push_back(s.group);
             else if (k == L"type") r.push_back(s.kind == Kind::FsDriver ? L"File system" : TypeName(s.type));
@@ -1442,6 +1510,8 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
         case PlanReq::Custom: p = BuildCustom(r.preset, j.items, c); break;
         case PlanReq::None: break;
     }
+    // The registry fallback first (it takes the rows the SCM refuses while its switch is on), then TrustedInstaller.
+    if (b && p.kind != PlanKind::Control) MarkRegFallback(&p, *b, j.regOn, j.tiOn, j.items, c);
     if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, j.tiOn, j.items);   // re-runs the dependency check
     if (r.tiStop) MarkTiStop(&p, j.logs, j.items);   // R4: the claimed process, and the reason from data
     return p;
@@ -1477,6 +1547,7 @@ void ServicesModule::OpenPlan(const PlanReq& r, bool rebuild) {
     j.build = build_;
     j.machine = machine_;
     j.tiOn = tiOn_;
+    j.regOn = regOn_;
     j.sxs = sxs_;
     j.sxsPending = sxsPending_;
     const Kb* kb = kbOk_ ? &kb_ : nullptr;
@@ -1549,7 +1620,8 @@ void ServicesModule::RefreshPlanList() {
             else if (k == L"now") cells.push_back(StartLabel(r.before, false));
             else if (k == L"after") cells.push_back(L"\u2192 " + StartLabel(r.after, false));
             else if (k == L"basis") cells.push_back(r.basis == L"owner-measured" ? std::wstring(L"measured") : r.basis);
-            else cells.push_back(!r.blocked.empty() ? r.blocked : !r.warning.empty() ? r.warning : !r.depWarning.empty() ? r.depWarning : r.reason);
+            else cells.push_back(!r.blocked.empty() ? r.blocked : !r.warning.empty() ? r.warning : !r.depWarning.empty() ? r.depWarning
+                                 : r.viaReg ? r.regNote : r.reason);
         }
         rows.push_back(std::move(cells));
     }
@@ -1612,6 +1684,15 @@ void ServicesModule::StartApply() {
     env.progress = &applyW_.progress;
     env.build = build_;
     env.machine = machine_;
+    // The registry fallback: this apply's switch, and the guards for its re-check at write time.
+    job_.hw = hw_;
+    job_.first = first_;
+    job_.ctx = ctx_;
+    job_.ctx.hw = hw_.ok ? &job_.hw : nullptr;
+    job_.ctx.first = hasFirst_ ? &job_.first : nullptr;
+    job_.ctx.Prepare();
+    env.regFallbackOn = regOn_;
+    env.ctx = &job_.ctx;
     backend_->Arm();   // the only place the UI arms the live backend: a plan the user confirmed
     Job* job = &job_;
     bool ok = applyW_.Start(hwnd_, WM_SVC_APPLIED, [job, env]() {
@@ -1660,6 +1741,15 @@ void ServicesModule::OnClickId(int id) {
         Status(tiOn_ ? L"Services: TrustedInstaller toggle on for this session (never remembered)."
                      : L"Services: TrustedInstaller toggle off.");
         if (mode_ == Mode::Plan) OpenPlan(planReq_, true);   // same plan, TI rows re-marked; the user's ticks stay
+        return;
+    }
+    if (id == ID_REG) {
+        if (applyW_.Running() || mode_ != Mode::Plan) return;
+        regOn_ = !regOn_;
+        Status(regOn_ ? L"Services: registry fallback on for this apply only: rows the service manager refuses are written to "
+                        L"their registry key after you press Apply, and take effect after a restart."
+                      : L"Services: registry fallback off.");
+        OpenPlan(planReq_, true);   // the same plan, rows re-marked; the user's ticks stay
         return;
     }
     if (id == ID_SEARCH) { focus_ = Focus::Search; return; }
@@ -2030,6 +2120,11 @@ std::vector<Banner> ServicesModule::Banners() const {
                      L"TrustedInstaller. It is not expected to reach Defender, PPL or Tamper Protection (reasoning, not "
                      L"tested). Turn it off when you are done.",
                      1, applyW_.Running() ? std::vector<std::pair<int, std::wstring>>{} : std::vector<std::pair<int, std::wstring>>{{ID_TI, L"Turn off"}}});
+    if (regOn_ && mode_ == Mode::Plan)
+        v.push_back({L"Registry fallback is on for this apply: rows the service manager refuses to administrators are written "
+                     L"to the service's registry key (Start, DelayedAutostart) directly. Never for launch-protected, protected, "
+                     L"boot-path or Boot/System-start items. It turns off after this apply. " + std::wstring(kRegRestartBasis),
+                     1, applyW_.Running() ? std::vector<std::pair<int, std::wstring>>{} : std::vector<std::pair<int, std::wstring>>{{ID_REG, L"Turn off"}}});
     if (!storeNote_.empty()) v.push_back({storeNote_, storeRefused_ ? 2 : 1, {}});
     if (loaded_ && loadErr_.empty() && (!hw_.ok || hw_.bootDisk.empty()))
         v.push_back({std::wstring(!hw_.ok ? L"The device list could not be read" : L"The boot disk could not be found") +
@@ -2304,8 +2399,19 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
                                   L"Hadron changes only the template; instances follow at the next sign-in.", p.mute});
     if (drift_.count(Lower(s.name))) {
         auto it = lastApplied_.find(Lower(s.name));
+        const bool viaReg = regApplied_.count(Lower(s.name)) != 0;
         d.push_back({P_TEXT, L"", L"Changed since Hadron set it: Hadron set " + StartLabel(it->second, false) + L", now " +
-                                      StartLabel(s.cfg, false) + L".", p.warnT});
+                                      (viaReg ? StartName(s.regStart) + L" (registry Start)" : StartLabel(s.cfg, false)) + L".", p.warnT});
+    }
+    // Follow-up 7: who changed a start type that differs from the first snapshot (or from what Hadron set), from the
+    // System log's event 7040, read only. At the top, with the drift line, so it is seen without scrolling.
+    if (ChangedText(s) == L"changed" || drift_.count(Lower(s.name))) {
+        std::wstring t;
+        if (const SvcItem* f = ChangedText(s) == L"changed" ? first_.Find(s.name) : nullptr)
+            t = L"Changed since first seen: the first snapshot has " + StartLabel(f->cfg, false) + L", now " + StartLabel(s.cfg, false) + L". ";
+        std::wstring ln = ev_.EventLine(s.name);
+        if (!ln.empty()) t += L"Event 7040: " + ln + L".";
+        if (!t.empty()) d.push_back({P_TEXT, L"", t, p.mute});
     }
     if (s.regStart >= 0 && s.regStart != s.cfg.start)
         d.push_back({P_TEXT, L"", L"The registry Start value (" + StartName(s.regStart) +
@@ -2336,10 +2442,13 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
             if (!e->contested.empty()) kv(L"Contested", e->contested, p.warnT);
             if (!e->hw.empty()) {
                 std::wstring ev;
-                int h = hw_.ok ? HwEvidence(hw_, e->hw, s.name, &ev) : 0;
+                int h = hw_.ok ? HwEvidenceEx(hw_, e->hw, s, &ev) : 0;
                 if (!hw_.ok) ev = L"no hardware information (" + (hw_.error.empty() ? std::wstring(L"not read") : hw_.error) + L"): kept";
                 const wchar_t* verdict = h == 0 ? L"kept by every preset: " : h == 1 ? L"never seen on this PC: " : h == 2 ? L"never seen, hot-plug (offered unticked): " : L"";
                 kv(L"Hardware", verdict + ev);
+            } else if (hw_.ok && e->JoinLevel() == LV_STRIPPED) {   // an interface trigger's hardware keeps it (follow-up 8)
+                std::wstring ev;
+                if (IfaceEvidence(hw_, s, &ev) == 0) kv(L"Hardware", L"kept by every preset: " + ev);
             }
             if (e->never) kv(L"Note", L"the KB keeps it out of every preset");
         } else if (e->never) {
@@ -2355,7 +2464,7 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
             d.push_back({P_TEXT, L"", L"No KB text for it, so it is never in a preset" +
                                           (g.neverPreset ? L" (" + g.reason + L")" : std::wstring(L": third-party or unknown to Hadron")) +
                                           L". The company in its configuration is what the file says about itself (its version "
-                                          L"resource), not a verified signature.",
+                                          L"resource); the Signer line is what Windows verified.",
                          p.mute});
     }
     d.push_back({P_HEAD, L"", L"Configuration", kNoColor, SIDE_LEFT});
@@ -2378,6 +2487,10 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
         kv(L"Windows stock", StockKnown() ? L"no data for this item yet" : StockNone(), p.mute);
     if (s.trigger) kv(L"Triggers", s.triggers.empty() ? L"yes" : s.triggers);
     kv(L"Company (file claim)", s.company.empty() && companyPending_ ? L"still being read" : s.company);
+    {
+        const SignerInfo* sg = ev_.Signer(s.name);
+        kv(L"Signer (Authenticode)", sg ? SignerLong(*sg) : ev_.SignersPending() ? L"still being checked" : L"");
+    }
     ImageInfo im = NormalizeImage(s.image, WindowsDir(), s.name, IsDriverType(s.type));
     kv(L"Image", im.path + (im.args.empty() ? L"" : L"  " + im.args));
     if (!im.svchostGroup.empty()) kv(L"svchost group", im.svchostGroup);
@@ -2437,6 +2550,11 @@ std::vector<Para> ServicesModule::PlanRowDoc(const PlanRow& r) const {
     kv(L"Warning", r.warning, p.warnT);
     kv(L"Dependencies", r.depWarning, p.warnT);
     if (r.needsTi) kv(L"Identity", L"needs TrustedInstaller: Windows refuses this write to administrators", p.warnT);
+    if (r.viaReg) {
+        kv(L"Registry", r.regNote, p.warnT);
+        kv(L"Basis", kRegRestartBasis, p.mute);
+    }
+    else if (!r.regRefused.empty()) kv(L"Registry fallback", L"not allowed here: " + r.regRefused, p.mute);
     const KbEntry* e = kbOk_ ? kb_.Find(r.name) : nullptr;
     if (e) {
         bool sameTitle = e->title.empty() || Lower(e->title) == Lower(r.display.empty() ? r.name : r.display);
@@ -2462,11 +2580,11 @@ bool ServicesModule::SetListColumns(HDC dc, int widthPx) {
     // vs first and Basis before those; Account, Type and Image path first, since the detail pane shows each.
     static const C kSvc[] = {{L"name", L"Name", 140, 0}, {L"display", L"Display name", 0, 6}, {L"state", L"State", 72, 0},
                              {L"start", L"Start type", 136, 0}, {L"kb", L"Preset", 84, 0}, {L"basis", L"Basis", 76, 4},
-                             {L"changed", L"vs first", 70, 5}, {L"company", L"Company", 100, 7},
+                             {L"changed", L"vs first", 70, 5}, {L"company", L"Company", 100, 8}, {L"signer", L"Signer", 130, 7},
                              {L"account", L"Account", 110, 3}, {L"type", L"Type", 96, 1}, {L"image", L"Image path", 160, 2}};
     static const C kDrv[] = {{L"name", L"Name", 124, 0}, {L"display", L"Display name", 0, 6}, {L"state", L"State", 72, 0},
                              {L"start", L"Start type", 96, 0}, {L"kb", L"Preset", 84, 0}, {L"basis", L"Basis", 76, 3},
-                             {L"changed", L"vs first", 70, 4}, {L"company", L"Company", 100, 7},
+                             {L"changed", L"vs first", 70, 4}, {L"company", L"Company", 100, 8}, {L"signer", L"Signer", 130, 7},
                              {L"group", L"Load group", 116, 5}, {L"type", L"Type", 96, 1}, {L"image", L"Image path", 160, 2}};
     const int kFlexMin = 100;
     const bool svc = tab_ == TAB_SERVICES;
@@ -2494,7 +2612,7 @@ bool ServicesModule::SetListColumns(HDC dc, int widthPx) {
     std::vector<bool> on(n, true);
     auto fixedSum = [&]() { int t = 0; for (size_t i = 0; i < n; i++) if (on[i] && all[i].w) t += w[i]; return t; };
     auto flexOn = [&]() { for (size_t i = 0; i < n; i++) if (on[i] && !all[i].w) return true; return false; };
-    for (int rank = 1; rank <= 7 && fixedSum() + (flexOn() ? kFlexMin : 0) > W; rank++)
+    for (int rank = 1; rank <= 8 && fixedSum() + (flexOn() ? kFlexMin : 0) > W; rank++)
         for (size_t i = 0; i < n; i++)
             if (all[i].drop == rank) on[i] = false;
     // Still too wide (the narrowest windows): the Name column gives back what it has above 96, then Start type down
@@ -2512,7 +2630,7 @@ bool ServicesModule::SetListColumns(HDC dc, int widthPx) {
         for (size_t i = 0; i < n && extra > 0; i++) {
             if (!on[i]) continue;
             std::wstring k = all[i].key;
-            int want = k == L"account" ? 50 : k == L"type" ? 24 : k == L"group" ? 30 : k == L"image" ? 220 : 0;
+            int want = k == L"account" ? 50 : k == L"type" ? 24 : k == L"group" ? 30 : k == L"signer" ? 60 : k == L"image" ? 220 : 0;
             int give = std::min(want, extra);
             w[i] += give;
             extra -= give;
@@ -2716,17 +2834,46 @@ int ServicesModule::TiToggle(HDC dc, int right, int y, int h) {
     return w;
 }
 
+bool ServicesModule::RegRelevant() const {
+    if (mode_ != Mode::Plan || plan_.kind == PlanKind::Control) return false;
+    if (regOn_) return true;
+    for (auto& r : plan_.rows)
+        if (r.viaReg || r.needsTi || !r.regRefused.empty()) return true;
+    return false;
+}
+
+int ServicesModule::RegToggle(HDC dc, int right, int y, int h) {
+    // Drawn like the TrustedInstaller switch: outlined while off, the warn colour and its effect while on.
+    Pal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    std::wstring lbl = regOn_ ? L"Registry fallback: ON (after restart)" : L"Registry fallback: off";
+    int w = TextW(dc, lbl, f.caption) + Sc(26);
+    RECT r{right - w, y, right, y + h};
+    bool en = !applyW_.Running();
+    bool hot = en && hoverId_ == ID_REG;
+    COLORREF fill, edge, tc;
+    if (p.hc) { fill = regOn_ || hot ? p.chipHot : p.chip; edge = p.border; tc = regOn_ || hot ? p.chipHotText : p.chipText; }
+    else if (regOn_) { fill = Mix(p.panel, p.warn, hot ? 0.40 : 0.30); edge = p.warnT; tc = p.text; }
+    else { fill = hot ? p.chipHot : p.bg; edge = p.mute; tc = p.mute; }
+    if (!en) { tc = p.dis; edge = p.border; }
+    RoundFill(dc, r, h, fill, edge);
+    ui::DrawText(dc, lbl, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+    if (en) AddClick(r, ID_REG);
+    return w;
+}
+
 // What the list's columns mean (Review cat 5 and 6: one word per state, all of them explained, and the company
 // labelled as the file's own claim).
 std::wstring ServicesModule::ListLegend(bool compact) const {
     if (compact)   // a narrow list: the same facts, shorter
         return L"Preset: first preset listing it (may be set already or unticked); kept (hw): hardware seen; protected: "
                L"never changed.  *: changed since Hadron set it; (pending): after a restart.  Company: the file's own "
-               L"claim, not a signature.";
+               L"claim; Signer: its signature, checked offline.";
     return L"Preset: the first preset that lists it (that preset may find it already set, or offer it unticked); "
            L"kept (hw): its hardware was seen, so every preset keeps it; no preset; protected: Hadron never changes it; "
            L"not in KB.  Start type: * changed since Hadron set it; (pending) waits for a restart.  vs first: against the "
-           L"first-run snapshot.  Company: what the file says about itself, not a verified signature.";
+           L"first-run snapshot.  Company: what the file says about itself, not a verified signature.  Signer: who signed "
+           L"the file (or its catalog), checked by Windows offline; Unsigned and Not trusted are worth a look.";
 }
 
 void ServicesModule::PaintListLegend(HDC dc, const RECT& r, bool compact) {
@@ -2984,6 +3131,7 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     right -= Button(dc, right, y, L"Cancel", ID_CANCEL_PLAN, false, !applyW_.Running()) + Sc(10);
     // The TrustedInstaller switch here too (Console has F6): flipping it rebuilds this plan and keeps the ticks.
     if (!ctl) right -= TiToggle(dc, right, y + Sc(2), Sc(26)) + Sc(12);
+    if (RegRelevant()) right -= RegToggle(dc, right, y + Sc(2), Sc(26)) + Sc(8);   // Console has F7
     RECT tr{pad, y, right - Sc(10), y + Sc(30)};
     TextLeft(dc, L"Plan: " + plan_.title, tr, f.semi, p.text);
     y += Sc(34);
@@ -3094,6 +3242,7 @@ enum ConAct {
     // custom presets and measurements
     CA_PRESETS, CA_MEASURE, CA_SAVEPRESET, CA_MEAS_BEFORE, CA_MEAS_AFTER, CA_PRE_PLAN, CA_EXPORT, CA_IMPORT, CA_REMOVE, CA_SAVE,
 };
+constexpr int CA_REG = 60;   // the plan's registry fallback switch (F7), numbered apart from the enum
 
 // A filled block with text on it (the selection, tags): the ink is core's text-on-fill rule (ui::OnFill: white
 // while it reaches 4.5:1, as Windows draws on its accent, else black). Console then makes it strict: if the ink is
@@ -3261,6 +3410,9 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
             k.push_back({L"F7", L"Save as preset", L"Save", CA_SAVEPRESET, startType && plan_.Included() > 0 && !applyW_.Running(), false});
             k.push_back({L"F8", L"Measure before", L"Before", CA_MEAS_BEFORE, startType && canData, false});
         }
+        if (RegRelevant())
+            k.push_back({L"F9", regOn_ ? L"Registry fallback: ON" : L"Registry fallback: off", regOn_ ? L"Reg ON" : L"Reg off", CA_REG,
+                         !applyW_.Running(), regOn_});
         if (applyW_.Running()) k.push_back({L"Esc", L"Stop after this item", L"Stop", CA_CANCEL, !cancelApply_.load(), false});
         else k.push_back({L"Esc", L"Cancel", L"Cancel", CA_CANCEL, true, false});
         return k;
@@ -3468,10 +3620,12 @@ std::vector<ServicesModule::ConCol> ServicesModule::ConsoleListColumns(HDC dc, i
     struct D { const wchar_t* key; const wchar_t* title; int ch; int drop; bool path; };   // ch 0 = flexible
     static const D kSvc[] = {{L"name", L"Name", 22, 0, false}, {L"state", L"State", 9, 0, false}, {L"start", L"Start", 14, 0, false},
                              {L"changed", L"vs 1st", 8, 3, false}, {L"kb", L"Preset", 10, 0, false}, {L"basis", L"Basis", 10, 2, false},
+                             {L"signer", L"Signer", 18, 3, false},
                              {L"account", L"Account", 15, 1, false}, {L"display", L"Display name", 0, 0, false},
                              {L"image", L"Image path", 0, 4, true}};
     static const D kDrv[] = {{L"name", L"Name", 22, 0, false}, {L"state", L"State", 9, 0, false}, {L"start", L"Start", 14, 0, false},
                              {L"changed", L"vs 1st", 8, 3, false}, {L"kb", L"Preset", 10, 0, false}, {L"basis", L"Basis", 10, 2, false},
+                             {L"signer", L"Signer", 18, 3, false},
                              {L"type", L"Type", 7, 1, false}, {L"group", L"Load group", 15, 1, false},
                              {L"display", L"Display name", 0, 0, false}, {L"image", L"Image path", 0, 4, true}};
     const D* all = tab_ == TAB_SERVICES ? kSvc : kDrv;
@@ -3529,6 +3683,10 @@ void ServicesModule::ConsoleListCells(int row, std::vector<ConCell>& out) {
         } else if (k == L"basis") {
             std::wstring b = BasisShort(s);
             out.push_back({b, b == L"folklore" ? p.warnInk : p.mute});
+        } else if (k == L"signer") {
+            const SignerInfo* g = ev_.Signer(s.name);
+            bool bad = g && (g->state == SignState::Unsigned || g->state == SignState::Untrusted);
+            out.push_back({SignerCell(s), bad ? p.warnInk : p.mute});
         } else if (k == L"account") out.push_back({ShortAccount(s.account), p.mute});
         else if (k == L"group") out.push_back({s.group, p.mute});
         else if (k == L"type") out.push_back({s.kind == Kind::FsDriver ? L"fs" : s.kind == Kind::KernelDriver ? L"kernel" : L"other", p.mute});
@@ -3865,6 +4023,7 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
     static const KV kPlan[] = {
         {L"Space", L"Tick or untick the row (or click [x])"}, {L"F6", L"TrustedInstaller toggle; rebuilds the plan, keeps your ticks"},
         {L"F7", L"Save the ticked rows as a custom preset"}, {L"F8", L"Measure before (to compare after a restart)"},
+        {L"F9", L"Registry fallback for rows Windows refuses (when shown); this apply only"},
         {L"Esc", L"Cancel the plan"}, {L"Enter", L"Nothing: no key applies"}, {L"Up Down", L"Move; PgUp PgDn Home End"},
         {L"Tab", L"Every control in reading order; Shift+Tab back"}};
     static const KV kCols[] = {
@@ -3960,6 +4119,7 @@ void ServicesModule::ConsolePlanCells(int row, std::vector<ConCell>& out) {
             if (!r.blocked.empty()) out.push_back({r.blocked, p.badInk});
             else if (!r.warning.empty()) out.push_back({r.warning, p.warnInk});
             else if (!r.depWarning.empty()) out.push_back({r.depWarning, p.warnInk});
+            else if (r.viaReg) out.push_back({r.regNote, p.warnInk});
             else out.push_back({r.reason, p.mute});
         } else out.push_back({L"", p.mute});
     }
@@ -4019,6 +4179,10 @@ void ServicesModule::PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom)
     if (tiOn_) {
         tr.left += TextW(dc, plan_.title, f.semi) + Sc(14);
         TextLeft(dc, L"TrustedInstaller ON (writes as TI)", tr, f.mono, p.warnInk);
+    }
+    if (regOn_) {
+        tr.left += (tiOn_ ? TextW(dc, L"TrustedInstaller ON (writes as TI)", f.mono) : TextW(dc, plan_.title, f.semi)) + Sc(14);
+        TextLeft(dc, L"Registry fallback ON (after restart)", tr, f.mono, p.warnInk);
     }
     y += Sc(24);
     std::wstring sum;
@@ -4094,6 +4258,7 @@ void ServicesModule::ConsoleStatus() {
 void ServicesModule::OnConsoleAction(int act) {
     bool plan = mode_ == Mode::Plan;
     if (act != CA_HELP) conHelp_ = false;
+    if (act == CA_REG) { if (plan && RegRelevant() && !applyW_.Running()) OnClickId(ID_REG); return; }
     switch (act) {
         case CA_HELP: conHelp_ = !conHelp_; return;
         case CA_TAB: if (!plan) { conItemBar_ = false; OnClickId(tab_ == TAB_SERVICES ? ID_TAB_DRV : ID_TAB_SVC); } return;
@@ -4169,6 +4334,7 @@ bool ServicesModule::OnConsoleKey(UINT vk) {
         else if (vk == VK_F6) act = CA_TI;
         else if (vk == VK_F7) act = CA_SAVEPRESET;
         else if (vk == VK_F8) act = CA_MEAS_BEFORE;
+        else if (vk == VK_F9 && RegRelevant()) act = CA_REG;
     } else if (conItemBar_) {
         // Inside the item bar F1..F7 are the item keys the bar shows (so F1 there is Auto, not help).
         static const int kItem[] = {CA_SET + 0, CA_SET + 1, CA_SET + 2, CA_SET + 3, CA_CTL + 0, CA_CTL + 1, CA_CTL + 2};

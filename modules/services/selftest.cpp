@@ -8,6 +8,7 @@
 #include "modules/services/measure.h"
 #include "modules/services/plan.h"
 #include "modules/services/recovery.h"
+#include "modules/services/selftest_evidence.h"
 #include "modules/services/ti.h"
 
 #include <fcntl.h>
@@ -1065,9 +1066,10 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         check(um && um->blocked.empty() && um->include && um->evidence.find(L"ticked at Minimum") != std::wstring::npos &&
                   fm && !fm->include,
               L"R18: at Minimum a row whose use cannot be detected is ticked and says so; a hot-plug class stays unticked");
-        const PlanRow* fs = RowOf(st, L"FrameServer");
+        // SCardSvr, not FrameServer: the fixture's FrameServer is now kept by its camera interface trigger (follow-up 8).
+        const PlanRow* fs = RowOf(st, L"SCardSvr");
         check(fs && fs->blocked.empty() && !fs->include && fs->evidence.find(L"hot-plug") != std::wstring::npos,
-              L"Stripped: a never-seen hot-plug class (camera) is offered unticked");
+              L"Stripped: a never-seen hot-plug class (smart-card reader) is offered unticked");
         const PlanRow* bt = RowOf(st, L"bthserv");
         check(bt && !bt->blocked.empty() && bt->blocked.find(L"Kept") == 0, L"Stripped: Bluetooth present -> kept");
         const PlanRow* sn = RowOf(st, L"SensorService");
@@ -2763,6 +2765,9 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         check(Store::Plain(L"\\\\?\\UNC\\srv\\share\\x") == L"\\\\srv\\share\\x" && Store::Plain(L"\\\\?\\C:\\x") == L"C:\\x",
               L"Store::Plain strips \\\\?\\ and \\\\?\\UNC\\ (--data-dir is kept without the prefix)");
     }
+
+    // ---- follow-ups 6-9: signer, event 7040, interface evidence, registry fallback (selftest_evidence.cpp) ----
+    RunEvidenceSelftest(fixture, kb, [](const std::wstring& tag) { return NewTempDir(tag); }, check, info);
 
     // ---- custom presets: format, strict import, guards, store; measured before/after (fix/svcdrv-presets) ----------
     {

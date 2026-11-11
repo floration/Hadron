@@ -6,6 +6,9 @@
 // StartServiceW / ControlServiceExW for live control) refuse until Arm() was called. Only the UI's
 // confirmed-plan path and --live-test arm it. Hadron never creates, deletes or re-registers a service,
 // never changes an account, a failure action or a trigger, and never edits a key's DACL (CI guards this).
+// The registry fallback (WriteRegStart, regfallback.h) is the one registry write: Start and DelayedAutostart of an
+// existing service key, when the SCM refused the change and the user turned the per-apply toggle on; it refuses
+// until Arm() too, and never creates a key or a value of another type.
 #include "modules/services/backend.h"
 #include "modules/services/svc_compat.h"
 #include "core/sys/sys.h"
@@ -374,6 +377,93 @@ public:
 
     bool ReadHw(HwInfo* out) override { return ReadLiveHw(out); }
 
+    bool ReadRegStart(const std::wstring& name, RegStartVals* out, std::wstring* err) override {
+        *out = RegStartVals{};
+        if (!KeyNameOk(name)) { *err = L"not a plain service name"; return false; }
+        if (KeyPath(name).empty()) { *err = L"HKLM\\SYSTEM\\Select\\Current could not be read"; return false; }
+        HKEY k = nullptr;
+        LSTATUS e = RegOpenKeyExW(HKEY_LOCAL_MACHINE, KeyPath(name).c_str(), REG_OPTION_OPEN_LINK,
+                                  KEY_QUERY_VALUE, &k);
+        if (e != ERROR_SUCCESS) { *err = L"RegOpenKeyEx: " + sys::ErrorText((DWORD)e); return false; }
+        bool ok = ReadValues(k, out, err);
+        RegCloseKey(k);
+        return ok;
+    }
+
+    bool WriteRegStart(const std::wstring& name, const WriteOp& w, const RegStartVals& expect, std::wstring* err) override {
+        if (!armed_) { *err = kNotArmed; return false; }
+        if (w.start < 2 || w.start > 4) { *err = L"refused: Hadron never writes Boot or System start through the registry"; return false; }
+        if (w.delayed > 1) { *err = L"invalid DelayedAutostart value"; return false; }
+        if (!KeyNameOk(name)) { *err = L"refused: not a plain service name"; return false; }
+        {   // Launch protection, from the SCM itself (fail closed: unreadable counts as protected).
+            Sc scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+            if (!scm) { *err = L"OpenSCManager: " + sys::ErrorText(GetLastError()); return false; }
+            Sc s(OpenServiceW(scm.h, name.c_str(), SERVICE_QUERY_CONFIG));
+            if (!s) { *err = L"OpenService: " + sys::ErrorText(GetLastError()); return false; }
+            std::vector<BYTE> b;
+            if (!Config2(s.h, SERVICE_CONFIG_LAUNCH_PROTECTED, &b)) {
+                *err = L"refused: its launch protection could not be read: " + sys::ErrorText(GetLastError());
+                return false;
+            }
+            if (reinterpret_cast<HxLaunchProtectedInfo*>(b.data())->dwLaunchProtected != 0) {
+                *err = L"refused: a launch-protected service is never written through the registry";
+                return false;
+            }
+        }
+        // The control set Windows booted from (Select\Current, as restore.cmd reads it), named directly rather than
+        // through the CurrentControlSet link. REG_OPTION_OPEN_LINK: a service key that is itself a registry link is
+        // opened as itself and refused below (a link is a leaf, as a reparse point is for files). RegOpenKeyEx never
+        // creates a key.
+        if (KeyPath(name).empty()) { *err = L"refused: HKLM\\SYSTEM\\Select\\Current could not be read"; return false; }
+        HKEY k = nullptr;
+        LSTATUS e = RegOpenKeyExW(HKEY_LOCAL_MACHINE, KeyPath(name).c_str(), REG_OPTION_OPEN_LINK,
+                                  KEY_QUERY_VALUE | KEY_SET_VALUE, &k);
+        if (e != ERROR_SUCCESS) { *err = L"RegOpenKeyEx: " + sys::ErrorText((DWORD)e); return false; }
+        auto fail = [&](const std::wstring& t) { RegCloseKey(k); *err = t; return false; };
+        DWORD lt = 0;
+        if (RegQueryValueExW(k, L"SymbolicLinkValue", nullptr, &lt, nullptr, nullptr) == ERROR_SUCCESS)
+            return fail(L"refused: the service key is a registry link; Hadron never follows it");
+        RegStartVals now;
+        std::wstring re;
+        if (!ReadValues(k, &now, &re)) return fail(re);
+        if (now.start < 0) return fail(L"refused: the key has no Start value (Hadron never creates one)");
+        if (now.start < 2) return fail(L"refused: its registry Start is Boot or System");
+        // The values under this handle must be the ones RunApply re-read and logged as "before" in the I record:
+        // anything else (another tool wrote in between) is not overwritten. Raw: an absent DelayedAutostart is not 0.
+        if (now.start != expect.start || now.delayed != expect.delayed)
+            return fail(L"refused: changed since the re-read (now Start " + std::to_wstring(now.start) + L", DelayedAutostart " +
+                        (now.delayed < 0 ? std::wstring(L"absent") : std::to_wstring(now.delayed)) + L"): nothing written");
+        if (w.delayed >= 0) {
+            DWORD v = (DWORD)w.delayed;
+            e = RegSetValueExW(k, L"DelayedAutostart", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+            if (e != ERROR_SUCCESS) return fail(L"RegSetValueEx(DelayedAutostart), so nothing was changed: " + sys::ErrorText((DWORD)e));
+        }
+        DWORD v = (DWORD)w.start;
+        e = RegSetValueExW(k, L"Start", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+        if (e != ERROR_SUCCESS) {
+            std::wstring t = L"RegSetValueEx(Start): " + sys::ErrorText((DWORD)e);
+            if (w.delayed >= 0) {   // put DelayedAutostart back as it was, on the same handle: nothing half-written
+                LSTATUS r2;
+                if (now.delayed < 0) {
+                    r2 = RegDeleteValueW(k, L"DelayedAutostart");   // it was absent: the value Hadron just created goes
+                } else {
+                    DWORD old = (DWORD)now.delayed;
+                    r2 = RegSetValueExW(k, L"DelayedAutostart", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&old), sizeof(old));
+                }
+                t += r2 == ERROR_SUCCESS ? std::wstring(L"; DelayedAutostart was put back as it was, so nothing changed")
+                                         : L"; DelayedAutostart could not be put back (" + sys::ErrorText((DWORD)r2) +
+                                               L"): Undo writes the value recorded before";
+            }
+            return fail(t);
+        }
+        // Flush to disk. A failed flush leaves the written values in the live hive (the service manager reads them at
+        // the next boot unless the hive write fails then too): the write counts, and the read-back decides.
+        e = RegFlushKey(k);
+        RegCloseKey(k);
+        if (e != ERROR_SUCCESS) *err = L"RegFlushKey: " + sys::ErrorText((DWORD)e) + L" (written; the read-back decides)";
+        return true;
+    }
+
     std::wstring Build() override {
         return RegString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"CurrentBuildNumber");
     }
@@ -383,6 +473,32 @@ public:
     }
 
 private:
+    // HKLM-relative path of the service key in the current control set; "" when Select\Current can't be read.
+    static std::wstring KeyPath(const std::wstring& name) {
+        DWORD cur = 0, cb = sizeof(cur);
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Select", L"Current", RRF_RT_REG_DWORD, nullptr, &cur, &cb) != ERROR_SUCCESS ||
+            cur == 0 || cur > 999)
+            return {};
+        wchar_t b[48];
+        swprintf(b, 48, L"SYSTEM\\ControlSet%03lu\\Services\\", (unsigned long)cur);
+        return b + name;
+    }
+    // One path component, as the SCM names a service: never a path that reaches another key.
+    static bool KeyNameOk(const std::wstring& n) {
+        return !n.empty() && n.size() < 256 && n.find_first_of(L"\\/") == std::wstring::npos;
+    }
+    static bool ReadValues(HKEY k, RegStartVals* out, std::wstring* err) {
+        auto dword = [&](const wchar_t* name, int* v) {
+            DWORD type = 0, data = 0, cb = sizeof(data);
+            LSTATUS e = RegQueryValueExW(k, name, nullptr, &type, reinterpret_cast<BYTE*>(&data), &cb);
+            if (e == ERROR_FILE_NOT_FOUND) { *v = -1; return true; }
+            if (e != ERROR_SUCCESS) { *err = std::wstring(L"RegQueryValueEx(") + name + L"): " + sys::ErrorText((DWORD)e); return false; }
+            if (type != REG_DWORD || cb != sizeof(data)) { *err = std::wstring(name) + L" is not a REG_DWORD"; return false; }
+            *v = (int)data;
+            return true;
+        };
+        return dword(L"Start", &out->start) && dword(L"DelayedAutostart", &out->delayed);
+    }
     bool armed_ = false;
 };
 

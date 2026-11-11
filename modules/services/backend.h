@@ -7,10 +7,12 @@
 // mutates memory only, with fault injection for the selftest.
 #pragma once
 
+#include "modules/services/evidence.h"
 #include "modules/services/hw.h"
 #include "modules/services/model.h"
 #include "modules/services/sxsstock.h"
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -38,6 +40,15 @@ struct WriteOp {
     int delayed = -1;
 };
 
+// The raw registry values the registry fallback reads and writes (HKLM\SYSTEM\CurrentControlSet\Services\<name>):
+// Start and DelayedAutostart, -1 when absent. Hadron writes them only when the SCM refuses a start-type change, with
+// the per-apply toggle on (regfallback.h).
+struct RegStartVals {
+    int start = -1;
+    int delayed = -1;
+    StartCfg Cfg() const { return StartCfg{start, delayed < 0 ? -1 : (delayed ? 1 : 0)}; }
+};
+
 class Backend {
 public:
     virtual ~Backend() = default;
@@ -61,6 +72,23 @@ public:
     virtual std::unique_ptr<SxsReader> MakeSxs() { return nullptr; }
     virtual void Arm() {}
     virtual void Disarm() {}
+    // Registry fallback (regfallback.h). ReadRegStart reads the service key's Start and DelayedAutostart (query rights
+    // only). WriteRegStart refuses until Arm(), refuses a Boot or System target, a key whose Start is Boot or System
+    // now, a launch-protected service and a key that is a registry link. Under its write handle it reads the values
+    // again and refuses, writing nothing, when they are not `expect` (Start, and DelayedAutostart raw: absent is not 0)
+    // : the value RunApply re-read and logged in the I record. Then it writes DelayedAutostart (when w.delayed >= 0)
+    // and Start, as REG_DWORD, into an existing key only; if Start fails after DelayedAutostart was written, the old
+    // DelayedAutostart is put back (deleted when it was absent) on the same handle.
+    virtual bool ReadRegStart(const std::wstring& name, RegStartVals* out, std::wstring* err) {
+        (void)name; (void)out;
+        *err = L"this backend has no registry access";
+        return false;
+    }
+    virtual bool WriteRegStart(const std::wstring& name, const WriteOp& w, const RegStartVals& expect, std::wstring* err) {
+        (void)name; (void)w; (void)expect;
+        *err = L"this backend has no registry access";
+        return false;
+    }
 };
 
 std::unique_ptr<Backend> MakeLiveBackend();
@@ -86,6 +114,16 @@ struct FakeFaults {
     std::set<std::wstring> cancelOnStop;  // a stop request for it sets *raise (the user pressed Cancel meanwhile)
     std::atomic<bool>* raise = nullptr;
     int setStartCalls = 0;
+    // Registry fallback (the fake's in-memory registry; nothing real is ever written).
+    std::set<std::wstring> regDeny;       // WriteRegStart fails with access denied
+    std::set<std::wstring> regDrift;      // the next ReadRegStart first flips the registry Start (someone else wrote it)
+    std::set<std::wstring> regReadBack;   // WriteRegStart "succeeds" but the value read back is not what was written
+    std::set<std::wstring> regDriftAtWrite;   // someone else writes Start after RunApply's re-read and I record, just
+                                              // before Hadron's write (WriteRegStart must see it under its handle)
+    std::set<std::wstring> regStartFail;  // the Start write fails after DelayedAutostart was written
+    std::function<void(const std::wstring&)> onRegWrite;   // called just before each registry write (the selftest
+                                                           // reads the undo log from disk there)
+    int regWrites = 0;
 };
 
 class FakeBackend : public Backend {
@@ -120,6 +158,13 @@ public:
     bool ReadHw(HwInfo* out) override { *out = hw_; return hw_.ok; }
     std::wstring Build() override { return build_; }
     std::wstring MachineGuid() override { return machine_; }
+    // The fake registry: Start (regStart, else the configured start) and DelayedAutostart of each item. A write
+    // changes regStart and the delayed value only: the service manager's start type changes at the next "restart".
+    bool ReadRegStart(const std::wstring& name, RegStartVals* out, std::wstring* err) override;
+    bool WriteRegStart(const std::wstring& name, const WriteOp& w, const RegStartVals& expect, std::wstring* err) override;
+    // Fixture evidence: signers.txt (Authenticode results by item name, lower case) and events7040.txt.
+    const std::map<std::wstring, SignerInfo>& Signers() const { return signers_; }
+    const std::vector<Ev7040>& Events() const { return events_; }
     // The fixture's sxs\ folder (hand-written XML manifests), when it has one.
     std::unique_ptr<SxsReader> MakeSxs() override { return sxsDir_.empty() ? nullptr : MakeFakeSxsReader(sxsDir_); }
     void SetSxsDir(std::wstring d) { sxsDir_ = std::move(d); }
@@ -131,6 +176,8 @@ private:
     HwInfo hw_;
     std::wstring build_ = L"19045", machine_ = L"fixture-machine";
     DWORD nextPid_ = 9000;   // a service this backend starts gets a new process
+    std::map<std::wstring, SignerInfo> signers_;
+    std::vector<Ev7040> events_;
 };
 
 }  // namespace hx::services

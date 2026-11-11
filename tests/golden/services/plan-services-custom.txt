@@ -30,7 +30,7 @@ Note: Start types only. Changes take effect at the next restart; Hadron never re
     basis: user -- your own list, saved 2026-11-11 09:00 UTC
     evidence: no devnode for class Printer ever seen, but it is a hot-plug class: left unticked
 [-] bthserv  Manual -> Disabled  (3/- -> 4/-)
-    Kept: hardware in use or seen before. present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth)
+    Kept: hardware in use or seen before. present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth, last arrived 2026-11-09)
     why: your custom preset "Gaming rig"
     basis: user -- your own list, saved 2026-11-11 09:00 UTC
-    evidence: present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth)
+    evidence: present: USB\VID_8087&PID_0033\5&2d5a1f0&0&14 (class Bluetooth, last arrived 2026-11-09)
