@@ -76,14 +76,17 @@ target_sources(mod_services PRIVATE modules/services/model.cpp modules/services/
                                     modules/services/store.cpp modules/services/recovery.cpp modules/services/plan.cpp
                                     modules/services/backend_fake.cpp modules/services/backend_live.cpp
                                     modules/services/ti.cpp modules/services/selftest.cpp
-                                    modules/services/sxsstock.cpp)
+                                    modules/services/sxsstock.cpp modules/services/custom.cpp modules/services/measure.cpp)
+# Custom preset files carry the Hadron version that wrote them (custom.h).
+target_compile_definitions(mod_services PRIVATE HX_HADRON_VERSION="${PROJECT_VERSION}")
 # The embedded services.db (RCDATA SERVICES_KB), an INTERFACE source as for bios.
 target_sources(mod_services INTERFACE "${HADRON_ROOT}/modules/services/resources/services.rc")
 set_property(SOURCE "${HADRON_ROOT}/modules/services/resources/services.rc" APPEND PROPERTY OBJECT_DEPENDS
              "${HADRON_ROOT}/modules/services/data/services.db")
 # Windows SDK libraries only (hard rule 3): advapi32 (SCM, registry, tokens), version (VERSIONINFO company),
-# shell32/ole32 (known folders), cfgmgr32/setupapi (devnodes and the boot disk).
-target_link_libraries(mod_services PUBLIC advapi32 version shell32 ole32 cfgmgr32 setupapi)
+# shell32/ole32 (known folders), cfgmgr32/setupapi (devnodes and the boot disk), comdlg32 (the custom-preset
+# export and import Browse dialogs).
+target_link_libraries(mod_services PUBLIC advapi32 version shell32 ole32 cfgmgr32 setupapi comdlg32)
 # Two selftest hooks in Store (owner check and reparse injection) for Wine, which can't set an owner or make a
 # reparse point. OFF by default: a release build has no such code at all. CI turns it on for the Wine run only, in
 # a separate build folder.

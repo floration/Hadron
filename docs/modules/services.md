@@ -24,10 +24,12 @@ it was designed.
 - **Presets, the same levels on both tabs:**
   - **Default: as first seen**: back to how Hadron first saw this PC (dated). That is not Windows' default, and the
     label says so.
-  - **Default: Windows stock**: restores only the items with a sourced stock value: five services (msiserver,
-    W32Time, TimeBrokerSvc, WSearch, BrokerInfrastructure), each quoted from a Microsoft troubleshooting page that
-    names no build. No driver has one, so on the Drivers tab it says so and changes nothing. A full 19045 table needs
-    an owner-measured capture of a clean install (`docs/pipeline/fixes/svcdrv-kb.md` §1).
+  - **Default: Windows stock**: values come first from this PC's own WinSxS component manifests (read-only,
+    decompressed with Windows' msdelta against the servicing stack's wcp.dll, cached per build, UBR and edition),
+    cross-checked with the KB: five Microsoft troubleshooting pages and two third-party tables that must agree
+    (wintips.org, TweakHound 20H2), each labelled with its source and "names no build". Where the manifest, the
+    tables or a runtime-set service disagree, both values are shown and the row is never applied. No driver has a
+    value. Details: `docs/pipeline/fixes/svcdrv-kb.md` §7.
   - **Pure bloat removal**, **Stripped** and **Minimum**, cumulative (an item in a level is in every stricter
     level unless that level names another target). Stripped removes only hardware that was never seen; Minimum
     ticks rows whose use can't be detected, Stripped leaves them unticked; hot-plug classes are never ticked. Membership is stock
@@ -37,6 +39,14 @@ it was designed.
 - **TrustedInstaller toggle** (rule 4): off at every launch and never saved. When on, the writes admin can't make run
   on a thread impersonating TrustedInstaller, and TI is put back the way it was found.
 - **Undo** of any apply, and **Resume or Undo** of an apply that was interrupted (crash, power loss).
+- **Custom presets.** Any plan's ticks can be saved under a name, then reopened, exported or imported as a plain-text
+  `HXPRESET 1` file (Hadron's own strict parser; an export never overwrites, an import refuses cloud placeholders and
+  offline files unread). Opening one only builds a plan, which goes through the same guards as the built-in presets
+  (never-touch, never-preset, no KB entry, drivers without `sysok`, the hardware check) and the same confirm, snapshot
+  and undo. Remove writes a tombstone; nothing is deleted.
+- **Measure.** "Measure before" on a plan, then "Measure after" once the PC has restarted. Each records RAM in use, commit,
+  the process and `svchost.exe` counts, minutes after boot, build and machine. The compare table is labelled
+  `owner-measured`, warns when the conditions differ, names any Hadron applies between the two, and says how to test fairly.
 
 ### What it never does
 - It never restarts the PC. Presets change only `Start` and `DelayedAutostart`, effective at the next restart.
@@ -45,7 +55,7 @@ it was designed.
   runs. A System-start driver is lowered only with a curated `sysok` entry.
 - Protected (PPL) services, the Defender/Security stack, TrustedInstaller, VSS and swprv are never in a preset.
 - It never creates or deletes a service, and never deletes a registry key (CI greps for those APIs).
-- It never shows a predicted saving. Measured before/after numbers are a follow-up idea.
+- It never shows a predicted saving. The only numbers on the Measure page are values it recorded on this PC.
 
 ## How it works
 1. **Load** (on a `Worker`): enumerate through the SCM, query each item, read hardware evidence through CfgMgr32
@@ -80,6 +90,9 @@ The safety mechanics, file formats and every resolved ambiguity are in `docs/des
 | `modules/services/plan.*` | Guards, presets, single, Default, Undo and Resume plans, dependency checks, `RunApply` |
 | `modules/services/store.*` | The data folder checks, snapshot and undo-log formats, `CREATE_NEW` writers, the apply lock |
 | `modules/services/recovery.*` | The restore scripts, `.reg` files and a stored-only zip writer (rule 3) |
+| `modules/services/sxsstock.*` | Windows-stock start types from this PC's WinSxS manifests (read-only), the cache and the cross-check |
+| `modules/services/custom.*` | Custom presets: the `HXPRESET 1` format, the preset store, export and import |
+| `modules/services/measure.*` | Before/after measurements: taking, storing and pairing records |
 | `modules/services/ti.*` | TrustedInstaller impersonation (module-local; moving it to core is a lead follow-up) |
 | `modules/services/selftest.cpp`, `cli.h`, `standalone.cpp` | `--selftest` (282 checks), `--dump-plan`, and `--live-test` (test-hooks build only) |
 | `tools/services/kb.py`, `genkb.py` | KB source (289 entries) and the rule-7 gate (`tools/services/README.md`) |
