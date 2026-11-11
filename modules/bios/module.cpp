@@ -3,8 +3,12 @@
 // path, help, explanation and per-goal advice; snapshots (save / load / compare); export of the changes a
 // goal recommends.
 //
-// Hard rule 2: read-only firmware. This module reads UEFI variables and SMBIOS and nothing else; it has
-// no firmware write path, never flashes and never runs vendor setup tools.
+// Hard rule 2: this module reads UEFI variables and SMBIOS, never flashes and never runs vendor setup
+// tools. Its one write path, changing setup values of existing map variables, lives in fwwrite.cpp
+// (docs/design/bios-write.md); this file only stages values, shows the plan and starts the Worker that
+// runs fwwrite's Execute. The "Allow BIOS writes" switch is a member that starts false and is never
+// persisted. Writes need live values, a verified board/BIOS guard and the switch on; the plan overlay
+// confirms only by a click on its Write button (Enter never confirms).
 //
 // Window: like diskmap and runas, the module registers its own view class ("Hadron.bios.View") instead
 // of core's CreateModuleContent, because that helper does not forward the worker's completion message,
@@ -26,8 +30,10 @@
 #include "core/ui/widgets.h"
 #include "modules/bios/db.h"
 #include "modules/bios/firmware.h"
+#include "modules/bios/fwwrite.h"
 #include "modules/bios/snapshot.h"
 #include "modules/bios/zip.h"
+#include "core/sys/log.h"
 
 #include <windowsx.h>
 #include <shellapi.h>
@@ -35,6 +41,7 @@
 #include <shobjidl.h>
 #include <commdlg.h>
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cwctype>
 #include <memory>
@@ -49,19 +56,27 @@ using namespace hx::bios;
 
 namespace {
 
-constexpr UINT WM_BIOS_DONE = WM_MODULE_BASE + 1;   // worker -> view
+constexpr UINT WM_BIOS_DONE = WM_MODULE_BASE + 1;       // worker -> view
+constexpr UINT WM_BIOS_PROGRESS = WM_MODULE_BASE + 2;   // write worker -> view: wParam done, lParam total
 const wchar_t* const kViewClass = L"Hadron.bios.View";
 const wchar_t* const kAppTitle = L"BIOS Settings Explorer";
+const wchar_t* const kWriteWarning =
+    L"Writes change your firmware settings. Hadron saves a backup first and verifies every write. They take "
+    L"effect after a reboot. If the PC won't boot, Clear CMOS (JBAT1 jumper, see the board manual) to restore defaults.";
 
 enum ClickId {
     ID_NONE = 0, ID_EXPORT = 1, ID_LOAD = 2, ID_SAVE = 3, ID_BANNER_LOAD = 4, ID_SEARCH = 5, ID_BANNER_TOGGLE = 6,
+    ID_WRITE_SWITCH = 7, ID_RESTORE = 8, ID_REVIEW = 9, ID_STAGE_REC = 10, ID_STAGE = 11, ID_UNSTAGE = 12,
+    ID_PLAN_CANCEL = 13, ID_PLAN_WRITE = 14, ID_OPEN_BACKUP = 15, ID_INCOMPLETE_RESTORE = 16, ID_NUMEDIT = 17,
+    ID_UNSTAGE_ALL = 18, ID_PLAN_SURFACE = 19,
     ID_GOAL = 100,     // + goal + 1 (100 = None)
     ID_FILTER = 200,   // + filter
+    ID_OPTION = 300,   // + option index of the selected setting (the "New value" chips)
 };
-enum Filter { F_ALL, F_KEY, F_CHANGED, F_HIDDEN, F_DIFFERS, F_SNAPDIFF };
-enum class Focus { List, Search, Detail };
+enum Filter { F_ALL, F_KEY, F_CHANGED, F_HIDDEN, F_DIFFERS, F_SNAPDIFF, F_STAGED };
+enum class Focus { List, Search, Detail, Edit };
 enum class Src { None, Live, Snapshot };
-enum class Job { None, Live, Load, Save };
+enum class Job { None, Live, Load, Save, Write, RestoreLoad };
 enum ColId { C_NAME = 0, C_CUR = 1, C_DEF = 2, C_GOAL = 3, C_SNAP = 4 };
 
 struct Click { RECT rc; int id; };
@@ -111,7 +126,7 @@ public:
     const ModuleInfo& Info() const override {
         static const ModuleInfo info{L"bios", L"BIOS Settings",   // sidebar name (spec); the view title is kAppTitle
                                      L"Every BIOS setup setting with its live value, default, explanation and "
-                                     L"per-goal advice. Snapshots and compare. Read-only.",
+                                     L"per-goal advice. Snapshots and compare. Guarded writes, off by default.",
                                      Admin::Required};
         return info;
     }
@@ -120,7 +135,8 @@ public:
     void OnDpiChanged(UINT) override { if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
     bool PreTranslateMessage(MSG& m) override;
     bool OnInput(UINT msg, WPARAM w, LPARAM l) override;
-    void Shutdown() override { worker_.Cancel(); worker_.Join(); }
+    void Shutdown() override { worker_.Cancel(); worker_.Join(); }   // a write stops before its next variable
+    bool CanClose() override { return job_ != Job::Write; }
     int  RunCli(int argc, wchar_t** argv) override;
     void LoadFixture(const wchar_t* dir) override;
     void Paint(HDC dc, const RECT& rc) override;
@@ -159,11 +175,35 @@ private:
     void Select(int row, bool center);
     void MoveSel(int delta);
 
+    // writes (docs/design/bios-write.md)
+    std::wstring WriteBlock() const;          // why writes can't happen now ("" = they can, switch aside)
+    bool WritesPossible() const { return writeSwitch_ && WriteBlock().empty(); }
+    PlanGate Gate() const;
+    void ToggleWriteSwitch();
+    void SyncEditor();                        // reset the "New value" editor when the selection changes
+    void OnNumEditChanged();
+    bool StagedOverlap(int setting, std::wstring* other) const;
+    void StageSelected();
+    void StageRecommended();
+    void ReviewPlan();
+    void StartWrite();
+    void StartRestoreLoad(const std::wstring& dir);
+    void DoRestoreDialog();
+    void OpenBackupFolder();
+    void RefreshAfterWrite();
+    void SetupWriteDemo(const VarMap& vars);  // --screenshot --write-demo: MockBackend over the fixture
+    bool PlanInput(UINT msg, WPARAM w, LPARAM l);
+    void SelftestWrites(const std::function<void(bool, const std::wstring&)>& check, const std::wstring& root);
+    void PaintPlan(HDC dc, const RECT& rc);
+    int  PaintPlanList(HDC dc, bool draw);
+
     // painting
     void Chip(HDC dc, int& x, int y, const std::wstring& label, int id, bool on);
     int  Button(HDC dc, int right, int y, const std::wstring& label, int id, bool primary, bool enabled);
+    int  Switch(HDC dc, int right, int y, const std::wstring& label, int id, bool on, bool enabled);
     void PaintHeader(HDC dc, const RECT& rc);
     int  PaintBanners(HDC dc, const RECT& rc);   // returns the y below the last banner
+    int  PaintWriteBar(HDC dc, const RECT& rc, int y);
     void PaintList(HDC dc);
     int  PaintDetail(HDC dc, bool draw);
     int  TextW(HDC dc, const std::wstring& s, HFONT f) const;
@@ -200,6 +240,30 @@ private:
     SnapLoad jobSnap_;
     SaveResult jobSave_;
     std::wstring jobPath_;
+    ExecResult jobExec_;
+    SnapLoad jobBackup_;
+
+    // writes. writeSwitch_ is "Allow BIOS writes": false at every start, never persisted (rule 2).
+    bool writeSwitch_ = false;
+    std::unique_ptr<FwBackend> backend_;    // RealBackend, or a MockBackend for the screenshot demo
+    bool demo_ = false;                     // --screenshot --write-demo: the mock drives everything
+    std::wstring demoMode_;                 // "plan" (overlay open) or "edit"
+    std::wstring backupRoot_;               // %LOCALAPPDATA%\Hadron\bios-backups ("" in tests and the demo)
+    std::wstring backupShown_;              // the same, as shown in the plan
+    std::map<int, long long> staged_;       // setting index -> new value
+    int editFor_ = -1;                      // the setting the editor below was set up for
+    bool hasPick_ = false; long long pick_ = 0;   // the chip picked for a oneof/checkbox setting
+    TextField numEdit_;                     // numeric value
+    std::wstring editMsg_; int editTone_ = 0;
+    RECT rcNumEdit_{};
+    bool planOpen_ = false;
+    Plan plan_;
+    ScrollBar planSb_;
+    RECT rcPlanList_{}, rcPlanSbTrack_{};
+    int execDone_ = 0, execTotal_ = 0;
+    std::wstring resultText_, resultFolder_; int resultTone_ = 0;
+    IncompleteSession incomplete_;
+    bool hasIncomplete_ = false;
 
     // view state
     int goal_ = -1, filter_ = F_ALL;
@@ -261,7 +325,8 @@ LRESULT BiosModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SETFOCUS: case WM_KILLFOCUS: Invalidate(); return 0;
     case WM_SETCURSOR:
         if (LOWORD(l) == HTCLIENT) {
-            SetCursor(LoadCursorW(nullptr, hoverId_ == ID_SEARCH ? IDC_IBEAM : (hoverId_ > 0 ? IDC_HAND : IDC_ARROW)));
+            SetCursor(LoadCursorW(nullptr, hoverId_ == ID_SEARCH || hoverId_ == ID_NUMEDIT
+                                               ? IDC_IBEAM : (hoverId_ > 0 && hoverId_ != ID_PLAN_SURFACE ? IDC_HAND : IDC_ARROW)));
             return TRUE;
         }
         break;
@@ -272,11 +337,23 @@ LRESULT BiosModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_CAPTURECHANGED:
         if (listSb_.Dragging()) listSb_.OnMouse(WM_LBUTTONUP, 0, 0, rcListSbTrack_);
         if (detSb_.Dragging()) detSb_.OnMouse(WM_LBUTTONUP, 0, 0, rcDetSbTrack_);
+        if (planSb_.Dragging()) planSb_.OnMouse(WM_LBUTTONUP, 0, 0, rcPlanSbTrack_);
         search_.CancelDrag();
+        numEdit_.CancelDrag();
         Invalidate();
         return 0;
     case WM_BIOS_DONE:
         OnJobDone();
+        return 0;
+    case WM_BIOS_PROGRESS:   // kept out of the WM_LBUTTONDOWN fall-through chain below
+        execDone_ = (int)w; execTotal_ = (int)l;
+        if (job_ == Job::Write && host_) {
+            std::wstring s = L"Writing BIOS settings: variable " + std::to_wstring(std::min(execDone_ + 1, std::max(1, execTotal_))) +
+                             L" of " + std::to_wstring(execTotal_) + L"…";
+            if (execDone_ < (int)plan_.vars.size()) s += L" (" + plan_.vars[(size_t)execDone_].name + L")";
+            host_->SetStatus(s.c_str());
+        }
+        Invalidate();
         return 0;
     case WM_RBUTTONDOWN:
         SetFocus(h);
@@ -314,6 +391,26 @@ HWND BiosModule::Create(IHost& host, HWND parent, const RECT& rc) {
     dbOk_ = LoadDb(&dbErr_);
     if (!dbOk_) host.Log(LogLevel::Error, dbErr_.c_str());
     search_.onChanged = [this](const std::wstring&) { Refilter(); };
+    numEdit_.placeholder = L"value";
+    numEdit_.onChanged = [this](const std::wstring&) { OnNumEditChanged(); };
+    {
+        // The real backend may write only the map's variables (it also refuses everything in test runs).
+        std::set<VarKey> allowed;
+        for (auto& v : db_.Variables()) allowed.insert(MakeVarKey(v.first, v.second));
+        backend_ = std::make_unique<RealBackend>(std::move(allowed));
+    }
+    // Test and fixture runs never touch the real backup folder (the latch is set for exactly those).
+    if (!sys::NoFirmwareWrites()) {
+        backupRoot_ = DefaultBackupRoot();
+        backupShown_ = backupRoot_;
+        hasIncomplete_ = dbOk_ && FindIncompleteSession(backupRoot_, &incomplete_);
+        if (hasIncomplete_) {
+            std::wstring m = L"bios: incomplete write session found: " + incomplete_.dir;
+            host.Log(LogLevel::Warn, m.c_str());
+        }
+    } else {
+        backupShown_ = L"%LOCALAPPDATA%\\Hadron\\bios-backups";
+    }
 
     static bool registered = false;
     if (!registered) {
@@ -355,6 +452,11 @@ HWND BiosModule::Create(IHost& host, HWND parent, const RECT& rc) {
     std::wstring selectArg;
     for (size_t i = 0; i + 1 < cl.rest.size(); i++) if (cl.rest[i] == L"--select") selectArg = cl.rest[i + 1];
     if (!selectArg.empty()) selectPrompt_ = selectArg;
+    // --write-demo plan|edit: only with --screenshot. LoadFixture then builds a MockBackend from the
+    // fixture and stages a scripted plan over it; nothing real is read or written.
+    if (!cl.screenshot.empty())
+        for (size_t i = 0; i + 1 < cl.rest.size(); i++)
+            if (cl.rest[i] == L"--write-demo") demoMode_ = cl.rest[i + 1];
     if (!cl.screenshot.empty() || cl.selftest) {
         if (!snapArg.empty()) {
             SnapLoad s;
@@ -485,6 +587,39 @@ void BiosModule::OnJobDone() {
         else
             SetNotice(L"Snapshot not saved. " + jobSave_.error +
                       (jobSave_.folder.empty() ? L"" : L" Partial files are in " + jobSave_.folder + L"."), 2);
+    } else if (j == Job::Write) {
+        planOpen_ = false;
+        planSb_.SetOffset(0);
+        const ExecResult& r = jobExec_;
+        // Written variables: their staged values are now current, so unstage them.
+        for (size_t i = 0; i < r.vars.size() && i < plan_.vars.size(); i++)
+            if (r.vars[i].state == VarState::Written)
+                for (auto& ps : plan_.vars[i].settings) if (ps.setting >= 0) staged_.erase(ps.setting);
+        resultText_ = (plan_.restore ? L"Restore: " : L"BIOS write: ") + r.Summary();
+        if (r.ok) resultText_ += L" The changes take effect after a reboot.";
+        resultTone_ = r.ok ? 0 : 2;
+        resultFolder_ = r.backupDir;
+        host_->Log(r.ok ? LogLevel::Info : LogLevel::Error, resultText_.c_str());
+        notice_.clear();
+        host_->SetStatus(r.ok ? L"BIOS write finished and verified." : L"BIOS write stopped; see the banner.");
+        // This session is now the newest: its journal decides whether the "didn't finish" banner shows.
+        if (!backupRoot_.empty()) hasIncomplete_ = FindIncompleteSession(backupRoot_, &incomplete_);
+        if (r.started) RefreshAfterWrite();   // a fresh read so Current shows what the firmware holds now
+    } else if (j == Job::RestoreLoad) {
+        if (!jobBackup_.ok) {
+            SetNotice(L"Could not read the backup. " + jobBackup_.error, 2);
+        } else {
+            std::wstring err;
+            if (BuildRestorePlan(db_, jobBackup_.vars, jobBackup_.label, jobBackup_.sysBoard, jobBackup_.sysBios,
+                                 live_.vars, Gate(), &plan_, &err)) {
+                planOpen_ = true;
+                planSb_.SetOffset(0);
+                host_->Log(LogLevel::Info, (L"bios: restore planned\r\n" + plan_.Text()).c_str());
+                SetNotice(L"", 0);
+            } else {
+                SetNotice(L"Restore refused: " + err, err.rfind(L"Nothing to restore", 0) == 0 ? 0 : 2);
+            }
+        }
     }
     Refilter();
     Invalidate();
@@ -571,9 +706,11 @@ void BiosModule::Refilter() {
     std::wstring q = Lower(search_.Text());
     if (filter_ == F_DIFFERS && goal_ < 0) filter_ = F_ALL;
     if (filter_ == F_SNAPDIFF && !compare_) filter_ = F_ALL;
+    if (filter_ == F_STAGED && staged_.empty()) filter_ = F_ALL;
     if (sortCol_ == C_SNAP && !compare_) sortCol_ = -1;
     for (int i = 0; i < (int)db_.S.size(); i++) {
         const Setting& s = db_.S[i];
+        if (filter_ == F_STAGED && !staged_.count(i)) continue;
         if (filter_ == F_KEY && !db_.IsKey(s)) continue;
         if (filter_ == F_CHANGED && !Changed(s)) continue;
         if (filter_ == F_HIDDEN && !s.hidden) continue;
@@ -658,6 +795,19 @@ std::wstring BiosModule::SourceLine() const {
 std::vector<Banner> BiosModule::Banners() const {
     std::vector<Banner> b;
     if (!dbOk_) { b.push_back({dbErr_, 2, 0}); return b; }
+    if (writeSwitch_) {
+        std::wstring t = kWriteWarning;
+        std::wstring why = WriteBlock();
+        if (!why.empty()) t += L"\nWrites are blocked: " + why;
+        b.push_back({t, 2, 0, L"", 4});
+    }
+    if (!resultText_.empty())
+        b.push_back({resultText_, resultTone_, resultFolder_.empty() ? 0 : ID_OPEN_BACKUP, L"Open backup folder", 4});
+    if (hasIncomplete_)
+        b.push_back({L"A BIOS write on " + incomplete_.stamp + L" didn't finish (" +
+                     std::to_wstring(incomplete_.vars.size()) + L" variable" + (incomplete_.vars.size() == 1 ? L"" : L"s") +
+                     L" without a verified result). Restore that backup? Hadron shows the plan first.",
+                     2, ID_INCOMPLETE_RESTORE, L"Restore…"});
     if (!notice_.empty()) b.push_back({notice_, noticeTone_, 0});
     if (!guardText_.empty()) b.push_back({guardText_, 2, 0});
     if (liveDone_ && !live_.error.empty()) b.push_back({live_.error, 2, 0});
@@ -716,6 +866,28 @@ void BiosModule::OnClickId(int id) {
     else if (id == ID_SAVE) DoSaveDialog();
     else if (id == ID_BANNER_TOGGLE) bannerExpanded_ = !bannerExpanded_;
     else if (id == ID_SEARCH) focus_ = Focus::Search;
+    else if (id == ID_WRITE_SWITCH) ToggleWriteSwitch();
+    else if (id == ID_RESTORE) DoRestoreDialog();
+    else if (id == ID_REVIEW) ReviewPlan();
+    else if (id == ID_STAGE_REC) StageRecommended();
+    else if (id == ID_STAGE) StageSelected();
+    else if (id == ID_UNSTAGE) { if (sel_ >= 0) staged_.erase(sel_); editFor_ = -1; Refilter(); }
+    else if (id == ID_UNSTAGE_ALL) { staged_.clear(); editFor_ = -1; Refilter(); SetNotice(L"Nothing staged.", 0); }
+    else if (id == ID_OPEN_BACKUP) OpenBackupFolder();
+    else if (id == ID_NUMEDIT) focus_ = Focus::Edit;
+    else if (id == ID_INCOMPLETE_RESTORE) {
+        if (!WritesPossible())
+            SetNotice(L"To restore that backup, turn on \"Allow BIOS writes\" (it needs live values and a verified "
+                      L"board/BIOS guard), then press Restore… again.", 1);
+        else StartRestoreLoad(incomplete_.dir);
+    } else if (id >= ID_OPTION && sel_ >= 0 && id < ID_OPTION + 2 + (int)db_.S[sel_].opts.size()) {
+        const Setting& s = db_.S[sel_];
+        int k = id - ID_OPTION;
+        if (s.kind == L"checkbox" && s.opts.empty()) pick_ = k;   // chips 0 and 1
+        else if (k < (int)s.opts.size()) pick_ = s.opts[(size_t)k].v;
+        hasPick_ = true;
+        editMsg_.clear();
+    }
     else if (id >= ID_GOAL && id < ID_GOAL + 1 + kGoalCount) {
         goal_ = id - ID_GOAL - 1;
         if (goal_ < 0) {
@@ -723,7 +895,7 @@ void BiosModule::OnClickId(int id) {
             if (sortCol_ == C_GOAL) sortCol_ = -1;
         }
         Refilter();
-    } else if (id >= ID_FILTER && id <= ID_FILTER + F_SNAPDIFF) {
+    } else if (id >= ID_FILTER && id <= ID_FILTER + F_STAGED) {
         filter_ = id - ID_FILTER;
         Refilter();
     }
@@ -840,23 +1012,354 @@ void BiosModule::MoveSel(int delta) {
 }
 
 // ============================================================================================
+// Writes (docs/design/bios-write.md). The UI side: gate, switch, staging, plan, job wiring.
+
+std::wstring BiosModule::WriteBlock() const {
+    if (!dbOk_) return L"the settings map didn't load.";
+    if (!backend_) return L"no firmware access.";
+    if (backend_->IsReal() && sys::NoFirmwareWrites())
+        return L"this is a test or fixture run (--selftest, --screenshot, --fixture or --snapshot), where firmware writes are off.";
+    if (primary_ == Src::Snapshot) return L"snapshot mode: the values come from a snapshot, not from this PC.";
+    if (primary_ != Src::Live || !liveDone_ || live_.readOk == 0) return L"not live: no firmware variables were read from this PC.";
+    if (!live_.elevated) return L"Hadron isn't running elevated.";
+    if (!live_.privOk) return L"SeSystemEnvironmentPrivilege couldn't be enabled (" + sys::ErrorText(live_.privErr) + L").";
+    if (!guardText_.empty()) return L"the board/BIOS guard doesn't match this PC.";
+    if (unverified_ || !guardUnknown_.empty()) return L"the board/BIOS guard couldn't run, so the map is unverified.";
+    if (job_ == Job::Write) return L"a write is running.";
+    return L"";
+}
+
+PlanGate BiosModule::Gate() const {
+    PlanGate g;
+    g.live = primary_ == Src::Live && liveDone_ && live_.readOk > 0 && live_.elevated && live_.privOk &&
+             !(backend_ && backend_->IsReal() && sys::NoFirmwareWrites());
+    g.guardMatched = !unverified_ && guardText_.empty() && guardUnknown_.empty() && !db_.board.empty();
+    g.switchOn = writeSwitch_;
+    return g;
+}
+
+void BiosModule::ToggleWriteSwitch() {
+    // Never persisted: no Prefs() call here or anywhere for this switch (rule 2).
+    if (writeSwitch_) {
+        writeSwitch_ = false;
+        planOpen_ = false;
+        host_->Log(LogLevel::Info, L"bios: \"Allow BIOS writes\" switched off");
+        SetNotice(L"", 0);
+        return;
+    }
+    if (job_ == Job::Write) return;
+    if (backend_ && backend_->IsReal() && sys::NoFirmwareWrites()) {
+        SetNotice(L"\"Allow BIOS writes\" can't be turned on in a test or fixture run.", 1);
+        return;
+    }
+    writeSwitch_ = true;
+    editFor_ = -1;
+    host_->Log(LogLevel::Info, L"bios: \"Allow BIOS writes\" switched on");
+}
+
+void BiosModule::SyncEditor() {
+    if (editFor_ == sel_) return;
+    editFor_ = sel_;
+    hasPick_ = false;
+    editMsg_.clear();
+    editTone_ = 0;
+    if (sel_ < 0 || sel_ >= (int)db_.S.size()) { numEdit_.SetText(L""); return; }
+    const Setting& s = db_.S[sel_];
+    auto st = staged_.find(sel_);
+    if (st != staged_.end()) { hasPick_ = true; pick_ = st->second; }
+    numEdit_.SetText(st != staged_.end() ? std::to_wstring(st->second) : (s.hasCur ? std::to_wstring(s.cur) : L""));
+}
+
+// Whole numbers only (decimal); anything else is refused, there is no hex or byte entry.
+bool ParseWhole(const std::wstring& t, long long* v) {
+    size_t a = 0, b = t.size();
+    while (a < b && t[a] == L' ') a++;
+    while (b > a && t[b - 1] == L' ') b--;
+    if (a == b || b - a > 19) return false;
+    unsigned long long u = 0;
+    for (size_t i = a; i < b; i++) {
+        if (t[i] < L'0' || t[i] > L'9') return false;
+        u = u * 10 + (unsigned)(t[i] - L'0');
+    }
+    if (u > (unsigned long long)LLONG_MAX) return false;
+    *v = (long long)u;
+    return true;
+}
+
+void BiosModule::OnNumEditChanged() {
+    editMsg_.clear();
+    editTone_ = 0;
+    if (sel_ < 0) return;
+    const Setting& s = db_.S[sel_];
+    long long v = 0;
+    if (numEdit_.Text().empty()) return;
+    if (!ParseWhole(numEdit_.Text(), &v)) { editMsg_ = L"Enter a whole number."; editTone_ = 2; return; }
+    std::wstring why;
+    uint8_t enc[8];
+    if (!ValidateValue(s, v, &why)) { editMsg_ = L"Not allowed: " + why + L"."; editTone_ = 2; return; }
+    if (!EncodeValue(v, s.width, enc)) { editMsg_ = L"Doesn't fit in " + std::to_wstring(s.width) + L" bytes."; editTone_ = 2; return; }
+    editMsg_ = s.hasCur && v == s.cur ? L"That is the current value." : L"OK: " + ValText(s, v);
+}
+
+bool BiosModule::StagedOverlap(int setting, std::wstring* other) const {
+    const Setting& s = db_.S[setting];
+    for (auto& st : staged_) {
+        if (st.first == setting) continue;
+        const Setting& o = db_.S[st.first];
+        if (o.var == s.var && Lower(o.guid) == Lower(s.guid) && o.offset < s.offset + s.width && s.offset < o.offset + o.width) {
+            if (other) *other = o.prompt;
+            return true;
+        }
+    }
+    return false;
+}
+
+void BiosModule::StageSelected() {
+    if (!WritesPossible() || sel_ < 0 || sel_ >= (int)db_.S.size()) return;
+    const Setting& s = db_.S[sel_];
+    long long v = 0;
+    if (s.kind == L"numeric") {
+        if (!ParseWhole(numEdit_.Text(), &v)) { editMsg_ = L"Enter a whole number."; editTone_ = 2; return; }
+    } else {
+        if (!hasPick_) { editMsg_ = L"Pick a value first."; editTone_ = 1; return; }
+        v = pick_;
+    }
+    std::wstring why, other;
+    uint8_t enc[8];
+    if (!s.hasCur) { editMsg_ = L"No current value was read for this setting, so it can't be changed."; editTone_ = 2; return; }
+    if (!ValidateValue(s, v, &why)) { editMsg_ = L"Not allowed: " + why + L"."; editTone_ = 2; return; }
+    if (!EncodeValue(v, s.width, enc)) { editMsg_ = L"Doesn't fit in " + std::to_wstring(s.width) + L" bytes."; editTone_ = 2; return; }
+    if (v == s.cur) {
+        staged_.erase(sel_);
+        editMsg_ = L"That is the current value; nothing staged.";
+        editTone_ = 0;
+        Refilter();
+        return;
+    }
+    if (StagedOverlap(sel_, &other)) {
+        editMsg_ = L"Stored in the same bytes as the staged \"" + other + L"\"; unstage that first.";
+        editTone_ = 2;
+        return;
+    }
+    staged_[sel_] = v;
+    editMsg_.clear();
+    std::wstring m = L"bios: staged " + s.prompt + L" (" + s.var + L" + " + std::to_wstring(s.offset) + L"): " +
+                     ValText(s, s.cur) + L" -> " + ValText(s, v);
+    host_->Log(LogLevel::Info, m.c_str());
+    Refilter();
+}
+
+void BiosModule::StageRecommended() {
+    if (!WritesPossible()) return;
+    if (goal_ < 0) { SetNotice(L"Pick a goal first; \"Stage recommended\" stages that goal's exact values.", 1); return; }
+    int n = 0, skipped = 0;
+    for (int i = 0; i < (int)db_.S.size(); i++) {
+        const Setting& s = db_.S[i];
+        long long v = 0;
+        if (!s.hasCur || !RecVal(db_, s, goal_, &v) || v == s.cur) continue;   // exact values only, never advice text
+        uint8_t enc[8];
+        if (!ValidateValue(s, v, nullptr) || !EncodeValue(v, s.width, enc) || StagedOverlap(i, nullptr)) { skipped++; continue; }
+        staged_[i] = v;
+        n++;
+    }
+    editFor_ = -1;
+    std::wstring m = L"Staged " + std::to_wstring(n) + L" recommended change" + (n == 1 ? L"" : L"s") + L" for " +
+                     kGoalNames[goal_] + L".";
+    if (skipped) m += L" " + std::to_wstring(skipped) + L" skipped: stored in the same bytes as another staged setting, or "
+                      L"the value isn't allowed.";
+    if (n) m += L" Review them with \"Review and write…\".";
+    SetNotice(m, 0);
+    host_->Log(LogLevel::Info, (L"bios: " + m).c_str());
+    if (n) { filter_ = F_STAGED; }
+    Refilter();
+}
+
+void BiosModule::ReviewPlan() {
+    if (!WritesPossible()) { SetNotice(L"Writes are blocked: " + WriteBlock(), 1); return; }
+    std::vector<StagedChange> st;
+    for (auto& s : staged_) st.push_back({s.first, s.second});
+    std::wstring err;
+    if (!BuildPlan(db_, st, live_.vars, Gate(), &plan_, &err)) { SetNotice(L"No plan: " + err, 2); return; }
+    planOpen_ = true;
+    planSb_.SetOffset(0);
+    host_->Log(LogLevel::Info, (L"bios: write planned\r\n" + plan_.Text()).c_str());
+}
+
+void BiosModule::StartWrite() {
+    if (!planOpen_ || plan_.vars.empty() || job_ != Job::None || worker_.Running()) return;
+    // The gate again, right before starting (the plan was built under it; nothing may have changed).
+    if (!WritesPossible()) { SetNotice(L"Writes are blocked: " + WriteBlock(), 2); planOpen_ = false; return; }
+    auto plan = std::make_shared<Plan>(plan_);   // the worker's own copy
+    FwBackend* be = backend_.get();
+    std::wstring root = backupRoot_;
+    ExecResult* out = &jobExec_;
+    sys::Worker* wk = &worker_;
+    HWND hw = hwnd_;
+    job_ = Job::Write;
+    execDone_ = 0;
+    execTotal_ = (int)plan->vars.size();
+    resultText_.clear();
+    host_->Log(LogLevel::Info, (L"bios: write confirmed by the user\r\n" + plan->Text()).c_str());
+    bool ok = worker_.Start(hwnd_, WM_BIOS_DONE, [plan, be, root, out, wk, hw] {
+        try {
+            Execute(*be, *plan, root, [wk] { return wk->Cancelled(); },
+                    [hw](int done, int total, const std::wstring&) { PostMessageW(hw, WM_BIOS_PROGRESS, (WPARAM)done, (LPARAM)total); },
+                    out);
+        } catch (const std::bad_alloc&) {
+            out->ok = false; out->error = L"Out of memory during the write; check the journal in the backup folder.";
+        } catch (const std::exception& e) {
+            out->ok = false; out->error = L"The write stopped: " + FromUtf8(e.what()) + L"; check the journal in the backup folder.";
+        }
+    });
+    if (!ok) {
+        job_ = Job::None;
+        SetNotice(L"Could not start the write: " + sys::ErrorText(GetLastError()) + L" Nothing was written.", 2);
+        return;
+    }
+    host_->SetBusy(true);
+    host_->SetStatus(L"Writing BIOS settings…");
+}
+
+void BiosModule::StartRestoreLoad(const std::wstring& dir) {
+    if (worker_.Running()) { SetNotice(L"Still busy with the previous job; try again in a moment.", 1); return; }
+    if (!WritesPossible()) { SetNotice(L"Writes are blocked: " + WriteBlock(), 1); return; }
+    SnapLoad* out = &jobBackup_;
+    std::wstring path = sys::ToExtended(dir);
+    job_ = Job::RestoreLoad;
+    if (!worker_.Start(hwnd_, WM_BIOS_DONE, [path, out] {
+            try { LoadSnapshot(path, out); }
+            catch (const std::bad_alloc&) { *out = SnapLoad{}; out->error = L"Out of memory while reading the backup."; }
+            catch (const std::exception& e) { *out = SnapLoad{}; out->error = L"Reading the backup failed: " + FromUtf8(e.what()); }
+        })) {
+        job_ = Job::None;
+        SetNotice(L"Could not start reading the backup: " + sys::ErrorText(GetLastError()), 2);
+        return;
+    }
+    host_->SetBusy(true);
+    SetNotice(L"Reading backup " + Shell(path) + L"…", 0);
+}
+
+void BiosModule::DoRestoreDialog() {
+    if (!WritesPossible()) { SetNotice(L"Writes are blocked: " + WriteBlock(), 1); return; }
+    if (worker_.Running()) { SetNotice(L"Still busy with the previous job; try again in a moment.", 1); return; }
+    IFileOpenDialog* dlg = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_IFileOpenDialog, (void**)&dlg);
+    if (FAILED(hr) || !dlg) { SetNotice(L"Could not open the folder picker: " + sys::ErrorText((DWORD)hr), 2); return; }
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opts)))
+        dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    dlg->SetTitle(L"Choose a BIOS backup folder to restore (a <date-time> folder under bios-backups)");
+    if (!backupRoot_.empty()) {
+        IShellItem* def = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(Shell(backupRoot_).c_str(), nullptr, IID_PPV_ARGS(&def))) && def) {
+            dlg->SetFolder(def);
+            def->Release();
+        }
+    }
+    std::wstring path;
+    hr = dlg->Show(host_->Frame());
+    if (SUCCEEDED(hr)) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR p = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &p)) && p) { path = p; CoTaskMemFree(p); }
+            item->Release();
+        }
+    } else if (hr != HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        SetNotice(L"The folder picker failed: " + sys::ErrorText((DWORD)hr), 2);
+    }
+    dlg->Release();
+    if (!path.empty()) StartRestoreLoad(path);
+}
+
+void BiosModule::OpenBackupFolder() {
+    if (resultFolder_.empty()) return;
+    HINSTANCE r = ShellExecuteW(host_->Frame(), L"open", Shell(resultFolder_).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if ((INT_PTR)r <= 32) SetNotice(L"Couldn't open " + Shell(resultFolder_) + L" (error " + std::to_wstring((INT_PTR)r) + L").", 1);
+}
+
+void BiosModule::RefreshAfterWrite() {
+    if (!demo_) { StartLive(); return; }
+    // The demo: read the mock the way ReadLive reads the firmware, synchronously.
+    LiveResult lr;
+    lr.elevated = true; lr.uefi = true; lr.fwType = L"UEFI"; lr.privOk = true;
+    backend_->Smbios(&lr.smbios, &lr.smbiosErr);
+    for (auto& w : db_.Variables()) {
+        FwVar v;
+        v.name = w.first; v.guid = w.second;
+        backend_->Read(&v);
+        if (v.err == 0) lr.readOk++;
+        lr.vars.push_back(std::move(v));
+    }
+    live_ = std::move(lr);
+    liveDone_ = true;
+    ApplyLive();
+}
+
+void BiosModule::SetupWriteDemo(const VarMap& vars) {
+    // --screenshot --write-demo: a MockBackend holding the fixture's bytes, with SMBIOS that matches the
+    // map, so the gate opens and a scripted plan can be shown. Nothing here can reach the firmware.
+    auto mock = std::make_unique<MockBackend>();
+    for (auto& v : vars) mock->Put(v.first.first, v.first.second, v.second, kAttrRequired);
+    mock->smbios.ok = true;
+    mock->smbios.boardMaker = L"Micro-Star International Co., Ltd.";
+    mock->smbios.boardProduct = L"PRO Z790-P WIFI (MS-7E06)";
+    mock->smbios.biosVendor = L"American Megatrends International, LLC.";
+    mock->smbios.biosVersion = L"A.F0";
+    backend_ = std::move(mock);
+    demo_ = true;
+    backupRoot_.clear();   // the demo never executes; an empty root makes Execute refuse anyway
+    RefreshAfterWrite();
+    writeSwitch_ = true;
+    auto find = [&](const wchar_t* prompt) {
+        for (int i = 0; i < (int)db_.S.size(); i++) if (db_.S[i].prompt == prompt) return i;
+        return -1;
+    };
+    auto opt = [&](int i, const wchar_t* text) {
+        if (i < 0) return;
+        for (auto& o : db_.S[i].opts) if (o.t == text) { staged_[i] = o.v; return; }
+    };
+    opt(find(L"Hyper-Threading"), L"Enabled");
+    opt(find(L"Intel Turbo Boost"), L"Enabled");
+    opt(find(L"CSM Support"), L"Disabled");
+    int icc = find(L"IA ICC Max Current Limit Override");
+    if (icc >= 0) staged_[icc] = 400;
+    sel_ = icc;
+    selectPrompt_.clear();
+    filter_ = F_STAGED;
+    Refilter();
+    if (demoMode_ == L"plan") ReviewPlan();
+}
+
+// ============================================================================================
 // Input
 
 bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (!host_) return false;
     PaintCtx c = Ctx();
+    if (planOpen_) return PlanInput(msg, w, l);   // the plan overlay is modal inside the view
+    if (focus_ == Focus::Edit && IsRectEmpty(&rcNumEdit_)) focus_ = Focus::Detail;   // the field isn't shown
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK || msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP ||
         msg == WM_RBUTTONUP) {
-        // The search box takes text selection, dragging and the right-click edit menu.
+        // The search box and the value field take text selection, dragging and the right-click edit menu.
         int mx = GET_X_LPARAM(l), my = GET_Y_LPARAM(l);
         POINT mp{mx, my};
         if (search_.Dragging() && (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP)) {
             search_.OnMouse(hwnd_, msg, mx, my, rcSearch_, c);
             return true;
         }
+        if (numEdit_.Dragging() && (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP)) {
+            numEdit_.OnMouse(hwnd_, msg, mx, my, rcNumEdit_, c);
+            return true;
+        }
         if (msg != WM_MOUSEMOVE && msg != WM_LBUTTONUP && PtInRect(&rcSearch_, mp)) {
             focus_ = Focus::Search;
             search_.OnMouse(hwnd_, msg, mx, my, rcSearch_, c);
+            return true;
+        }
+        if (msg != WM_MOUSEMOVE && msg != WM_LBUTTONUP && PtInRect(&rcNumEdit_, mp)) {
+            focus_ = Focus::Edit;
+            numEdit_.OnMouse(hwnd_, msg, mx, my, rcNumEdit_, c);
             return true;
         }
         if (msg == WM_LBUTTONDBLCLK) msg = WM_LBUTTONDOWN;
@@ -869,15 +1372,22 @@ bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         int page = std::max(1, (int)(rcListBody_.bottom - rcListBody_.top) / pitch - 1);
         if (w == VK_TAB) {
             bool back = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            int f = ((int)focus_ + (back ? 2 : 1)) % 3;
+            int cur = focus_ == Focus::Edit ? (int)Focus::Detail : (int)focus_;
+            int f = (cur + (back ? 2 : 1)) % 3;
             focus_ = (Focus)f;
             return true;
         }
         if (ctrl && w == 'F') { focus_ = Focus::Search; return true; }
         if (w == VK_ESCAPE) {
+            if (focus_ == Focus::Edit) { focus_ = Focus::Detail; return true; }
             if (!search_.Text().empty()) { search_.SetText(L""); Refilter(); return true; }
             if (focus_ != Focus::List) { focus_ = Focus::List; return true; }
             return false;
+        }
+        if (focus_ == Focus::Edit) {
+            // The value field: editing keys; Enter stages the value (staging writes nothing).
+            if (w == VK_RETURN) { StageSelected(); return true; }
+            return numEdit_.OnKey(w, hwnd_);
         }
         if (focus_ == Focus::Detail) {
             int before = detSb_.Offset();
@@ -913,6 +1423,7 @@ bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (msg == WM_CHAR) {
         wchar_t ch = (wchar_t)w;
         if (ch == 0x09 || ch == 0x1B || ch == 0x0D || ch == 0x06) return false;   // handled as keys
+        if (focus_ == Focus::Edit) return numEdit_.OnChar(ch);
         if (focus_ != Focus::Search) {
             if (ch < 0x20 || ch == 0x7F) return false;
             focus_ = Focus::Search;   // typing anywhere starts a search
@@ -970,6 +1481,7 @@ bool BiosModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     for (auto& ck : clicks_) {
         if (PtInRect(&ck.rc, pt)) {
             if (ck.id != ID_SEARCH && focus_ == Focus::Search) focus_ = Focus::List;
+            if (ck.id != ID_NUMEDIT && ck.id != ID_STAGE && focus_ == Focus::Edit) focus_ = Focus::Detail;
             OnClickId(ck.id);
             return true;
         }
@@ -1062,6 +1574,32 @@ int BiosModule::Button(HDC dc, int right, int y, const std::wstring& label, int 
     return w;
 }
 
+// A labelled on/off switch, right-aligned at `right`. Off at every start; the label says what it does.
+int BiosModule::Switch(HDC dc, int right, int y, const std::wstring& label, int id, bool on, bool enabled) {
+    Pal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    const bool con = Console();
+    int h = Sc(con ? 24 : 30);
+    int tw = Sc(con ? 30 : 36), th = Sc(con ? 16 : 18);
+    int lw = TextW(dc, label, f.caption);
+    int w = lw + Sc(10) + tw + Sc(12);
+    RECT r{right - w, y, right, y + h};
+    bool hot = enabled && hoverId_ == id;
+    if (hot) RoundFill(dc, r, Sc(con ? 4 : 10), p.chip);
+    RECT lr{r.left + Sc(6), y, r.left + Sc(6) + lw + Sc(4), y + h};
+    TextLeft(dc, label, lr, f.caption, enabled ? (on ? p.bad : p.text) : p.faint);
+    RECT tr{r.right - Sc(6) - tw, y + (h - th) / 2, r.right - Sc(6), y + (h - th) / 2 + th};
+    COLORREF track = on ? p.bad : Mix(p.chipHot, p.bg, 0.2);
+    if (!enabled) track = Mix(track, p.bg, 0.5);
+    RoundFill(dc, tr, th, track, on ? kNoColor : p.faint);
+    int k = th - Sc(6);
+    int kx = on ? tr.right - Sc(3) - k : tr.left + Sc(3);
+    RECT kr{kx, tr.top + Sc(3), kx + k, tr.top + Sc(3) + k};
+    RoundFill(dc, kr, k, on ? OnColor(p.bad) : p.mute);
+    if (enabled) AddClick(r, id);
+    return w;
+}
+
 void BiosModule::PaintHeader(HDC dc, const RECT& rc) {
     Pal p(host_->Theme());
     const Fonts& f = host_->Fonts();
@@ -1073,6 +1611,9 @@ void BiosModule::PaintHeader(HDC dc, const RECT& rc) {
     right -= Button(dc, right, by, L"Export changes", ID_EXPORT, true, dbOk_) + Sc(10);
     right -= Button(dc, right, by, L"Save snapshot…", ID_SAVE, false, dbOk_ && !busy) + Sc(10);
     right -= Button(dc, right, by, L"Load snapshot…", ID_LOAD, false, dbOk_ && !busy) + Sc(10);
+    // The switch keeps its place when toggled; Restore appears to its left only while it is on.
+    right -= Switch(dc, right, by, L"Allow BIOS writes", ID_WRITE_SWITCH, writeSwitch_, dbOk_ && job_ != Job::Write) + Sc(10);
+    if (writeSwitch_) right -= Button(dc, right, by, L"Restore backup…", ID_RESTORE, false, WritesPossible() && !busy) + Sc(14);
     std::wstring sub = (db_.title.empty() ? L"" : db_.title + L"   •   ") + SourceLine();
     if (Console()) {
         RECT tr{pad, by, right - Sc(10), by + Sc(24)};
@@ -1126,12 +1667,45 @@ int BiosModule::PaintBanners(HDC dc, const RECT& rc) {
     return y == bannerTop_ ? y : y + Sc(2);
 }
 
+// The write bar, shown while "Allow BIOS writes" is on: staged count, Review and write, Stage recommended.
+int BiosModule::PaintWriteBar(HDC dc, const RECT& rc, int y) {
+    Pal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    const bool con = Console();
+    int pad = Sc(con ? 10 : 20);
+    int h = Sc(con ? 24 : 30);
+    int labelW = Sc(50);
+    RECT lr{pad, y, pad + labelW, y + h};
+    TextLeft(dc, L"Write", lr, f.caption, p.mute);
+    int x = pad + labelW;
+    const bool can = WritesPossible() && !worker_.Running();
+    const int n = (int)staged_.size();
+    auto btn = [&](const std::wstring& label, int id, bool primary, bool enabled) {
+        int w = TextW(dc, label, f.caption) + Sc(26);
+        Button(dc, x + w, y, label, id, primary, enabled);
+        x += w + Sc(8);
+    };
+    btn(n ? L"Review and write " + std::to_wstring(n) + L"…" : std::wstring(L"Review and write…"), ID_REVIEW, true, can && n > 0);
+    std::wstring rec = goal_ >= 0 ? std::wstring(L"Stage recommended: ") + kGoalNames[goal_] : std::wstring(L"Stage recommended");
+    btn(rec, ID_STAGE_REC, false, can && goal_ >= 0);
+    if (n) btn(L"Unstage all", ID_UNSTAGE_ALL, false, job_ != Job::Write);
+    std::wstring hint = n ? std::to_wstring(n) + L" staged. Nothing is written until you review the plan and press Write."
+                          : (can ? L"Select a setting and pick a new value in the detail pane, or pick a goal and stage its "
+                                   L"recommended values."
+                                 : L"");
+    RECT hr{x + Sc(6), y, rc.right - pad, y + h};
+    TextLeft(dc, hint, hr, f.caption, p.mute);
+    return y + h + Sc(con ? 6 : 10);
+}
+
 void BiosModule::Paint(HDC dc, const RECT& rc) {
     if (!host_) return;
     Pal p(host_->Theme());
     const Fonts& f = host_->Fonts();
     PaintCtx c = Ctx();
     clicks_.clear();
+    rcNumEdit_ = RECT{};
+    SyncEditor();
     FillSolid(dc, rc, p.bg);
     const bool con = Console();
     int pad = Sc(con ? 10 : 20);
@@ -1139,6 +1713,7 @@ void BiosModule::Paint(HDC dc, const RECT& rc) {
     PaintHeader(dc, rc);
     bannerTop_ = Sc(con ? 38 : 74);
     int y = PaintBanners(dc, rc);
+    if (writeSwitch_) y = PaintWriteBar(dc, rc, y);
 
     // Goal row.
     int chipH = Sc(con ? 22 : 26);
@@ -1155,11 +1730,14 @@ void BiosModule::Paint(HDC dc, const RECT& rc) {
     TextLeft(dc, L"Show", lr, f.caption, p.mute);
     x = pad + labelW;
     static const wchar_t* const kFilters[] = {L"All", L"Key settings", L"Changed from default", L"Hidden in menus",
-                                              L"Differs from goal", L"Snapshot differs"};
-    for (int i = 0; i <= F_SNAPDIFF; i++) {
+                                              L"Differs from goal", L"Snapshot differs", L"Staged"};
+    for (int i = 0; i <= F_STAGED; i++) {
         if (i == F_DIFFERS && goal_ < 0) continue;
         if (i == F_SNAPDIFF && !compare_) continue;
-        Chip(dc, x, y, kFilters[i], ID_FILTER + i, filter_ == i);
+        if (i == F_STAGED && staged_.empty()) continue;
+        std::wstring label = kFilters[i];
+        if (i == F_STAGED) label += L" (" + std::to_wstring(staged_.size()) + L")";
+        Chip(dc, x, y, label, ID_FILTER + i, filter_ == i);
     }
     int sw = Sc(con ? 260 : 320);
     rcSearch_ = RECT{std::max(x + Sc(8), (int)rc.right - pad - sw), y, rc.right - pad, y + chipH};
@@ -1185,6 +1763,11 @@ void BiosModule::Paint(HDC dc, const RECT& rc) {
     if (focus_ == Focus::Detail && GetFocus() == hwnd_) {
         RECT fr = rcDetail_; InflateRect(&fr, -Sc(2), -Sc(2));
         FocusRectC(dc, fr, p.acc);
+    }
+    if (planOpen_) {
+        clicks_.clear();   // modal: only the overlay's own targets take clicks
+        rcNumEdit_ = RECT{};
+        PaintPlan(dc, rc);
     }
 }
 
@@ -1279,7 +1862,14 @@ void BiosModule::PaintList(HDC dc) {
         };
         std::wstring cur = CurText(s);
         if (unverified_ && s.hasCur) cur += L" ?";
-        cell(C_CUR, cur, Changed(s) ? p.warn : p.text);
+        auto stg = staged_.find(V_[i]);
+        if (stg != staged_.end()) {   // staged: "old → new", or "→ new" when both don't fit
+            std::wstring both = cur + L" → " + ValText(s, stg->second);
+            int nx = right;
+            for (int o : {C_SNAP, C_DEF, C_GOAL}) if (HasCol(o) && ColX(o) > ColX(C_CUR)) nx = std::min(nx, ColX(o) - Sc(6));
+            cell(C_CUR, TextW(dc, both, body) <= nx - ColX(C_CUR) ? both : L"→ " + ValText(s, stg->second), p.acc);
+        }
+        else cell(C_CUR, cur, Changed(s) ? p.warn : p.text);
         if (compare_) {
             std::wstring st = SnapText(s);
             if (snapUnverified_ && s.hasSnap) st += L" ?";
@@ -1387,7 +1977,95 @@ int BiosModule::PaintDetail(HDC dc, bool draw) {
         wchar_t loc[160];
         swprintf(loc, 160, L"%ls + 0x%X (%d byte%ls)", s.var.c_str(), (unsigned)s.offset, s.width, s.width == 1 ? L"" : L"s");
         badge(loc, p.mute);
+        if (staged_.count(sel_)) badge(L"Staged", p.acc);
         y += bh + Sc(8);
+    }
+    // 3b. New value (docs/design/bios-write.md "UI"): only when writes are possible.
+    if (WritesPossible()) {
+        const int visTop = rcDetail_.top + Sc(6), visBot = bottom;
+        auto clickIfVisible = [&](const RECT& r, int id) {
+            if (draw && r.top >= visTop && r.bottom <= visBot) AddClick(r, id);
+        };
+        auto smallBtn = [&](int x, const std::wstring& label, int id, bool primary, bool enabled) {
+            int w = TextW(dc, label, f.caption) + Sc(24), h = Sc(con ? 22 : 26);
+            RECT r{x, y, x + w, y + h};
+            if (draw) {
+                bool hot = enabled && hoverId_ == id;
+                COLORREF fill = primary ? (hot ? Mix(p.acc, RGB(255, 255, 255), 0.18) : p.acc) : (hot ? p.chipHot : p.chip);
+                if (!enabled) fill = Mix(fill, p.panel, 0.5);
+                RoundFill(dc, r, Sc(con ? 4 : 8), fill);
+                COLORREF tc = primary ? p.onAcc : p.text;
+                if (!enabled) tc = Mix(tc, fill, 0.5);
+                ui::DrawText(dc, label, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                if (enabled) clickIfVisible(r, id);
+            }
+            return w;
+        };
+        heading(L"New value");
+        auto st = staged_.find(sel_);
+        if (!s.hasCur) {
+            block(L"No current value was read for this setting, so it can't be changed.", f.caption, p.faint, 6);
+        } else {
+            if (st != staged_.end()) {
+                int bw = TextW(dc, L"Unstage", f.caption) + Sc(24);
+                if (draw) {
+                    RECT r{L, y, R - bw - Sc(8), y + Sc(con ? 22 : 26)};
+                    TextLeft(dc, L"Staged: " + ValText(s, s.cur) + L"  →  " + ValText(s, st->second), r, f.semi, p.acc);
+                }
+                smallBtn(R - bw, L"Unstage", ID_UNSTAGE, false, true);
+                y += Sc(con ? 26 : 32);
+            }
+            const int ch = Sc(con ? 22 : 26);
+            if (s.kind == L"numeric") {
+                int fw = Sc(con ? 140 : 160);
+                RECT fr{L, y, L + fw, y + ch};
+                if (draw && fr.top >= visTop && fr.bottom <= visBot) {
+                    numEdit_.Paint(dc, fr, Ctx(), focus_ == Focus::Edit && GetFocus() == hwnd_);
+                    rcNumEdit_ = fr;
+                    AddClick(fr, ID_NUMEDIT);
+                }
+                int bx = L + fw + Sc(8);
+                bx += smallBtn(bx, L"Stage", ID_STAGE, true, true) + Sc(12);
+                wchar_t rb[160];
+                if (s.step > 0) swprintf(rb, 160, L"%lld to %lld, step %lld", s.mn, s.mx, s.step);
+                else swprintf(rb, 160, L"%lld to %lld", s.mn, s.mx);
+                if (draw) { RECT r{bx, y, R, y + ch}; TextLeft(dc, rb, r, f.caption, p.mute); }
+                y += ch + Sc(6);
+            } else {
+                // Option chips (checkbox without options: 0 / 1). The current value is outlined and dotted.
+                std::vector<std::pair<std::wstring, long long>> chips;
+                if (s.kind == L"checkbox" && s.opts.empty()) chips = {{L"0 (off)", 0}, {L"1 (on)", 1}};
+                else for (auto& o : s.opts) chips.push_back({o.t.empty() ? std::to_wstring(o.v) : o.t, o.v});
+                int cx = L;
+                for (size_t k = 0; k < chips.size(); k++) {
+                    bool isCur = chips[k].second == s.cur;
+                    bool picked = hasPick_ && pick_ == chips[k].second;
+                    std::wstring label = (isCur ? L"● " : L"") + chips[k].first;
+                    int w = TextW(dc, label, f.caption) + Sc(con ? 14 : 20);
+                    if (cx + w > R && cx > L) { cx = L; y += ch + Sc(6); }
+                    RECT r{cx, y, cx + w, y + ch};
+                    if (draw && y + ch > rcDetail_.top && y < bottom) {
+                        int id = ID_OPTION + (int)k;
+                        COLORREF fill = picked ? p.acc : (hoverId_ == id ? p.chipHot : p.chip);
+                        RoundFill(dc, r, con ? Sc(4) : ch, fill, isCur && !picked ? p.acc : kNoColor);
+                        ui::DrawText(dc, label, r, f.caption, picked ? p.onAcc : p.text, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                        clickIfVisible(r, id);
+                    }
+                    cx += w + Sc(6);
+                }
+                y += ch + Sc(8);
+                bool can = hasPick_ && pick_ != s.cur && (st == staged_.end() || st->second != pick_);
+                smallBtn(L, L"Stage", ID_STAGE, true, can);
+                y += ch + Sc(6);
+            }
+            if (!editMsg_.empty())
+                block(editMsg_, f.caption, editTone_ == 2 ? p.bad : (editTone_ == 1 ? p.warn : p.mute), 4);
+            if (s.hidden || s.cond)
+                block(s.hidden ? L"Hidden in the BIOS menu: the firmware may ignore or reset it."
+                               : L"Shown only when another setting allows it; changing it may have no effect.",
+                      f.caption, p.warn, 4);
+        }
+        y += Sc(4);
     }
     // 4. What it does + basis (rule 7: the UI shows the basis).
     if (k) {
@@ -1499,14 +2177,262 @@ int BiosModule::PaintDetail(HDC dc, bool draw) {
 }
 
 // ============================================================================================
+// The plan overlay: modal inside the view. Esc or Cancel closes it; only a single click on its Write
+// button confirms (Enter, Space and double-clicks never do).
+
+bool BiosModule::PlanInput(UINT msg, WPARAM w, LPARAM l) {
+    const bool running = job_ == Job::Write;
+    if (msg == WM_KEYDOWN) {
+        int before = planSb_.Offset();
+        int view = rcPlanList_.bottom - rcPlanList_.top;
+        switch (w) {
+            case VK_ESCAPE:
+                if (running) return false;
+                planOpen_ = false;
+                host_->Log(LogLevel::Info, L"bios: plan closed without writing");
+                return true;
+            case VK_UP: planSb_.SetOffset(before - Sc(40)); break;
+            case VK_DOWN: planSb_.SetOffset(before + Sc(40)); break;
+            case VK_PRIOR: planSb_.SetOffset(before - view * 9 / 10); break;
+            case VK_NEXT: planSb_.SetOffset(before + view * 9 / 10); break;
+            case VK_HOME: planSb_.SetOffset(0); break;
+            case VK_END: planSb_.SetOffset(planSb_.MaxOffset()); break;
+            default: return false;   // Enter included: it never confirms the plan
+        }
+        return planSb_.Offset() != before;
+    }
+    if (msg == WM_MOUSEWHEEL) {
+        int before = planSb_.Offset();
+        planSb_.SetOffset(before - GET_WHEEL_DELTA_WPARAM(w) * Sc(60) / WHEEL_DELTA);
+        return planSb_.Offset() != before;
+    }
+    int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
+    POINT pt{x, y};
+    if (msg == WM_MOUSEMOVE) {
+        if (planSb_.Dragging()) return planSb_.OnMouse(msg, x, y, rcPlanSbTrack_);
+        int hid = 0;
+        for (auto& ck : clicks_) if (PtInRect(&ck.rc, pt)) { hid = ck.id; break; }
+        bool changed = hid != hoverId_ || hoverRow_ >= 0 || hoverHdr_ >= 0;
+        hoverId_ = hid; hoverRow_ = -1; hoverHdr_ = -1;
+        return changed;
+    }
+    if (msg == WM_LBUTTONUP) {
+        bool r = planSb_.Dragging() && planSb_.OnMouse(msg, x, y, rcPlanSbTrack_);
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        return r;
+    }
+    if (msg != WM_LBUTTONDOWN) return false;   // WM_LBUTTONDBLCLK too: a confirm takes a fresh single click
+    if (planSb_.Visible() && PtInRect(&rcPlanSbTrack_, pt)) {
+        SetCapture(hwnd_);
+        return planSb_.OnMouse(msg, x, y, rcPlanSbTrack_) || true;
+    }
+    for (auto& ck : clicks_) {
+        if (!PtInRect(&ck.rc, pt)) continue;
+        if (ck.id == ID_PLAN_CANCEL) {
+            if (running) {
+                worker_.Cancel();
+                host_->SetStatus(L"Stopping after the current variable…");
+            } else {
+                planOpen_ = false;
+                host_->Log(LogLevel::Info, L"bios: plan cancelled");
+            }
+        } else if (ck.id == ID_PLAN_WRITE) {
+            StartWrite();
+        }
+        return true;   // ID_PLAN_SURFACE and the rest: swallowed
+    }
+    return false;
+}
+
+void BiosModule::PaintPlan(HDC dc, const RECT& rc) {
+    Pal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    const bool con = Console();
+    const bool running = job_ == Job::Write;
+    // Dim the view behind (AlphaBlend from msimg32, a system library).
+    if (HDC src = CreateCompatibleDC(dc)) {
+        if (HBITMAP one = CreateCompatibleBitmap(dc, 1, 1)) {
+            HGDIOBJ old = SelectObject(src, one);
+            RECT px{0, 0, 1, 1};
+            FillSolid(src, px, RGB(0, 0, 0));
+            BLENDFUNCTION bf{AC_SRC_OVER, 0, 170, 0};
+            AlphaBlend(dc, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, src, 0, 0, 1, 1, bf);
+            SelectObject(src, old);
+            DeleteObject(one);
+        }
+        DeleteDC(src);
+    }
+    int m = Sc(con ? 14 : 32);
+    int pw = std::min((int)(rc.right - rc.left) - 2 * m, Sc(1100));
+    RECT pr{rc.left + ((rc.right - rc.left) - pw) / 2, rc.top + m, rc.left + ((rc.right - rc.left) + pw) / 2, rc.bottom - m};
+    RoundFill(dc, pr, Sc(con ? 4 : 14), p.panel, p.bad);
+    int pad = Sc(con ? 14 : 24);
+    int x0 = pr.left + pad, x1 = pr.right - pad;
+    int y = pr.top + pad - Sc(4);
+    {
+        RECT tr{x0, y, x1, y + Sc(32)};
+        TextLeft(dc, plan_.Title(), tr, con ? f.semi : f.title, p.text);
+        y += Sc(con ? 28 : 36);
+    }
+    auto para = [&](const std::wstring& t, HFONT font, COLORREF col, int left, int right) {
+        RECT mr{left, 0, right, 0};
+        SelectObject(dc, font);
+        DrawTextW(dc, t.c_str(), -1, &mr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+        RECT r{left, y, right, y + (mr.bottom - mr.top)};
+        ui::DrawText(dc, t, r, font, col, DT_WORDBREAK);
+        return (int)(mr.bottom - mr.top);
+    };
+    {
+        // The warning, as a bad-tone banner.
+        std::wstring warn = kWriteWarning;
+        RECT mr{x0 + Sc(14), 0, x1 - Sc(10), 0};
+        SelectObject(dc, f.caption);
+        DrawTextW(dc, warn.c_str(), -1, &mr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+        int h = (mr.bottom - mr.top) + Sc(14);
+        RECT br{x0, y, x1, y + h};
+        RoundFill(dc, br, Sc(con ? 3 : 8), Mix(p.panel, p.bad, 0.18));
+        RECT bar{br.left, br.top, br.left + Sc(4), br.bottom};
+        FillSolid(dc, bar, p.bad);
+        int ty = y;
+        y += Sc(7);
+        para(warn, f.caption, p.text, x0 + Sc(14), x1 - Sc(10));
+        y = ty + h + Sc(10);
+    }
+    {
+        std::wstring b = (plan_.restore ? L"Restoring from: " + plan_.restoreFrom + L"\n" : L"") +
+                         L"Backup first: every variable below is saved to " + backupShown_ +
+                         L"\\<date-time>\\ and flushed to disk before the first write. Each write is read back; a "
+                         L"mismatch puts the old bytes back and stops.";
+        y += para(b, f.caption, p.mute, x0, x1) + Sc(10);
+    }
+    // Buttons at the bottom: Cancel, then the one that writes.
+    int bh = Sc(con ? 26 : 32);
+    int by = pr.bottom - pad - bh;
+    auto button = [&](int right, const std::wstring& label, int id, COLORREF fill, COLORREF text, bool enabled) {
+        int w = TextW(dc, label, f.semi) + Sc(30);
+        RECT r{right - w, by, right, by + bh};
+        bool hot = enabled && hoverId_ == id;
+        if (hot) fill = Mix(fill, RGB(255, 255, 255), 0.14);
+        if (!enabled) { fill = Mix(fill, p.panel, 0.55); text = Mix(text, fill, 0.5); }
+        RoundFill(dc, r, Sc(con ? 4 : 10), fill);
+        ui::DrawText(dc, label, r, f.semi, text, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        if (enabled) AddClick(r, id);
+        return w;
+    };
+    int n = plan_.SettingCount(), vars = (int)plan_.vars.size();
+    std::wstring go = plan_.restore ? L"Restore " + std::to_wstring(vars) + (vars == 1 ? L" variable" : L" variables")
+                                    : L"Write " + std::to_wstring(n) + (n == 1 ? L" setting" : L" settings");
+    if (running)
+        go = L"Writing " + std::to_wstring(std::min(execDone_ + 1, std::max(1, execTotal_))) + L" of " + std::to_wstring(execTotal_) + L"…";
+    int right = x1;
+    right -= button(right, go, ID_PLAN_WRITE, p.bad, OnColor(p.bad), !running && WritesPossible()) + Sc(10);
+    bool cancelling = running && worker_.Cancelled();
+    button(right, running ? (cancelling ? L"Stopping…" : L"Stop after this variable") : L"Cancel", ID_PLAN_CANCEL, p.chip, p.text,
+           !cancelling);
+    {
+        RECT hr{x0, by, right - Sc(220), by + bh};
+        TextLeft(dc, running ? L"Writing. Each variable is verified before the next one starts."
+                             : L"Esc or Cancel closes this without writing. Enter does not confirm.",
+                 hr, f.caption, p.faint);
+    }
+    // The scrolling plan list.
+    rcPlanList_ = RECT{x0, y, x1, by - Sc(12)};
+    if (rcPlanList_.bottom - rcPlanList_.top < Sc(60)) rcPlanList_.bottom = rcPlanList_.top + Sc(60);
+    RoundFill(dc, rcPlanList_, Sc(con ? 3 : 10), Mix(p.panel, p.bg, 0.55));
+    int contentH = PaintPlanList(dc, false);
+    planSb_.Configure(rcPlanList_.bottom - rcPlanList_.top - Sc(8), contentH);
+    PaintPlanList(dc, true);
+    rcPlanSbTrack_ = RECT{rcPlanList_.right - Sc(14), rcPlanList_.top + Sc(4), rcPlanList_.right - Sc(2), rcPlanList_.bottom - Sc(4)};
+    if (planSb_.Visible()) planSb_.Paint(dc, rcPlanSbTrack_, Ctx());
+    AddClick(rc, ID_PLAN_SURFACE);   // last: the buttons above win; everything else swallows clicks
+}
+
+// The plan rows. draw=false measures the content height. Returns it.
+int BiosModule::PaintPlanList(HDC dc, bool draw) {
+    Pal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    const bool con = Console();
+    const RECT& lr = rcPlanList_;
+    int L = lr.left + Sc(14), R = lr.right - Sc(22);
+    int top = lr.top + Sc(8);
+    int y = top - (draw ? planSb_.Offset() : 0);
+    int saved = 0;
+    if (draw) { saved = SaveDC(dc); IntersectClipRect(dc, lr.left, lr.top + Sc(2), lr.right - Sc(14), lr.bottom - Sc(2)); }
+    auto visible = [&](int h) { return draw && y + h > lr.top && y < lr.bottom; };
+    auto wrapped = [&](const std::wstring& t, HFONT font, COLORREF col, int left) {
+        RECT mr{left, 0, R, 0};
+        SelectObject(dc, font);
+        DrawTextW(dc, t.c_str(), -1, &mr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+        int h = mr.bottom - mr.top;
+        if (visible(h)) { RECT r{left, y, R, y + h}; ui::DrawText(dc, t, r, font, col, DT_WORDBREAK); }
+        y += h;
+    };
+    HFONT body = con ? f.mono : f.ui;
+    for (auto& v : plan_.vars) {
+        int hh = Sc(con ? 24 : 28);
+        if (visible(hh)) {
+            RECT band{lr.left + Sc(6), y, lr.right - Sc(18), y + hh};
+            RoundFill(dc, band, Sc(con ? 3 : 8), Mix(p.panel, p.acc, 0.14));
+            wchar_t meta[160];
+            int ns = 0;
+            for (auto& s : v.settings) if (s.setting >= 0) ns++;
+            swprintf(meta, 160, L"attributes 0x%lX (NV|BS|RT)   •   %zu bytes   •   %d setting%ls", (unsigned long)v.attr,
+                     v.oldData.size(), ns, ns == 1 ? L"" : L"s");
+            int mw = TextW(dc, meta, f.caption);
+            RECT nr{L, y, R - mw - Sc(12), y + hh};
+            TextLeft(dc, v.name + L"   {" + v.guid + L"}", nr, f.semi, p.text);
+            RECT mr2{R - mw, y, R, y + hh};
+            TextRight(dc, meta, mr2, f.caption, p.mute);
+        }
+        y += hh + Sc(6);
+        for (auto& s : v.settings) {
+            int rh = Sc(con ? 20 : 24);
+            std::wstring change = s.oldText + L"  →  " + s.newText;
+            if (visible(rh)) {
+                int cw = std::min(TextW(dc, change, f.semi), (R - L) / 2);
+                RECT pr2{L, y, R - cw - Sc(16), y + rh};
+                TextLeft(dc, s.prompt, pr2, s.setting >= 0 ? body : f.caption, s.setting >= 0 ? p.text : p.mute);
+                RECT cr{R - cw, y, R, y + rh};
+                TextRight(dc, change, cr, f.semi, p.acc);
+            }
+            y += rh;
+            int sh = Sc(con ? 16 : 18);
+            if (!s.path.empty()) {
+                if (visible(sh)) { RECT r{L, y, R, y + sh}; TextLeft(dc, s.path, r, f.caption, p.mute); }
+                y += sh;
+            }
+            wchar_t loc[96];
+            swprintf(loc, 96, L"offset 0x%X  •  %d byte%ls  •  ", (unsigned)s.offset, s.width, s.width == 1 ? L"" : L"s");
+            std::wstring bytes = std::wstring(loc) + HexBytes(s.oldBytes) + L"  →  " + HexBytes(s.newBytes);
+            if (visible(sh)) { RECT r{L, y, R, y + sh}; TextLeft(dc, bytes, r, f.mono, p.faint); }
+            y += sh;
+            if (!s.flags.empty()) wrapped(s.flags, f.caption, p.warn, L);
+            if (!s.shares.empty()) wrapped(L"Same bytes as: " + s.shares, f.caption, p.warn, L);
+            y += Sc(6);
+            if (visible(1)) HLine(dc, L, R, y, Mix(p.panel, p.mute, 0.25));
+            y += Sc(6);
+        }
+        y += Sc(6);
+    }
+    if (!plan_.notes.empty()) {
+        if (visible(Sc(20))) { RECT r{L, y, R, y + Sc(20)}; TextLeft(dc, L"Notes", r, f.semi, p.mute); }
+        y += Sc(22);
+        for (auto& n : plan_.notes) { wrapped(L"• " + n, f.caption, p.mute, L); y += Sc(2); }
+    }
+    if (draw) RestoreDC(dc, saved);
+    return y + (draw ? planSb_.Offset() : 0) - top + Sc(8);
+}
+
+// ============================================================================================
 // Headless
 
 void BiosModule::LoadFixture(const wchar_t* dir) {
     // Synchronous, no Worker, so --screenshot is deterministic. dir is a snapshot folder or zip.
     if (!dir || !*dir || !dbOk_) return;
     SnapLoad s;
-    if (LoadSnapshot(dir, &s)) ApplySnapshot(std::move(s));
-    else SetNotice(L"Could not load the fixture snapshot: " + s.error, 2);
+    if (!LoadSnapshot(dir, &s)) SetNotice(L"Could not load the fixture snapshot: " + s.error, 2);
+    else if (demoMode_ == L"plan" || demoMode_ == L"edit") SetupWriteDemo(s.vars);   // MockBackend only
+    else ApplySnapshot(std::move(s));
     Refilter();
 }
 
@@ -1537,6 +2463,376 @@ const Expect kExpected[] = {
     {410, L"Adjacent Cache Line Prefetch", 0, 1},
 };
 
+// A host for the selftest's switch and plan-overlay checks. Prefs() counts its calls: the write switch
+// must never touch settings (it is never persisted).
+struct TestHost : IHost {
+    sys::SettingsStore store;
+    sys::Settings prefs{&store, L"bios"};
+    ui::Fonts fonts;
+    int prefsCalls = 0;
+    std::wstring status;
+    HWND Frame() override { return nullptr; }
+    UINT Dpi() override { return 96; }
+    void SetTitle(const wchar_t*) override {}
+    void SetStatus(const wchar_t* t) override { status = t ? t : L""; }
+    void SetBusy(bool) override {}
+    bool IsElevated() override { return true; }
+    sys::Settings& Prefs() override { prefsCalls++; return prefs; }
+    void Log(LogLevel, const wchar_t*) override {}
+    const ui::Theme& Theme() override { return ui::Baseline(); }
+    const ui::Fonts& Fonts() override { return fonts; }
+    ui::Layout Layout() override { return ui::Layout::Baseline; }
+};
+
+std::string ReadSmall(const std::wstring& path) {
+    std::string s;
+    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return s;
+    char buf[65536];
+    DWORD got = 0;
+    if (ReadFile(h, buf, sizeof(buf), &got, nullptr)) s.assign(buf, got);
+    CloseHandle(h);
+    return s;
+}
+
+// docs/design/bios-write.md "Selftests": everything through MockBackend, backups under root (a fresh
+// folder next to the fixture or in %TEMP%), never %LOCALAPPDATA%, never real firmware.
+void BiosModule::SelftestWrites(const std::function<void(bool, const std::wstring&)>& check, const std::wstring& root) {
+    std::wstring err;
+    // A small map: Setup (8 bytes) with a oneof, a 2-byte numeric (step 5), a checkbox, a 1-byte numeric that
+    // shares the numeric's high byte, and a oneof past the end; CpuSetup (4-byte numeric, no step); PchSetup
+    // (hidden oneof); AuthVar (authenticated, refused).
+    Db d;
+    bool parsed = d.Parse(
+        "V\tt\nB\tMS-7E06\t7E06vAF\nK\t0\tk\te\t\t\t\t\t\tn\nT\t1\n"
+        "S\t0\tSetup\tg1\t0\t1\toneof\t\t0\t\t\t\tOneOf\t\tM > A\t0\x1fOff\x1e" "1\x1fOn\t0\n"
+        "S\t1\tSetup\tg1\t2\t2\tnumeric\t\t0\t0\t1000\t5\tNum\t\tM > B\t\t0\n"
+        "S\t2\tSetup\tg1\t1\t1\tcheckbox\t\t0\t\t\t\tBox\t\tM\t\t0\n"
+        "S\t3\tCpuSetup\tg2\t0\t4\tnumeric\t\t0\t0\t100000\t0\tWide\t\tM\t\t0\n"
+        "S\t4\tPchSetup\tg3\t0\t1\toneof\tH\t0\t\t\t\tHid\t\tM\t0\x1fOff\x1e" "1\x1fOn\t0\n"
+        "S\t5\tSetup\tg1\t3\t1\tnumeric\t\t0\t0\t255\t1\tHighByte\t\tM\t\t0\n"
+        "S\t6\tSetup\tg1\t10\t1\toneof\t\t0\t\t\t\tPast\t\tM\t0\x1fOff\x1e" "1\x1fOn\t0\n"
+        "S\t7\tAuthVar\tg4\t0\t1\toneof\t\t0\t\t\t\tAuth\t\tM\t0\x1fOff\x1e" "1\x1fOn\t0\n",
+        &err);
+    check(parsed && d.S.size() == 8, L"write map: synthetic settings parse");
+    if (!parsed || d.S.size() != 8) return;
+    auto freshMock = [] {
+        auto m = std::make_unique<MockBackend>();
+        m->Put(L"Setup", L"g1", {0, 0, 0x0A, 0x00, 0x11, 0x22, 0x33, 0x44});   // Num = 10, Box = 0, OneOf = 0
+        m->Put(L"CpuSetup", L"g2", {0x10, 0x27, 0, 0});                       // Wide = 10000
+        m->Put(L"PchSetup", L"g3", {0, 9, 9, 9});
+        m->Put(L"AuthVar", L"g4", {0, 0, 0, 0}, 0x27);
+        m->smbios.ok = true;
+        m->smbios.boardProduct = L"PRO Z790-P WIFI (MS-7E06)";
+        m->smbios.biosVersion = L"A.F0";
+        return m;
+    };
+    auto liveOf = [&](MockBackend& m) {
+        std::vector<FwVar> lv;
+        for (auto& v : d.Variables()) { FwVar f; f.name = v.first; f.guid = v.second; m.Read(&f); lv.push_back(f); }
+        return lv;
+    };
+    const PlanGate open{true, true, true};
+    std::wstring why;
+
+    // --- ValidateValue ---
+    check(ValidateValue(d.S[0], 1, &why) && ValidateValue(d.S[0], 0, &why) && !ValidateValue(d.S[0], 2, &why),
+          L"ValidateValue: oneof takes option values only");
+    check(ValidateValue(d.S[2], 0, &why) && ValidateValue(d.S[2], 1, &why) && !ValidateValue(d.S[2], 2, &why) &&
+          !ValidateValue(d.S[2], -1, &why), L"ValidateValue: checkbox takes 0 and 1 only");
+    check(ValidateValue(d.S[1], 0, &why) && ValidateValue(d.S[1], 5, &why) && ValidateValue(d.S[1], 1000, &why),
+          L"ValidateValue: numeric range ends and steps accepted");
+    check(!ValidateValue(d.S[1], 3, &why) && !ValidateValue(d.S[1], 1005, &why) && !ValidateValue(d.S[1], -5, &why) &&
+          !ValidateValue(d.S[1], 1001, &why), L"ValidateValue: off-step, out of range and negative (mn = 0) refused");
+    check(ValidateValue(d.S[3], 12345, &why) && !ValidateValue(d.S[3], 100001, &why), L"ValidateValue: step 0 = any value in range");
+    {
+        Setting odd = d.S[0]; odd.kind = L"string";
+        Setting w3 = d.S[0]; w3.width = 3;
+        check(!ValidateValue(odd, 0, &why) && !ValidateValue(w3, 0, &why), L"ValidateValue: unknown kind and width 3 refused");
+    }
+    // --- EncodeValue ---
+    {
+        uint8_t b[8] = {};
+        bool w1 = EncodeValue(0xFF, 1, b) && b[0] == 0xFF;
+        bool w1o = !EncodeValue(0x100, 1, b);
+        bool w2 = EncodeValue(0x1234, 2, b) && b[0] == 0x34 && b[1] == 0x12;
+        bool w2o = !EncodeValue(0x10000, 2, b);
+        bool w4 = EncodeValue(0x12345678, 4, b) && b[0] == 0x78 && b[3] == 0x12;
+        bool w4o = !EncodeValue(0x100000000LL, 4, b);
+        bool w8 = EncodeValue(0x0102030405060708LL, 8, b) && b[0] == 0x08 && b[7] == 0x01;
+        bool neg = !EncodeValue(-1, 8, b) && !EncodeValue(-1, 1, b);
+        bool bad = !EncodeValue(1, 3, b) && !EncodeValue(1, 0, b);
+        check(w1 && w2 && w4 && w8, L"EncodeValue: widths 1/2/4/8, little-endian");
+        check(w1o && w2o && w4o && neg && bad, L"EncodeValue: overflow, negative and odd widths refused");
+        bool rt = true;
+        for (long long v : {0LL, 1LL, 255LL, 65535LL, 4294967295LL, 0x7FFFFFFFFFFFFFFFLL}) {
+            for (int wdt : {1, 2, 4, 8}) {
+                uint8_t e[8];
+                if (!EncodeValue(v, wdt, e)) continue;
+                long long back = -1;
+                if (!DecodeValue(std::vector<uint8_t>(e, e + wdt), 0, wdt, &back) || back != v) rt = false;
+            }
+        }
+        check(rt, L"EncodeValue: round-trips through DecodeValue");
+    }
+    // --- BuildPlan ---
+    {
+        auto m = freshMock();
+        auto lv = liveOf(*m);
+        Plan pl;
+        std::vector<StagedChange> st = {{0, 1}};
+        check(!BuildPlan(d, st, lv, PlanGate{false, true, true}, &pl, &why) &&
+              !BuildPlan(d, st, lv, PlanGate{true, false, true}, &pl, &why) &&
+              !BuildPlan(d, st, lv, PlanGate{true, true, false}, &pl, &why) && pl.vars.empty(),
+              L"BuildPlan: refused when not live, guard unmatched, or switch off");
+        int badAttrs = 0;
+        for (DWORD bit : {0x8u, 0x10u, 0x20u, 0x40u, 0x80u, 0x100u}) {
+            auto lv2 = lv;
+            for (auto& v : lv2) if (v.name == L"Setup") v.attr = 0x7 | bit;
+            if (!BuildPlan(d, st, lv2, open, &pl, &why)) badAttrs++;
+        }
+        for (DWORD bit : {0x1u, 0x2u, 0x4u}) {
+            auto lv2 = lv;
+            for (auto& v : lv2) if (v.name == L"Setup") v.attr = 0x7 & ~bit;
+            if (!BuildPlan(d, st, lv2, open, &pl, &why)) badAttrs++;
+        }
+        check(badAttrs == 9, L"BuildPlan: attributes 0x8/0x10/0x20/0x40/0x80/unknown refused, missing NV/BS/RT refused (" +
+              std::to_wstring(badAttrs) + L" of 9)");
+        bool auth = !BuildPlan(d, {{7, 1}}, lv, open, &pl, &why) && why.find(L"time-based authenticated (0x20)") != std::wstring::npos;
+        check(auth, L"BuildPlan: a time-based authenticated variable (attributes 0x27) is refused (" + why + L")");
+        {
+            auto lv2 = lv;
+            lv2.erase(std::remove_if(lv2.begin(), lv2.end(), [](const FwVar& v) { return v.name == L"CpuSetup"; }), lv2.end());
+            auto lv3 = lv;
+            for (auto& v : lv3) if (v.name == L"CpuSetup") { v.err = ERROR_ENVVAR_NOT_FOUND; v.data.clear(); }
+            check(!BuildPlan(d, {{3, 5}}, lv2, open, &pl, &why) && !BuildPlan(d, {{3, 5}}, lv3, open, &pl, &why),
+                  L"BuildPlan: missing or unread variable refused");
+        }
+        bool overlap = !BuildPlan(d, {{1, 20}, {5, 7}}, lv, open, &pl, &why) && why.find(L"same bytes") != std::wstring::npos;
+        check(overlap, L"BuildPlan: overlapping settings refused (" + why + L")");
+        bool past = !BuildPlan(d, {{6, 1}}, lv, open, &pl, &why) && why.find(L"past the end") != std::wstring::npos;
+        check(past, L"BuildPlan: offset + width past the end refused (" + why + L")");
+        check(!BuildPlan(d, {{1, 3}}, lv, open, &pl, &why) && !BuildPlan(d, {{0, 7}}, lv, open, &pl, &why),
+              L"BuildPlan: values outside the option list / step refused");
+        check(!BuildPlan(d, {{0, 0}}, lv, open, &pl, &why) && why.find(L"Nothing to write") == 0,
+              L"BuildPlan: a lone no-op is refused as nothing to write");
+        bool ok = BuildPlan(d, {{0, 0}, {0 + 2, 1}, {1, 20}, {3, 50000}}, lv, open, &pl, &why);
+        bool notes = ok && pl.notes.size() == 1 && pl.notes[0].find(L"OneOf") == 0;
+        check(ok && notes, L"BuildPlan: no-op dropped with a note" + (ok ? L"" : L": " + why));
+        bool oneVar = ok && pl.vars.size() == 2 && pl.vars[0].name == L"Setup" && pl.vars[0].settings.size() == 2 &&
+                      pl.vars[1].name == L"CpuSetup";
+        check(oneVar, L"BuildPlan: two settings in one variable -> one variable entry");
+        bool onlyPlanned = ok;
+        if (ok) {
+            const PlanVar& s = pl.vars[0];
+            std::vector<uint8_t> want = {0, 1, 20, 0, 0x11, 0x22, 0x33, 0x44};
+            onlyPlanned = s.newData == want && s.oldData == m->vars[MakeVarKey(L"Setup", L"g1")].data &&
+                          pl.vars[1].newData == std::vector<uint8_t>({0x50, 0xC3, 0, 0}) && s.attr == 0x7;
+        }
+        check(onlyPlanned, L"BuildPlan: newData differs from oldData only in the planned bytes");
+        bool shares = ok && pl.vars[0].settings.size() == 2 && pl.vars[0].settings[1].prompt == L"Num" &&
+                      pl.vars[0].settings[1].shares.find(L"HighByte") == 0;
+        check(shares, L"BuildPlan: a setting sharing the written bytes is named in the plan");
+        Plan hp;
+        check(BuildPlan(d, {{4, 1}}, lv, open, &hp, &why) && hp.vars.size() == 1 && !hp.vars[0].settings[0].flags.empty(),
+              L"BuildPlan: hidden setting flagged");
+    }
+    // --- Execute ---
+    std::wstring happyDir;
+    std::vector<uint8_t> setupOld, cpuOld;
+    {
+        auto m = freshMock();
+        setupOld = m->vars[MakeVarKey(L"Setup", L"g1")].data;
+        cpuOld = m->vars[MakeVarKey(L"CpuSetup", L"g2")].data;
+        Plan pl;
+        bool planned = BuildPlan(d, {{0, 1}, {2, 1}, {3, 50000}}, liveOf(*m), open, &pl, &why);
+        ExecResult r;
+        bool ok = planned && Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000000"});
+        happyDir = r.backupDir;
+        std::string j = ReadSmall(r.backupDir + L"\\journal.txt");
+        check(ok && r.written == 2 && j == "BEGIN Setup g1\r\nOK Setup\r\nBEGIN CpuSetup g2\r\nOK CpuSetup\r\nEND\r\n",
+              L"Execute: happy path, journal BEGIN/OK/END" + (ok ? L"" : L": " + r.error));
+        check(ok && m->vars[MakeVarKey(L"Setup", L"g1")].data == pl.vars[0].newData &&
+              m->vars[MakeVarKey(L"CpuSetup", L"g2")].data == pl.vars[1].newData && m->writes == 2,
+              L"Execute: the mock variables now hold newData (2 writes)");
+        SnapLoad bl;
+        bool loaded = LoadSnapshot(r.backupDir, &bl);
+        check(loaded && bl.vars[MakeVarKey(L"Setup", L"g1")] == setupOld && bl.vars[MakeVarKey(L"CpuSetup", L"g2")] == cpuOld &&
+              bl.loaded == 2, L"Execute: backup bins equal the old data; Load snapshot reads the backup folder");
+        check(loaded && BoardMatches(d.board, bl.sysBoard) && BiosMatches(d.bios, bl.sysBios),
+              L"Execute: the backup's system.txt passes the board/BIOS guard");
+        Db dd = d;
+        dd.Apply(bl.vars, false);
+        check(loaded && dd.S[0].hasCur && dd.S[0].cur == 0 && dd.S[3].cur == 10000, L"Execute: the backup decodes to the old values");
+        check(ReadSmall(r.backupDir + L"\\plan.txt").find("Write 3 settings to 2 variables") != std::string::npos,
+              L"Execute: plan.txt holds the human plan");
+        check(r.backupDir.size() > 15 && r.backupDir.compare(r.backupDir.size() - 15, 15, L"20260101-000000") == 0,
+              L"Execute: first session folder is <stamp>");
+        // A second session in the same second gets -2; nothing is reused.
+        auto m2 = freshMock();
+        Plan p2;
+        ExecResult r2;
+        bool ok2 = BuildPlan(d, {{0, 1}}, liveOf(*m2), open, &p2, &why) &&
+                   Execute(*m2, p2, root, {}, {}, &r2, ExecOptions{L"20260101-000000"});
+        check(ok2 && r2.backupDir == r.backupDir + L"-2", L"Execute: same stamp twice -> \"-2\" folder (" + r2.backupDir + L")");
+        std::vector<std::wstring> open1;
+        check(!JournalIncomplete(j, &open1), L"Execute: a complete journal is not flagged");
+    }
+    {
+        // Drift: one unplanned byte changes between plan and execute -> nothing written.
+        auto m = freshMock();
+        Plan pl;
+        BuildPlan(d, {{0, 1}}, liveOf(*m), open, &pl, &why);
+        m->vars[MakeVarKey(L"Setup", L"g1")].data[7] ^= 1;
+        ExecResult r;
+        bool ok = Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000001"});
+        check(!ok && m->writes == 0 && !r.started && r.error.find(L"changed since it was read") != std::wstring::npos,
+              L"Execute: drift in an unplanned byte -> nothing written, no backup session");
+    }
+    {
+        auto m = freshMock();
+        Plan pl;
+        BuildPlan(d, {{0, 1}}, liveOf(*m), open, &pl, &why);
+        m->smbios.biosVersion = L"A.H0";
+        ExecResult r;
+        bool mis = !Execute(*m, pl, root, {}, {}, &r) && m->writes == 0;
+        m->smbios.biosVersion = L"A.F0";
+        m->smbiosErr = ERROR_INVALID_DATA;
+        bool noSmb = !Execute(*m, pl, root, {}, {}, &r) && m->writes == 0;
+        check(mis && noSmb, L"Execute: SMBIOS mismatch or unreadable -> nothing written");
+        m->smbiosErr = 0;
+        m->privilege = false;
+        bool noPriv = !Execute(*m, pl, root, {}, {}, &r) && m->writes == 0 && r.error.find(L"SeSystemEnvironmentPrivilege") == 0;
+        check(noPriv, L"Execute: without the thread privilege -> nothing written");
+        m->privilege = true;
+        bool cancelled = !Execute(*m, pl, root, [] { return true; }, {}, &r) && m->writes == 0;
+        check(cancelled, L"Execute: cancelled before writing -> nothing written");
+    }
+    {
+        // Write error on variable 2 of 3.
+        auto m = freshMock();
+        Plan pl;
+        bool planned = BuildPlan(d, {{0, 1}, {3, 5}, {4, 1}}, liveOf(*m), open, &pl, &why);
+        m->failWriteOf = L"CpuSetup";
+        m->failWriteErr = ERROR_WRITE_PROTECT;
+        ExecResult r;
+        bool ok = Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000002"});
+        bool states = planned && r.vars.size() == 3 && r.vars[0].state == VarState::Written &&
+                      r.vars[1].state == VarState::Failed && r.vars[1].err == ERROR_WRITE_PROTECT &&
+                      r.vars[2].state == VarState::NotAttempted;
+        bool bytes = m->vars[MakeVarKey(L"Setup", L"g1")].data == pl.vars[0].newData &&
+                     m->vars[MakeVarKey(L"CpuSetup", L"g2")].data == cpuOld &&
+                     m->vars[MakeVarKey(L"PchSetup", L"g3")].data == std::vector<uint8_t>({0, 9, 9, 9});
+        std::string j = ReadSmall(r.backupDir + L"\\journal.txt");
+        check(!ok && states && bytes, L"Execute: write error on var 2 of 3 -> 1 written, 2 failed, 3 not attempted");
+        check(j == "BEGIN Setup g1\r\nOK Setup\r\nBEGIN CpuSetup g2\r\nFAILED CpuSetup 19\r\nEND\r\n" && !JournalIncomplete(j, nullptr),
+              L"Execute: journal records FAILED with the error code");
+    }
+    {
+        // Read-back mismatch: the mock corrupts the stored bytes once -> restored to oldData.
+        auto m = freshMock();
+        Plan pl;
+        BuildPlan(d, {{0, 1}, {3, 5}}, liveOf(*m), open, &pl, &why);
+        m->corruptWriteOf = L"Setup";
+        ExecResult r;
+        bool ok = Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000003"});
+        std::string j = ReadSmall(r.backupDir + L"\\journal.txt");
+        check(!ok && r.vars[0].state == VarState::Restored && m->vars[MakeVarKey(L"Setup", L"g1")].data == setupOld &&
+              r.vars[1].state == VarState::NotAttempted && m->writes == 2,
+              L"Execute: read-back mismatch -> old bytes written back and verified, the rest not attempted");
+        check(j.find("BEGIN Setup g1\r\nRESTORED Setup\r\n") == 0 && !JournalIncomplete(j, nullptr), L"Execute: journal RESTORED");
+    }
+    // --- Restore ---
+    if (!happyDir.empty()) {
+        auto m = freshMock();
+        Plan pl;
+        ExecResult r;
+        BuildPlan(d, {{0, 1}, {2, 1}, {3, 50000}}, liveOf(*m), open, &pl, &why);
+        Execute(*m, pl, root, {}, {}, &r, ExecOptions{L"20260101-000004"});   // m now holds the new values
+        SnapLoad bl;
+        bool loaded = LoadSnapshot(r.backupDir, &bl);
+        Plan rp;
+        bool planned = loaded && BuildRestorePlan(d, bl.vars, bl.label, bl.sysBoard, bl.sysBios, liveOf(*m), open, &rp, &why);
+        std::set<std::wstring> prompts;
+        if (planned) for (auto& v : rp.vars) for (auto& s : v.settings) prompts.insert(s.prompt);
+        check(planned && rp.restore && rp.vars.size() == 2 && prompts.count(L"OneOf") && prompts.count(L"Box") &&
+              prompts.count(L"Wide") && !prompts.count(L"Num"),
+              L"Restore: the plan lists the differing settings (OneOf, Box, Wide), not the unchanged ones" + (planned ? L"" : L": " + why));
+        Plan other;
+        check(!BuildRestorePlan(d, bl.vars, bl.label, L"MS-7D25", bl.sysBios, liveOf(*m), open, &other, &why),
+              L"Restore: a backup from another board is refused");
+        {
+            VarMap big = bl.vars;
+            big[MakeVarKey(L"Setup", L"g1")].push_back(0);
+            Plan sp;
+            check(!BuildRestorePlan(d, big, bl.label, bl.sysBoard, bl.sysBios, liveOf(*m), open, &sp, &why) &&
+                  why.find(L"bytes") != std::wstring::npos, L"Restore: a size mismatch is refused");
+            check(!BuildRestorePlan(d, bl.vars, bl.label, bl.sysBoard, bl.sysBios, liveOf(*m), PlanGate{true, true, false}, &sp, &why),
+                  L"Restore: same gate as writes (switch off -> refused)");
+        }
+        ExecResult rr;
+        bool restored = planned && Execute(*m, rp, root, {}, {}, &rr, ExecOptions{L"20260101-000005"});
+        check(restored && m->vars[MakeVarKey(L"Setup", L"g1")].data == setupOld && m->vars[MakeVarKey(L"CpuSetup", L"g2")].data == cpuOld,
+              L"Restore: execute puts the backup's bytes back (with its own backup session first)" +
+              (restored ? L"" : L": " + rr.error));
+        SnapLoad pre;
+        check(restored && LoadSnapshot(rr.backupDir, &pre) && pre.vars[MakeVarKey(L"Setup", L"g1")] == pl.vars[0].newData,
+              L"Restore: its own backup holds the bytes it replaced");
+    }
+    // --- Incomplete sessions ---
+    {
+        std::vector<std::wstring> v;
+        bool inc = JournalIncomplete("BEGIN Setup g1\r\nOK Setup\r\nBEGIN CpuSetup g2\r\n", &v);
+        check(inc && v.size() == 1 && v[0] == L"CpuSetup", L"journal: BEGIN without OK/RESTORED is incomplete");
+        check(JournalIncomplete("BEGIN Setup g1\r\nRESTORE-FAILED Setup 5\r\nEND\r\n", nullptr),
+              L"journal: RESTORE-FAILED counts as incomplete");
+        check(!JournalIncomplete("BEGIN Setup g1\r\nOK Setup\r\nEND\r\n", nullptr) && !JournalIncomplete("", nullptr),
+              L"journal: complete and empty journals are not");
+        IncompleteSession is;
+        bool none = !FindIncompleteSession(root, &is);   // the newest session so far completed
+        std::wstring dir;
+        bool made = CreateBackupSession(root, L"29991231-235959", &dir, &err) &&
+                    WriteNewFile(dir + L"\\journal.txt", "BEGIN Setup g1\r\n", &err);
+        bool found = made && FindIncompleteSession(root, &is) && is.stamp == L"29991231-235959" && is.vars.size() == 1;
+        check(none && found, L"journal: the newest session's unfinished journal is found on start; a completed one isn't");
+    }
+    // --- latch ---
+    {
+        RealBackend rb({MakeVarKey(L"Setup", L"ec87d643-eba4-4bb5-a1e5-3f3e36b20da9")});
+        DWORD e = rb.Write(L"HadronSelftestBogus", L"00000000-0000-0000-0000-000000000000", {1}, 0x7);
+        check(sys::NoFirmwareWrites() && e == ERROR_ACCESS_DENIED && rb.apiCalls == 0,
+              L"latch: RealBackend::Write returns ERROR_ACCESS_DENIED without calling the API");
+    }
+    // --- switch and overlay (a second module instance on a test host) ---
+    {
+        TestHost th;
+        BiosModule m;
+        check(!m.writeSwitch_, L"switch: off on start");
+        m.host_ = &th;
+        m.dbOk_ = true;
+        std::set<VarKey> allowed;
+        m.backend_ = std::make_unique<RealBackend>(allowed);
+        m.ToggleWriteSwitch();
+        bool refused = !m.writeSwitch_;
+        m.backend_ = freshMock();
+        m.ToggleWriteSwitch();
+        bool on = m.writeSwitch_;
+        m.ToggleWriteSwitch();
+        check(refused && on && !m.writeSwitch_ && th.prefsCalls == 0,
+              L"switch: can't turn on in a test run with the real backend; toggling never touches settings.ini");
+        m.planOpen_ = true;
+        m.plan_ = Plan{};
+        m.plan_.vars.resize(1);
+        bool enter = !m.OnInput(WM_KEYDOWN, VK_RETURN, 0) && m.planOpen_ && m.job_ == Job::None;
+        m.OnInput(WM_CHAR, L'\r', 0);
+        m.OnInput(WM_KEYDOWN, VK_SPACE, 0);
+        bool still = m.planOpen_ && m.job_ == Job::None;
+        bool esc = m.OnInput(WM_KEYDOWN, VK_ESCAPE, 0) && !m.planOpen_;
+        check(enter && still && esc, L"plan overlay: Enter and Space never confirm; Esc closes");
+    }
+}
+
 int BiosModule::RunCli(int argc, wchar_t** argv) {
     bool selftest = false;
     for (int i = 0; i < argc; i++) if (std::wstring(argv[i]) == L"--selftest") selftest = true;
@@ -1547,6 +2843,11 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
         wprintf(L"  [%ls] %ls\n", ok ? L"PASS" : L"FAIL", what.c_str());
     };
     wprintf(L"bios selftest\n");
+    // The host sets the "no firmware writes" latch for --selftest before any module code runs. Set it
+    // here too (idempotent), so nothing in this selftest can ever reach the firmware.
+    const bool hostLatched = sys::NoFirmwareWrites();
+    sys::SetNoFirmwareWrites();
+    check(hostLatched, L"latch: the host set \"no firmware writes\" before the selftest ran");
 
     // --- settings.db v2 (embedded) ---
     std::wstring err;
@@ -1959,6 +3260,27 @@ int BiosModule::RunCli(int argc, wchar_t** argv) {
     CommandLine cl = CommandLine::Parse(GetCommandLineW());
     std::wstring fx = cl.fixture;
     for (size_t i = 0; i + 1 < cl.rest.size(); i++) if (cl.rest[i] == L"--snapshot") fx = sys::ToExtended(cl.rest[i + 1]);
+    // --- guarded writes (docs/design/bios-write.md), all through MockBackend ---
+    {
+        std::wstring base;
+        if (!fx.empty()) {
+            std::wstring e = sys::ToExtended(fx);
+            while (!e.empty() && (e.back() == L'\\' || e.back() == L'/')) e.pop_back();
+            size_t k = e.find_last_of(L"\\/");
+            if (k != std::wstring::npos) base = e.substr(0, k);   // next to the fixture folder or zip
+        }
+        if (base.empty()) {
+            wchar_t t[MAX_PATH + 1] = {};
+            DWORD n = GetTempPathW(MAX_PATH + 1, t);
+            base = std::wstring(t, n);
+            while (!base.empty() && base.back() == L'\\') base.pop_back();
+        }
+        wchar_t tag[64];
+        swprintf(tag, 64, L"\\bios-write-selftest-%lu-%lu", (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
+        std::wstring root = base + tag;
+        wprintf(L"  [info] write selftest backups go to %ls (left in place)\n", Shell(root).c_str());
+        SelftestWrites(check, root);
+    }
     if (!fx.empty()) {
         SnapLoad sl;
         bool lf = LoadSnapshot(fx, &sl);
