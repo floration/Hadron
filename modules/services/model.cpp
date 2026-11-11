@@ -7,6 +7,8 @@
 
 namespace hx::services {
 
+const wchar_t kCfgUnreadable[] = L"configuration unreadable";
+
 std::wstring CfgText(const StartCfg& c) {
     std::wstring s = std::to_wstring(c.start) + L"/";
     s += c.delayed < 0 ? L"-" : std::to_wstring(c.delayed);
@@ -55,15 +57,18 @@ std::wstring StateName(DWORD state) {
 }
 
 Kind KindOf(DWORD type) {
-    if (type & SERVICE_KERNEL_DRIVER) return Kind::KernelDriver;
-    if (type & SERVICE_FILE_SYSTEM_DRIVER) return Kind::FsDriver;
+    // Adapter (0x4) and recognizer (0x8, Fs_Rec) drivers are drivers too (Review R15).
+    if (type & (SERVICE_KERNEL_DRIVER | SERVICE_ADAPTER)) return Kind::KernelDriver;
+    if (type & (SERVICE_FILE_SYSTEM_DRIVER | SERVICE_RECOGNIZER_DRIVER)) return Kind::FsDriver;
     if (type & SERVICE_USER_SERVICE)
         return (type & SERVICE_USERSERVICE_INSTANCE) ? Kind::UserInstance : Kind::UserTemplate;
     if (type & (SERVICE_WIN32_OWN_PROCESS | SERVICE_WIN32_SHARE_PROCESS)) return Kind::Service;
     return Kind::Other;
 }
 
-bool IsDriverType(DWORD type) { return (type & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER)) != 0; }
+bool IsDriverType(DWORD type) {
+    return (type & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER | SERVICE_ADAPTER | SERVICE_RECOGNIZER_DRIVER)) != 0;
+}
 
 bool OnTab(const SvcItem& s, Tab t) {
     bool drv = IsDriverType(s.type);
@@ -72,8 +77,8 @@ bool OnTab(const SvcItem& s, Tab t) {
 
 std::wstring TypeName(DWORD type) {
     switch (KindOf(type)) {
-        case Kind::KernelDriver: return L"Kernel driver";
-        case Kind::FsDriver: return L"File system driver";
+        case Kind::KernelDriver: return (type & SERVICE_KERNEL_DRIVER) ? L"Kernel driver" : L"Adapter driver";
+        case Kind::FsDriver: return (type & SERVICE_FILE_SYSTEM_DRIVER) ? L"File system driver" : L"File system recognizer driver";
         case Kind::UserTemplate: return L"Per-user template";
         case Kind::UserInstance: return L"Per-user instance";
         case Kind::Service: return (type & SERVICE_WIN32_SHARE_PROCESS) ? L"Shared process" : L"Own process";

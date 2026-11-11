@@ -236,7 +236,8 @@ public:
                 i.state = e.second.dwCurrentState;
                 i.type = e.second.dwServiceType;
                 i.kind = KindOf(i.type);
-                i.readError = L"configuration unreadable: " + rerr;
+                i.readError = std::wstring(kCfgUnreadable) + L": " + rerr;
+                i.cfgUnknown = true;   // cfg is the default, not this service's: never planned or recorded
             }
             out->push_back(std::move(i));
         }

@@ -80,6 +80,7 @@ bool ParseSnapshot(const std::string& utf8, Snapshot* out, std::wstring* err) {
             for (auto& g : Split(Unesc(at(19)), L';')) if (!g.empty()) i.ifaces.push_back(Lower(g));
             i.company = Unesc(at(20));
             i.readError = Unesc(at(21));
+            i.cfgUnknown = i.readError.rfind(kCfgUnreadable, 0) == 0;
             i.kind = KindOf(i.type);
             if (i.name.empty()) { *err = L"snapshot line " + std::to_wstring(n + 1) + L": empty name"; return false; }
             if (seen.count(Lower(i.name))) { *err = L"snapshot line " + std::to_wstring(n + 1) + L": duplicate " + i.name; return false; }

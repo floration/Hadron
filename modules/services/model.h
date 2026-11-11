@@ -10,6 +10,7 @@
 namespace hx::services {
 
 enum class Kind { Service, UserTemplate, UserInstance, KernelDriver, FsDriver, Other };
+extern const wchar_t kCfgUnreadable[];   // "configuration unreadable": the readError prefix of an item with cfgUnknown
 enum Tab { TAB_SERVICES = 0, TAB_DRIVERS = 1 };
 
 // What Hadron can write and must restore: the start type and the DelayedAutostart value. delayed keeps
@@ -42,6 +43,10 @@ struct SvcItem {
     std::vector<std::wstring> ifaces;  // device-interface trigger class GUIDs, lower case with braces
     std::wstring company;              // VERSIONINFO CompanyName: the file's own claim
     std::wstring readError;            // a partial read failure, shown in the detail pane
+    // The configuration itself could not be read (readError starts with kCfgUnreadable): cfg is a placeholder, so the
+    // item is never planned, recorded in first.txt or restored (Review R2).
+    bool cfgUnknown = false;
+    uint64_t pstart = 0;               // creation time (FILETIME) of process pid, 0 when unknown (TrustedInstaller claim)
     bool aclTi = false;                // fixture only: an admin write is refused (needs TrustedInstaller)
     // Derived after load (FoldInstances).
     Kind kind = Kind::Service;

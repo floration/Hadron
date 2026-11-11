@@ -1008,8 +1008,53 @@ int RunSelftest(const std::vector<std::wstring>& args) {
               L"first run: recovery\\first\\restore.cmd leaves out the storage drivers (A2)");
     }
 
-    // ---- apply -> undo round trip on the fake ----------------------------------------------------------------
     auto freshWorld = [&](World* fw) { std::wstring e; return MakeWorld(fixture, &kb, fw, &e); };
+
+    // ---- R2: an item whose configuration could not be read; R15: adapter and recognizer drivers ---------------
+    {
+        World a;
+        freshWorld(&a);
+        std::vector<SvcItem> items = a.items;
+        SvcItem* mb = nullptr;
+        for (auto& i : items) if (i.name == L"MapsBroker") mb = &i;
+        if (mb) { mb->cfg = StartCfg{3, -1}; mb->cfgUnknown = true; mb->readError = std::wstring(kCfgUnreadable) + L": Access is denied."; }
+        Plan pm = BuildPreset(LV_MINIMUM, TAB_SERVICES, items, a.ctx);
+        bool noted = false;
+        for (auto& n : pm.notes) if (n.find(L"could not be read") != std::wstring::npos) noted = true;
+        Plan ps = mb ? BuildSingle(*mb, StartCfg{4, -1}, items, a.ctx) : Plan{};
+        check(mb && !RowOf(pm, L"MapsBroker") && noted && ps.Included() == 0 && RowOf(ps, L"MapsBroker") && !RowOf(ps, L"MapsBroker")->blocked.empty(),
+              L"R2: an unreadable item is never planned (preset: left out with a note; single change: blocked)");
+        Store s(NewTempDir(L"unreadable"));
+        Snapshot first;
+        FirstRunResult fr = EnsureFirstSnapshot(s, items, a.ctx, &first);
+        std::string rc;
+        s.Read(L"recovery\\first\\restore.cmd", &rc, &err);
+        check(fr.wrote && !first.Find(L"MapsBroker") && fr.note.find(L"not in first.txt") != std::wstring::npos &&
+                  rc.find("\"MapsBroker\"") == std::string::npos && rc.find("\"WSearch\"") != std::string::npos,
+              L"R2: first.txt and recovery\\first leave out an unreadable item, and say so");
+        Snapshot old;
+        old.items = items;
+        Snapshot back;
+        bool parsed = ParseSnapshot(WriteSnapshot(old), &back, &err);
+        check(parsed && back.Find(L"MapsBroker") && back.Find(L"MapsBroker")->cfgUnknown && !back.Find(L"WSearch")->cfgUnknown,
+              L"R2: a snapshot keeps the unreadable mark (readError prefix) through write and parse");
+        std::vector<std::wstring> skipped;
+        std::vector<RestoreRow> rr = FirstRestoreRows(back, a.ctx, &skipped);
+        bool inRows = false;
+        for (auto& r : rr) if (r.name == L"MapsBroker") inRows = true;
+        Ctx cf = a.ctx;
+        cf.first = &back;
+        Plan pd = BuildDefault(false, TAB_SERVICES, a.items, cf);
+        check(!inRows && !RowOf(pd, L"MapsBroker"),
+              L"R2: an older first.txt that recorded an unreadable item: never restored by recovery\\first or Default (first snapshot)");
+        SvcItem rec = Mk(L"HxRecognizer", 3, {}, SERVICE_RECOGNIZER_DRIVER);
+        SvcItem ad = Mk(L"HxAdapter", 3, {}, SERVICE_ADAPTER);
+        check(IsDriverType(rec.type) && IsDriverType(ad.type) && OnTab(rec, TAB_DRIVERS) && !OnTab(ad, TAB_SERVICES) &&
+                  TypeName(rec.type) == L"File system recognizer driver" && TypeName(ad.type) == L"Adapter driver",
+              L"R15: recognizer (0x8, Fs_Rec) and adapter (0x4) drivers count as drivers (Drivers tab, driver guards)");
+    }
+
+    // ---- apply -> undo round trip on the fake ----------------------------------------------------------------
     {
         World a;
         freshWorld(&a);

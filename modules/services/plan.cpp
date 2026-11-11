@@ -162,6 +162,8 @@ Guard CheckGuard(const SvcItem& s, const Ctx& c) {
     std::wstring l = Lower(TemplateName(s.name, s.type));
     bool drv = IsDriverType(s.type);
     auto never = [&](const std::wstring& r) { g.neverTouch = true; g.reason = r; return g; };
+    // R2: an item whose configuration could not be read has a placeholder start type: never planned from it.
+    if (s.cfgUnknown) return never(L"its configuration could not be read, and Hadron never changes what it can't read");
     if (drv && s.cfg.start == 0) return never(L"Boot-start driver: loaded by the boot loader before Windows can read the disk");
     if (!drv && s.cfg.start < 2 && s.kind != Kind::UserInstance)
         return never(L"a service whose registry Start is " + StartName(s.cfg.start) + L": not a start type Windows uses for services, so Hadron leaves it");
@@ -205,6 +207,11 @@ std::wstring HwNote(int tab, const Ctx& c) {
                L", so every driver is kept: the boot-path check can't run without it.";
     return L"";
 }
+
+std::wstring UnreadableNote(int n) {
+    return std::to_wstring(n) + L" item(s) on this tab could not be read (see the detail pane): left alone, Hadron never "
+                                L"changes or records a start type it can't read.";
+}
 }  // namespace
 
 int Plan::Included() const { int n = 0; for (auto& r : rows) if (r.blocked.empty() && r.include) n++; return n; }
@@ -220,9 +227,10 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
     p.title = LevelName(level) + L" (" + TabName(tab) + L")";
     p.source = L"preset:" + std::wstring(level == LV_BLOAT ? L"bloat" : level == LV_STRIPPED ? L"stripped" : L"minimum") +
                L":" + (tab == TAB_DRIVERS ? L"drivers" : L"services");
-    int stricter = 0;
+    int stricter = 0, unreadable = 0;
     for (auto& s : items) {
         if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
+        if (s.cfgUnknown) { unreadable++; continue; }   // R2: its start type is not known
         const KbEntry* e = c.kb ? c.kb->Find(s.name) : nullptr;
         if (!e) { p.unknown++; continue; }
         int t = e->TargetAt(level);
@@ -270,6 +278,7 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
                           L"stock driver as safe to disable.");
     if (p.unknown)
         p.notes.push_back(std::to_wstring(p.unknown) + L" item(s) on this tab have no KB entry (third-party or unknown): never in a preset.");
+    if (unreadable) p.notes.push_back(UnreadableNote(unreadable));
     if (stricter)
         p.notes.push_back(std::to_wstring(stricter) + L" item(s) are already stricter than this level (for example Disabled where it says Manual): "
                                                        L"left alone, a preset never raises a start type.");
@@ -295,10 +304,12 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             p.notes.push_back(L"The first-run snapshot is from another PC (machine GUID differs): nothing to restore.");
             return p;
         }
-        int added = 0;
+        int added = 0, unreadable = 0;
         for (auto& s : items) {
             if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
             const SvcItem* f = c.first->Find(s.name);
+            // R2: an item unreadable now, or recorded as unreadable (an older first.txt), has no real value to compare.
+            if (s.cfgUnknown || (f && f->cfgUnknown)) { unreadable++; continue; }
             if (!f) { added++; continue; }
             if (SameStart(s.cfg, f->cfg)) { p.alreadySet++; continue; }
             PlanRow r;
@@ -322,6 +333,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             p.rows.push_back(std::move(r));
         }
         if (added) p.notes.push_back(std::to_wstring(added) + L" item(s) are new since the first-run snapshot: left alone.");
+        if (unreadable) p.notes.push_back(UnreadableNote(unreadable));
     } else {
         if (c.build != L"19045") {
             p.notes.push_back(L"Windows stock values exist only for Windows 10 22H2 (build 19045); this PC is build " +
@@ -332,6 +344,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
         for (auto& s : items) {
             if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
             total++;
+            if (s.cfgUnknown) continue;   // R2: CheckGuard would refuse it anyway
             const KbEntry* e = c.kb ? c.kb->Find(s.name) : nullptr;
             if (!e || e->stock < 0 || !e->ForBuild(c.build) || IsStorageDriver(s.name)) continue;
             withStock++;
@@ -1070,7 +1083,7 @@ std::vector<RestoreRow> FirstRestoreRows(const Snapshot& first, const Ctx& c, st
         s.kind = KindOf(s.type);
         if (s.kind == Kind::UserInstance) continue;
         Guard g = CheckGuard(s, c);
-        bool drop = g.neverTouch || s.cfg.start < 2 || s.protect != 0 || IsStorageDriver(s.name) ||
+        bool drop = g.neverTouch || s.cfgUnknown || s.cfg.start < 2 || s.protect != 0 || IsStorageDriver(s.name) ||
                     Lookup(NeverPreset(), Lower(TemplateName(s.name, s.type))) != nullptr ||
                     (IsDriverType(s.type) && s.cfg.start < 2 && !SysOk(s, c));
         if (drop) { if (skipped) skipped->push_back(s.name); continue; }
@@ -1112,8 +1125,17 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
     snap.meta[L"created"] = when;
     snap.meta[L"build"] = build;
     snap.meta[L"machine"] = machine;
-    snap.items = items;
-    for (auto& i : snap.items) i.company.clear();   // the file's claim, not configuration
+    // R2: an item whose configuration could not be read is left out: its start type is a placeholder, and recording it
+    // would make Default (first snapshot) and recovery\first write a value this PC never had.
+    int unreadable = 0;
+    for (auto& i : items) {
+        if (i.cfgUnknown) { unreadable++; continue; }
+        snap.items.push_back(i);
+        snap.items.back().company.clear();   // the file's claim, not configuration
+    }
+    if (unreadable)
+        r.note += (r.note.empty() ? L"" : L" ") + std::to_wstring(unreadable) +
+                  L" item(s) could not be read and are not in first.txt, so Default (first snapshot) leaves them alone.";
     std::string text = WriteSnapshot(snap);
     if (!s.WriteAtomicNew(L"first.txt", text, &r.error)) return r;
     std::string back;
