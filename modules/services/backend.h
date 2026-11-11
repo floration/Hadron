@@ -50,8 +50,12 @@ public:
 };
 
 std::unique_ptr<Backend> MakeLiveBackend();
-// VERSIONINFO CompanyName of the item's image (ServiceDll for svchost services): the file's own claim.
+// VERSIONINFO CompanyName of the item's image (ServiceDll for svchost services): the file's own claim. Only for a
+// local drive path whose attributes have no RECALL_ON_DATA_ACCESS / RECALL_ON_OPEN / OFFLINE bit (hard rule 1); a UNC
+// path, a network drive or a cloud placeholder gives "" without the file being opened.
 std::wstring FileCompany(const SvcItem& item);
+bool CompanyPathAllowed(const std::wstring& path);   // a local drive path (X:\ or \\?\X:\), never UNC or a device
+bool CompanyAttrsAllowed(DWORD attrs);               // a file with no recall or offline attribute
 
 // Fault injection for the selftest (r5 §5.1).
 struct FakeFaults {

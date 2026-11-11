@@ -434,6 +434,14 @@ int RunSelftest(const std::vector<std::wstring>& args) {
                   g.unquotedSpaces && g.args == L"-run",
               L"NormalizeImage: svchost -k group, quoted path + args, unquoted path with spaces flagged");
         check(Unesc(Esc(L"a\\b\tc\nd")) == L"a\\b c\nd", L"bios escaping round trip (TAB becomes a space)");
+        check(CompanyPathAllowed(L"C:\\Windows\\System32\\svchost.exe") && CompanyPathAllowed(L"\\\\?\\D:\\x.sys") &&
+                  !CompanyPathAllowed(L"\\\\srv\\share\\svc.exe") && !CompanyPathAllowed(L"\\\\?\\UNC\\srv\\share\\svc.exe") &&
+                  !CompanyPathAllowed(L"\\\\.\\pipe\\x") && !CompanyPathAllowed(L"svc.exe"),
+              L"R3: the Company lookup reads only local drive paths, never UNC, \\\\?\\UNC\\ or device paths");
+        check(CompanyAttrsAllowed(FILE_ATTRIBUTE_ARCHIVE) && !CompanyAttrsAllowed(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) &&
+                  !CompanyAttrsAllowed(FILE_ATTRIBUTE_RECALL_ON_OPEN) && !CompanyAttrsAllowed(FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_ARCHIVE) &&
+                  !CompanyAttrsAllowed(INVALID_FILE_ATTRIBUTES),
+              L"R3: the Company lookup never opens a cloud placeholder or offline file (RECALL_ON_DATA_ACCESS, RECALL_ON_OPEN, OFFLINE)");
         check(Crc32("123456789", 9) == 0xCBF43926u, L"CRC-32 check value");
         std::vector<SvcItem> v(3);
         v[0].name = L"CDPUserSvc"; v[0].type = 0x60;
