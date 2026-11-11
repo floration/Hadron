@@ -7,6 +7,7 @@
 #include <setupapi.h>
 #include <winioctl.h>
 #include <intrin.h>
+#include <objbase.h>
 #include <algorithm>
 #include <functional>
 
@@ -49,6 +50,7 @@ bool ParseHw(const std::string& utf8, HwInfo* out, std::wstring* err) {
             n.id = Unesc(f[1]); n.service = f[2]; n.cls = f[3]; n.classGuid = Lower(f[4]);
             n.present = f[5] == L"1"; n.parent = Unesc(f[6]);
             n.upper = SplitList(f[7]); n.lower = SplitList(f[8]);
+            if (f.size() >= 10 && !f[9].empty()) n.arrival = wcstoull(f[9].c_str(), nullptr, 16);
             out->nodes.push_back(std::move(n));
         } else if (f[0] == L"C" && f.size() >= 4) {
             out->classFilters[Lower(f[1])] = {SplitList(f[2]), SplitList(f[3])};
@@ -56,6 +58,8 @@ bool ParseHw(const std::string& utf8, HwInfo* out, std::wstring* err) {
             out->bootDisk = Unesc(f[1]);
         } else if (f[0] == L"I" && f.size() >= 2) {
             out->presentIfaces.insert(Lower(f[1]));
+        } else if (f[0] == L"F" && f.size() >= 3) {
+            out->ifaceDevs[Lower(f[1])].push_back(Unesc(f[2]));
         } else if (f[0] == L"V" && f.size() >= 3) {
             if (f[1] == L"hypervisor") out->hypervisor = f[2] == L"1";
             if (f[1] == L"vm") out->isVm = f[2] == L"1";
@@ -72,9 +76,18 @@ std::string DumpHw(const HwInfo& hw) {
     if (!hw.bootDisk.empty()) o += L"B\t" + Esc(hw.bootDisk) + L"\n";
     for (auto& c : hw.classFilters) o += L"C\t" + c.first + L"\t" + Join(c.second.first, L";") + L"\t" + Join(c.second.second, L";") + L"\n";
     for (auto& i : hw.presentIfaces) o += L"I\t" + i + L"\n";
-    for (auto& n : hw.nodes)
+    for (auto& g : hw.ifaceDevs)
+        for (auto& d : g.second) o += L"F\t" + g.first + L"\t" + Esc(d) + L"\n";
+    for (auto& n : hw.nodes) {
         o += L"N\t" + Esc(n.id) + L"\t" + n.service + L"\t" + n.cls + L"\t" + n.classGuid + L"\t" + (n.present ? L"1" : L"0") +
-             L"\t" + Esc(n.parent) + L"\t" + Join(n.upper, L";") + L"\t" + Join(n.lower, L";") + L"\n";
+             L"\t" + Esc(n.parent) + L"\t" + Join(n.upper, L";") + L"\t" + Join(n.lower, L";");
+        if (n.arrival) {   // only when known, so older dumps (and the fixture's other nodes) keep 9 fields
+            wchar_t b[24];
+            swprintf(b, 24, L"%016llX", (unsigned long long)n.arrival);
+            o += L"\t" + std::wstring(b);
+        }
+        o += L"\n";
+    }
     return ToUtf8(o);
 }
 
@@ -152,12 +165,69 @@ int HwEvidence(const HwInfo& hw, const std::wstring& hint, const std::wstring& i
     }
     std::wstring what = cls.empty() ? L"service " + hint.substr(hint == L"self" ? 0 : 4) : L"class " + hint.substr(6);
     if (hint == L"self") what = L"service " + itemName;
-    if (present) { *ev = L"present: " + present->id + L" (" + what + L")"; return 0; }
-    if (phantom) { *ev = L"seen before, not present now: " + phantom->id + L" (" + what + L"): kept"; return 0; }
+    auto arrived = [](const DevNode* n) {
+        std::wstring d = FileTimeDate(n->arrival);
+        return d.empty() ? std::wstring() : L", last arrived " + d;
+    };
+    if (present) { *ev = L"present: " + present->id + L" (" + what + arrived(present) + L")"; return 0; }
+    if (phantom) { *ev = L"seen before, not present now: " + phantom->id + L" (" + what + arrived(phantom) + L"): kept"; return 0; }
     bool hot = !cls.empty() && IsHotPlugClass(cls);
     if (hot) { *ev = L"no devnode for " + what + L" ever seen, but it is a hot-plug class: left unticked"; return 2; }
     *ev = L"no devnode for " + what + L" ever seen";
     return 1;
+}
+
+std::wstring FileTimeDate(uint64_t ft) {
+    if (!ft) return {};
+    FILETIME f{(DWORD)(ft & 0xFFFFFFFFu), (DWORD)(ft >> 32)};
+    SYSTEMTIME st{};
+    if (!FileTimeToSystemTime(&f, &st)) return {};
+    wchar_t b[16];
+    swprintf(b, 16, L"%04u-%02u-%02u", st.wYear, st.wMonth, st.wDay);
+    return b;
+}
+
+int IfaceEvidence(const HwInfo& hw, const SvcItem& item, std::wstring* ev) {
+    if (item.ifaces.empty()) return -1;
+    std::map<std::wstring, const DevNode*> byId;
+    for (auto& n : hw.nodes) byId[Lower(n.id)] = &n;
+    std::wstring seen;   // the first seen-before match, used when nothing is present
+    for (auto& g0 : item.ifaces) {
+        const std::wstring g = Lower(g0);
+        auto it = hw.ifaceDevs.find(g);
+        if (it != hw.ifaceDevs.end()) {
+            for (auto& d : it->second) {
+                auto n = byId.find(Lower(d));
+                bool present = n != byId.end() && n->second->present;
+                std::wstring date = n != byId.end() ? FileTimeDate(n->second->arrival) : std::wstring();
+                std::wstring when = date.empty() ? std::wstring() : L", last arrived " + date;
+                if (present) {
+                    *ev = L"its device-interface trigger " + g + L" matches " + d + L" (present" + when + L"): kept";
+                    return 0;
+                }
+                if (seen.empty())
+                    seen = L"its device-interface trigger " + g + L" matches " + d + L" (seen before, not present now" + when + L"): kept";
+            }
+        }
+        if (hw.presentIfaces.count(g)) {
+            *ev = L"its device-interface trigger " + g + L" has a device present now: kept";
+            return 0;
+        }
+    }
+    if (seen.empty()) return -1;
+    *ev = seen;
+    return 0;
+}
+
+int HwEvidenceEx(const HwInfo& hw, const std::wstring& hint, const SvcItem& item, std::wstring* ev) {
+    int h = HwEvidence(hw, hint, item.name, ev);
+    if (h == 0) return 0;   // already kept: nothing can loosen it
+    std::wstring iev;
+    if (IfaceEvidence(hw, item, &iev) == 0) {
+        *ev = h == 3 ? iev : iev + L"; by the hint alone: " + *ev;
+        return 0;
+    }
+    return h;
 }
 
 // ---- live (CfgMgr32, read-only) -------------------------------------------------------------------
@@ -192,6 +262,20 @@ std::wstring RegStr(HKEY root, const wchar_t* path, const wchar_t* value) {
     DWORD cb = sizeof(buf) - sizeof(wchar_t);
     if (RegGetValueW(root, path, value, RRF_RT_REG_SZ, nullptr, buf, &cb) != ERROR_SUCCESS) return {};
     return buf;
+}
+
+// DEVPKEY_Device_LastArrivalDate, own copy (devpkey.h needs initguid ordering): when the device last arrived. Read-only;
+// 0 when Windows has no value (older devices, or a property this Windows doesn't keep).
+const DEVPROPKEY kLastArrival = {{0x83da6326, 0x97a6, 0x4088, {0x94, 0x53, 0xa1, 0x92, 0x3f, 0x57, 0x3b, 0x29}}, 102};
+
+uint64_t LastArrival(DEVINST dn) {
+    DEVPROPTYPE type = 0;
+    FILETIME ft{};
+    ULONG cb = sizeof(ft);
+    if (CM_Get_DevNode_PropertyW(dn, &kLastArrival, &type, reinterpret_cast<PBYTE>(&ft), &cb, 0) != CR_SUCCESS ||
+        type != DEVPROP_TYPE_FILETIME || cb != sizeof(ft))
+        return 0;
+    return ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
 }
 
 std::wstring DevId(DEVINST dn) {
@@ -279,6 +363,7 @@ bool ReadLiveHw(HwInfo* out) {
         n.lower.erase(std::remove(n.lower.begin(), n.lower.end(), L""), n.lower.end());
         DEVINST parent = 0;
         if (CM_Get_Parent(&parent, dn, 0) == CR_SUCCESS) n.parent = DevId(parent);
+        n.arrival = LastArrival(dn);
         if (!n.classGuid.empty()) guids.insert(n.classGuid);
         out->nodes.push_back(std::move(n));
     }
@@ -304,6 +389,37 @@ bool ReadLiveHw(HwInfo* out) {
     out->ok = true;
     if (out->bootDisk.empty()) out->error = L"boot disk: " + berr;
     return true;
+}
+
+// Interface-trigger evidence: for each device-interface class GUID a service's arrival trigger names, every device
+// that registered an interface of that class, present or not (no DIGCF_PRESENT). Read-only SetupDi enumeration; a
+// GUID that fails to enumerate just adds nothing (the evidence can only keep more, so missing data never loosens).
+void AddLiveIfaceEvidence(const std::vector<SvcItem>& items, HwInfo* hw) {
+    std::set<std::wstring> guids;
+    for (auto& i : items) for (auto& g : i.ifaces) guids.insert(Lower(g));
+    for (auto& g : guids) {
+        GUID guid{};
+        if (CLSIDFromString(g.c_str(), &guid) != NOERROR) continue;
+        HDEVINFO set = SetupDiGetClassDevsW(&guid, nullptr, nullptr, DIGCF_DEVICEINTERFACE);
+        if (set == INVALID_HANDLE_VALUE) continue;
+        std::vector<std::wstring>& devs = hw->ifaceDevs[g];
+        SP_DEVICE_INTERFACE_DATA ifd{};
+        ifd.cbSize = sizeof(ifd);
+        for (DWORD k = 0; k < 4096 && SetupDiEnumDeviceInterfaces(set, nullptr, &guid, k, &ifd); k++) {
+            SP_DEVINFO_DATA dev{};
+            dev.cbSize = sizeof(dev);
+            DWORD need = 0;
+            // Only the device data is wanted: a null detail buffer with the size call fills dev on the documented
+            // ERROR_INSUFFICIENT_BUFFER path.
+            if (!SetupDiGetDeviceInterfaceDetailW(set, &ifd, nullptr, 0, &need, &dev) && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+                continue;
+            if (!dev.DevInst) continue;
+            std::wstring id = DevId(dev.DevInst);
+            if (!id.empty() && std::find(devs.begin(), devs.end(), id) == devs.end()) devs.push_back(id);
+        }
+        SetupDiDestroyDeviceInfoList(set);
+        if (devs.empty()) hw->ifaceDevs.erase(g);
+    }
 }
 
 }  // namespace hx::services
