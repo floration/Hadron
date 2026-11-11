@@ -553,8 +553,8 @@ size_t TextField::HitIndex(HWND owner, int x, const RECT& rc, const PaintCtx& c)
     // One call gives every prefix width (dx[i] = width of the first i+1 characters).
     std::vector<int> dx(text_.size(), 0);
     SIZE total{0, 0};
-    int fit = 0;
-    bool ok = GetTextExtentExPointW(dc, text_.c_str(), (int)text_.size(), 0, &fit, dx.data(), &total) != FALSE;
+    // lpnFit null: nMaxExtent is ignored and alpDx is filled for every character.
+    bool ok = GetTextExtentExPointW(dc, text_.c_str(), (int)text_.size(), 0, nullptr, dx.data(), &total) != FALSE;
     SelectObject(dc, old);
     ReleaseDC(owner, dc);
     if (!ok) return caret_;

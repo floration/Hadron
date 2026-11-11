@@ -370,11 +370,14 @@ int Host::Run(const CommandLine& cl) {
         bool ownConsole = false;
         HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
         if (out == nullptr || out == INVALID_HANDLE_VALUE || GetFileType(out) == FILE_TYPE_UNKNOWN) {
-            if (!AttachConsole(ATTACH_PARENT_PROCESS)) ownConsole = AllocConsole() != FALSE;
-            FILE* f = nullptr;
-            _wfreopen_s(&f, L"CONOUT$", L"w", stdout);
-            _wfreopen_s(&f, L"CONOUT$", L"w", stderr);
-            if (!ownConsole) wprintf(L"\n");   // cmd has already printed its prompt; start on a new line
+            bool attached = AttachConsole(ATTACH_PARENT_PROCESS) != FALSE;
+            if (!attached) attached = ownConsole = AllocConsole() != FALSE;
+            if (attached) {   // with no console at all, leave stdio alone (a failed reopen closes it)
+                FILE* f = nullptr;
+                bool ok = _wfreopen_s(&f, L"CONOUT$", L"w", stdout) == 0;
+                _wfreopen_s(&f, L"CONOUT$", L"w", stderr);
+                if (ok && !ownConsole) wprintf(L"\n");   // cmd already printed its prompt
+            }
         }
         int init = PickInitial(cl);
         if (init < 0) return 1;

@@ -252,12 +252,12 @@ LRESULT RunAsModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
         host_->SetStatus(resultLine_.c_str());
         Invalidate();
         return 0;
-    case WM_LBUTTONDOWN:
-        SetFocus(h);
-        [[fallthrough]];
     case WM_CAPTURECHANGED:
         path_.CancelDrag(); args_.CancelDrag(); work_.CancelDrag();
         return 0;
+    case WM_LBUTTONDOWN:
+        SetFocus(h);
+        [[fallthrough]];
     case WM_LBUTTONDBLCLK: case WM_RBUTTONDOWN:
         SetFocus(h);
         if (m == WM_RBUTTONDOWN) return 0;
