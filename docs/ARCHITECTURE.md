@@ -25,7 +25,8 @@ hadron/
 ## The module contract
 ```cpp
 namespace hx {
-enum class Admin { None, Optional, Required };   // Optional: degraded mode without admin (e.g. BIOS loads a snapshot)
+enum class Admin { None, Optional, Required };   // See rule 4 below: every exe is requireAdministrator now,
+                                                 // so None/Optional only record intent; the build emits no asInvoker manifest.
 
 struct ModuleInfo {
     const wchar_t* id;       // "bios": used by --solo/--module and in exe/class/resource names
@@ -40,9 +41,9 @@ struct IHost {                                   // implemented by both RunStand
     virtual void SetTitle(const wchar_t*) = 0;   // replaces legacy SetWindowTextW(g_hwnd, ...)
     virtual void SetStatus(const wchar_t*) = 0;
     virtual void SetBusy(bool) = 0;              // the host blocks Close and shows activity
-    virtual bool IsElevated() = 0;
-    virtual bool RequestElevation() = 0;         // relaunch elevated with --elevated; false if cancelled or failed
-    virtual Settings& Settings() = 0;            // per-module section
+    virtual bool IsElevated() = 0;               // always true in practice (every exe is requireAdministrator)
+    virtual sys::Settings& Prefs() = 0;          // per-module section (named Prefs(), not Settings(): a member
+                                                 // named Settings would shadow the type on GCC)
     virtual void Log(LogLevel, const wchar_t*) = 0;
 };
 
@@ -57,7 +58,8 @@ public:
     virtual bool PreTranslateMessage(MSG&) { return false; }   // active module only (accelerators)
     virtual bool CanClose() { return true; }           // asked of every module; false while a plan executes
     virtual void Shutdown() {}                         // cancel; must not return while any worker is alive
-    virtual int  RunCli(int argc, wchar_t** argv) { return -1; }   // headless: --selftest, --screenshot, exports
+    virtual int  RunCli(int argc, wchar_t** argv) { return -1; }   // headless: exports and other CLI modes
+    virtual void LoadFixture(const wchar_t* dir) {}                // synchronous data load for --screenshot/--selftest
 };
 std::unique_ptr<Module> MakeBiosModule();   // explicit factories in core/host/registry.h; no static self-registration
 int RunStandalone(std::unique_ptr<Module>);
@@ -85,9 +87,9 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
 |---|---|
 | `--module <id>` | Suite: open on that module |
 | `--solo <id>` | Suite: run only that module, as if standalone |
-| `--elevated` | Marks a relaunch; never relaunch again |
+| `--elevated` | Accepted and ignored; kept for forward-compat. Every exe is requireAdministrator (rule 4), so there is no relaunch |
 | `--selftest` | Run the module's checks |
-| `--screenshot <png> --fixture <dir>` | Load the fixture, render the main view with `PrintWindow`, save, exit. This makes CI and tester screenshots deterministic on Windows and Wine |
+| `--screenshot <png> --fixture <dir>` | Load the fixture, then compose the frame into a top-down DIB (chrome via the host, content via `Module::Paint`, which also serves `WM_PRINTCLIENT`) and write a PNG. No `PrintWindow`, so Windows and Wine produce the same pixels. Fixed 1280x800 at 96 DPI |
 | other | Passed to `RunCli`. GUI-subsystem exes call `AttachConsole(ATTACH_PARENT_PROCESS)` before writing output |
 
 ## Firmware access (`core/sys/firmware.h`)
@@ -108,8 +110,11 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
 | Target | File | Manifest execution level |
 |---|---|---|
 | Suite | `Hadron.exe` | requireAdministrator |
-| Module with `Admin::None` or `Admin::Optional` | `Hadron<Name>.exe` | asInvoker |
-| Module with `Admin::Required` | `Hadron<Name>.exe` | requireAdministrator |
+| Every standalone module | `Hadron<Name>.exe` | requireAdministrator |
+
+Hard rule 4 (rewritten 2026-11-11): every exe is `requireAdministrator`; there is no asInvoker build and no
+elevation relaunch. A feature that needs more than admin (SYSTEM/TrustedInstaller) gates it behind its own
+off-by-default toggle. The old `Admin::Optional` / `RequestElevation()` / single-shot relaunch design is gone.
 
 - Each exe's `.rc` and manifest are generated with `configure_file`. They contain:
   - VERSIONINFO from `project(VERSION)`;
@@ -135,3 +140,23 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
 Generated data (e.g. the BIOS settings map) is embedded as module-prefixed `RCDATA`. Generators live in `tools/`,
 and their output is committed so a C++-only build works. Copyrighted inputs (vendor BIOS images) and personal data
 (the owner's NVRAM snapshot) are never committed.
+
+## core/ui (theme, layouts, widgets)
+- **Two layouts** (`ui::Layout`): `Baseline` (default, Segoe UI card look) and `Console` (dense, Consolas). The
+  layout changes widget metrics and fonts, not the palette.
+- **Four themes** (`ui::ThemeId`): `Light`, `Dark`, `Fun` (colourful), `Boring` (beige). Each supplies the neutral
+  tokens (bg/panels/border/text/warn/bad/good) in `ThemeBase()`.
+- **Accent**: the main accent is the live **Windows accent colour** (`SystemAccent()` reads
+  `HKCU\...\DWM\AccentColor`, then `ColorizationColor`, then `DwmGetColorizationColor`). Three more accents are the
+  base hue rotated +90/+180/+270 (`RotateHue`, own HSL maths) — a square/tetradic split. When the Windows accent is
+  achromatic (grey/black/white, `IsAchromatic`), the theme's own `FallbackAccent()` is used. `ResolveLive(id)` does
+  this; `Resolve(id, accent)` is the deterministic form used by `--screenshot`/`--selftest` so goldens are stable.
+- **Host owns theme + layout**, chosen by `--theme light|dark|fun|boring` and `--layout baseline|console`. Modules
+  read them through `IHost::Theme()`, `IHost::Fonts()`, `IHost::Layout()`; the suite chrome themes too. High contrast
+  (`Theme::highContrast`) makes widgets fall back to the system colours.
+- **Widgets** (`core/ui/widgets.h`) are plain objects, not HWNDs: the module owns them, paints them from
+  `Module::Paint` (so WM_PAINT and `--screenshot` match), and forwards input via `Module::OnInput`. `ScrollBar`
+  (draggable), `ListView` (sortable headers, wheel + scrollbar, keyboard nav, focus rect), `SearchBox`, `DetailPane`.
+  Drawing primitives are in `core/ui/draw.h`.
+- **Gallery**: `HadronUikit.exe` (`modules/uikit`) renders the whole set in any theme/layout; it is a reference and
+  screenshot target, not a suite tool, so it is not in `MakeAllModules()`. CI renders all eight combinations.

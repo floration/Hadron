@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  # Hard rule 2: firmware is read-only. Fail if the suite source writes firmware. Scans core/,
+  # modules/ and app/ only (CLAUDE.md and the workflow name the banned APIs on purpose).
+  firmware-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No firmware-write APIs in the source
+        run: |
+          if grep -rnE 'SetFirmwareEnvironmentVariable|NtSetSystemEnvironmentValue' core modules app; then
+            echo "::error::firmware-write API found (hard rule 2)"; exit 1
+          fi
+          echo "ok: no firmware-write APIs"
+
+  linux-mingw:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 cmake ninja-build wine64 xvfb
+      - name: Configure and build (MinGW cross)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Selftests (Wine)
+        run: |
+          export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
+          wineboot -i || true
+          wine build/HadronHello.exe --selftest
+          wine build/HadronUikit.exe --selftest
+          python3 tests/fixtures/make_diskmap_tree.py dmfix
+          wine build/HadronDiskMap.exe --selftest
+          wine build/HadronDiskMap.exe --selftest --fixture dmfix/tree
+          wine build/Hadron.exe --solo diskmap --selftest --fixture dmfix/tree
+      - name: Screenshots (Wine + Xvfb)
+        run: |
+          export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
+          mkdir -p shots
+          shot() { xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" wine "$@"; }
+          shot build/HadronHello.exe --screenshot shots/hello-standalone.png
+          shot build/Hadron.exe --screenshot shots/hello-suite.png
+          for th in light dark fun boring; do
+            for ly in baseline console; do
+              shot build/HadronUikit.exe --theme $th --layout $ly --screenshot shots/uikit-$ly-$th.png
+            done
+          done
+          for th in dark light; do
+            for ly in baseline console; do
+              shot build/HadronDiskMap.exe --fixture dmfix/tree --theme $th --layout $ly --screenshot shots/diskmap-$ly-$th.png
+            done
+          done
+          # Non-solo suite shot: the module drawn under the host's content offset (catches clip bugs
+          # that standalone and --solo hide).
+          for ly in baseline console; do
+            shot build/Hadron.exe --module diskmap --fixture dmfix/tree --layout $ly --screenshot shots/diskmap-suite-$ly.png
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-linux
+          path: shots/*.png
+
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build with Ninja + the runner's own MSVC, not the "Visual Studio 17 2022" generator:
+      # on the hosted image cmake's generator reports "could not find any instance of Visual
+      # Studio". vswhere + vcvars64 (both preinstalled) are reliable and add no third-party action.
+      # /MT and /MANIFEST:NO come from CMakeLists' MSVC block, so no flags are needed here.
+      - name: Configure and build (MSVC via Ninja)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw "No Visual Studio with C++ tools found on the runner" }
+          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2]) }
+          }
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Selftests
+        shell: pwsh
+        run: |
+          build\HadronHello.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronUikit.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tests\fixtures\make_diskmap_tree.py dmfix; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronDiskMap.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronDiskMap.exe --selftest --fixture dmfix\tree; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\Hadron.exe --solo diskmap --selftest --fixture dmfix\tree; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Screenshots
+        shell: pwsh
+        run: |
+          mkdir shots
+          build\HadronHello.exe --screenshot shots\hello-standalone.png
+          build\Hadron.exe --screenshot shots\hello-suite.png
+          foreach ($th in 'light','dark','fun','boring') {
+            foreach ($ly in 'baseline','console') {
+              build\HadronUikit.exe --theme $th --layout $ly --screenshot "shots\uikit-$ly-$th.png"
+            }
+          }
+          foreach ($th in 'dark','light') {
+            foreach ($ly in 'baseline','console') {
+              build\HadronDiskMap.exe --fixture dmfix\tree --theme $th --layout $ly --screenshot "shots\diskmap-$ly-$th.png"
+            }
+          }
+          foreach ($ly in 'baseline','console') {
+            build\Hadron.exe --module diskmap --fixture dmfix\tree --layout $ly --screenshot "shots\diskmap-suite-$ly.png"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-windows
+          path: shots/*.png

@@ -1,0 +1,70 @@
+{
+  "variables": 20,
+  "settings": 5368,
+  "changed": [
+    {
+      "id": 417,
+      "prompt": "Hyper-Threading",
+      "path": "Setup > Advanced > CPU Configuration | Setup > Overclocking > Advanced CPU Configuration",
+      "value": 0,
+      "default": 1
+    },
+    {
+      "id": 448,
+      "prompt": "Intel Turbo Boost",
+      "path": "Setup > Advanced > Power & Performance > CPU - Power Management Control | Setup > Overclocking > Advanced CPU Configuration",
+      "value": 0,
+      "default": 1
+    },
+    {
+      "id": 439,
+      "prompt": "Intel Speed Shift Technology",
+      "path": "Setup > Advanced > Power & Performance > CPU - Power Management Control | Setup > Overclocking > Advanced CPU Configuration",
+      "value": 0,
+      "default": 2
+    },
+    {
+      "id": 437,
+      "prompt": "EIST",
+      "path": "Setup > Advanced > Power & Performance > CPU - Power Management Control | Setup > Overclocking > Advanced CPU Configuration",
+      "value": 0,
+      "default": 1
+    },
+    {
+      "id": 1373,
+      "prompt": "CSM Support",
+      "path": "Setup > Advanced > CSM Configuration",
+      "value": 1,
+      "default": 0
+    },
+    {
+      "id": 1290,
+      "prompt": "Re-Size BAR Support",
+      "path": "Setup > Advanced > PCIe/PCI Sub-system Settings | Setup > Settings > Advanced > PCIe/PCI Sub-system Settings",
+      "value": 0,
+      "default": 1
+    },
+    {
+      "id": 1289,
+      "prompt": "Above 4G memory/Crypto Currency mining",
+      "path": "Setup > Advanced > PCIe/PCI Sub-system Settings | Setup > Settings > Advanced > PCIe/PCI Sub-system Settings",
+      "value": 0,
+      "default": 1
+    },
+    {
+      "id": 409,
+      "prompt": "Hardware Prefetcher",
+      "path": "Setup > Advanced > CPU Configuration | Setup > Overclocking > CPU Features",
+      "value": 0,
+      "default": 1
+    },
+    {
+      "id": 410,
+      "prompt": "Adjacent Cache Line Prefetch",
+      "path": "Setup > Advanced > CPU Configuration | Setup > Overclocking > CPU Features",
+      "value": 0,
+      "default": 1
+    }
+  ],
+  "unmatched": []
+}

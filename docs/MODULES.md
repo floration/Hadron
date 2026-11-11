@@ -4,8 +4,9 @@ Status: `legacy` = a working tool to port. `idea` = needs his OK before anyone b
 
 | id | Name | Status | Admin | Summary |
 |---|---|---|---|---|
-| `diskmap` | DiskMap | legacy | None | Drive-space treemap and folder list. First port, proves the contract |
-| `bios` | BIOS Settings Explorer | legacy | Optional | Every setup setting with live value, default, explanation and per-goal advice. Includes snapshots (absorbs `legacy/uefi-dump`) and snapshot compare |
+| `diskmap` | DiskMap | legacy | Required | Read-only drive-space visualiser: squarified treemap (Baseline) or dense sortable folder list (Console), 12 categories, safe-to-delete hints with a basis per rule; hard links counted once, links never followed, cloud placeholders skipped |
+| `bios` | BIOS Settings Explorer | legacy | Required | Every setup setting with live value, default, explanation and per-goal advice. Includes snapshots (absorbs `legacy/uefi-dump`) and snapshot compare |
+| `runas` | Run As | new (owner-approved) | Required | Launch any file as this admin / another user / TrustedInstaller / SYSTEM, full or limited token; keeps a last-run list and quick buttons for Windows tools. SYSTEM/TI behind an off-by-default switch (rule 4). Design: docs/design/runas.md |
 
 Dropped by the owner: Organizer, OrganizerRescue, SaveFinder.
 

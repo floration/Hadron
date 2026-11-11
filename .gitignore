@@ -14,3 +14,4 @@ __pycache__/
 *.CAP
 **/uefidump/
 **/UEFI_Dump_*/
+.claude/worktrees/
