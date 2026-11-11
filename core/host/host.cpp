@@ -280,21 +280,31 @@ void Host::ApplyCaptionColour() {
     COLORREF bg = theme_.bg;
     BOOL dark = (GetRValue(bg) * 299 + GetGValue(bg) * 587 + GetBValue(bg) * 114) / 1000 < 128;
     DwmSetWindowAttribute(frame_, HX_DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    // Windows 10 doesn't repaint a visible caption after the attribute changes until the frame is recalculated.
+    SetWindowPos(frame_, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
 void Host::SetLook(ui::Layout l, ui::ThemeId t) {
     if (l == layout_ && t == themeId_) return;
+    bool layoutChanged = l != layout_, themeChanged = t != themeId_;
     layout_ = l;
     themeId_ = t;
     BuildTheme(/*deterministic=*/false);
+    // Save only the key that changed, so a --theme/--layout flag for this run isn't made permanent by
+    // switching the other one.
     sys::Settings look = store_.Section(L"host");
-    look.SetStr(L"layout", l == ui::Layout::Console ? L"console" : L"baseline");
-    std::wstring tn = ui::ThemeName(t);
-    for (auto& c : tn) c = (wchar_t)towlower(c);
-    look.SetStr(L"theme", tn);
+    if (layoutChanged) look.SetStr(L"layout", l == ui::Layout::Console ? L"console" : L"baseline");
+    if (themeChanged) {
+        std::wstring tn = ui::ThemeName(t);
+        for (auto& c : tn) c = (wchar_t)towlower(c);
+        look.SetStr(L"theme", tn);
+    }
     DWORD serr = 0;
-    if (!store_.Save(&serr))   // save now, so the choice survives a crash or a killed process
+    if (!store_.Save(&serr)) {   // save now, so the choice survives a crash or a killed process
         sys::Write(LogLevel::Warn, L"look: settings.ini not saved: " + sys::ErrorText(serr));
+        SetStatus((L"Look not saved: " + sys::ErrorText(serr)).c_str());
+    }
     // Modules rebuild layout-dependent fonts and metrics the same way they do on a DPI change.
     for (size_t i = 0; i < modules_.size(); i++)
         if (content_[i]) modules_[i]->OnDpiChanged(dpi_);
@@ -532,14 +542,16 @@ int Host::Run(const CommandLine& cl) {
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (msg.message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
             !(GetKeyState(VK_MENU) & 0x8000) && (msg.wParam == 'L' || msg.wParam == 'T')) {
-            if (msg.wParam == 'L') ToggleLayout(); else NextTheme(+1);
+            if (!(msg.lParam & (1 << 30)))   // ignore autorepeat: one switch per press
+                msg.wParam == 'L' ? ToggleLayout() : NextTheme(+1);
             continue;
         }
         if (active_ >= 0 && modules_[active_]->PreTranslateMessage(msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    store_.Save();
+    DWORD serr = 0;
+    if (!store_.Save(&serr)) sys::Write(LogLevel::Warn, L"settings.ini not saved at exit: " + sys::ErrorText(serr));
     sys::CloseLog();
     CoUninitialize();
     return (int)msg.wParam;

@@ -74,7 +74,8 @@ int RunSuite(std::vector<std::unique_ptr<Module>>);
   to the module HWND, and the host keeps that HWND alive until `Shutdown()` returns.
 - **COM.** The host initialises COM (STA, `COINIT_DISABLE_OLE1DDE`). Modules never call `CoInitialize*` on the UI thread.
 - **Focus and input.** The host saves `GetFocus()` on deactivate and restores it on activate, and forwards
-  `WM_MOUSEWHEEL` to the active module. It owns Ctrl+Tab and Ctrl+1..9.
+  `WM_MOUSEWHEEL` to the active module. It owns Ctrl+Tab, Ctrl+1..9, and Ctrl+Shift+L / Ctrl+Shift+T
+  (layout and theme switch), which it takes before `PreTranslateMessage`.
 - **Dialogs.** Every dialog is owned by `IHost::Frame()` and disables the whole suite. Use `hx::ui::Confirm()`.
 - **DPI.** The host handles `WM_DPICHANGED` using the suggested rect, then calls `OnDpiChanged`. Every metric
   goes through `S(px)` with the current DPI. All legacy tools are system-DPI only, so this is real port work.
