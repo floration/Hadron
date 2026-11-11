@@ -75,6 +75,7 @@ exit /b 0
 :nowin
 echo No Windows installation at %T% (no %T%\Windows\System32\config\SYSTEM).
 echo Run it with the drive that holds Windows, for example: restore.cmd D:
+echo A BitLocker-locked drive shows no Windows folder: unlock it first, see README.txt section A.
 exit /b 1
 :noload
 echo reg load failed. Either the drive is BitLocker-locked, see README.txt section A,

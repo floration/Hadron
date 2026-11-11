@@ -5,9 +5,14 @@
 namespace hx::services {
 
 namespace {
-std::string A(const std::wstring& s) {   // ASCII-only text (callers pass only CmdSafeName names)
+std::string A(const std::wstring& s) {   // ASCII-only text on one line: no control characters (R16)
     std::string o;
-    for (wchar_t c : s) o += (c < 0x80) ? (char)c : '?';
+    for (wchar_t c : s) o += (c < 0x20 || c == 0x7F) ? ' ' : (c < 0x80) ? (char)c : '?';
+    return o;
+}
+std::wstring NoCtl(const std::wstring& s) {   // README text for a name: CR, LF and other control characters become spaces
+    std::wstring o = s;
+    for (auto& c : o) if (c < 0x20 || c == 0x7F) c = L' ';
     return o;
 }
 void L(std::string& o, const std::string& line) { o += line; o += "\r\n"; }
@@ -34,6 +39,15 @@ bool CmdSafeName(const std::wstring& name) {
         bool ok = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || wcschr(L" _-.{}#$@+~", c);
         if (!ok || c == 0) return false;
     }
+    return true;
+}
+
+bool RegSafeName(const std::wstring& name) {
+    // A .reg key line is "[...]" on one line: a control character would start a new line (a new key or value of the
+    // name's choosing), and a ] could end the key early.
+    if (name.empty()) return false;
+    for (wchar_t c : name)
+        if (c < 0x20 || c == 0x7F || c == L']' || c == L'\\') return false;
     return true;
 }
 
@@ -126,6 +140,7 @@ std::string RestoreCmd(const std::wstring& stamp, const std::wstring& title, con
     L(o, ":nowin");
     L(o, "echo No Windows installation at %T% (no %T%\\Windows\\System32\\config\\SYSTEM).");
     L(o, "echo Run it with the drive that holds Windows, for example: restore.cmd D:");
+    L(o, "echo A BitLocker-locked drive shows no Windows folder: unlock it first, see README.txt section A.");
     L(o, "exit /b 1");
     L(o, ":noload");
     L(o, "echo reg load failed. Either the drive is BitLocker-locked, see README.txt section A,");
@@ -171,53 +186,100 @@ std::string RestoreOnlineCmd(const std::wstring& stamp, const std::vector<Restor
 std::string ReadmeTxt(const std::wstring& stamp, const std::wstring& folder, const std::wstring& title,
                       const std::vector<RestoreRow>& rows, const std::vector<std::wstring>& notRestored) {
     std::string o;
-    std::string f = A(folder);
+    // folder is "X:\...", "\\server\share\..." or a path without its drive ("\ProgramData\..."). The WinRE steps use
+    // the path without the drive: WinRE often gives the drives other letters.
+    std::wstring wf = folder;
+    std::string drive;
+    const bool unc = wf.rfind(L"\\\\", 0) == 0;
+    if (!unc && wf.size() >= 2 && wf[1] == L':') { drive = A(wf.substr(0, 2)); wf = wf.substr(2); }
+    const std::string f = A(wf);
+    std::string data = f;   // the data folder: the recovery folder without "\recovery\<stamp>"
+    const std::string tail = "\\recovery\\" + A(stamp);
+    if (data.size() > tail.size() && data.compare(data.size() - tail.size(), tail.size(), tail) == 0) data.resize(data.size() - tail.size());
+    const bool first = stamp.rfind(L"first", 0) == 0;   // "first", or "first-2" after a failed try (R12)
+    const std::string undoName = first ? "Default: as first seen" : "Undo";
     L(o, "Hadron services recovery " + A(stamp));
     L(o, "What this restores: " + A(title));
     L(o, "Only start types are restored. Service state can't be restored offline.");
+    if (!drive.empty()) L(o, "While Windows runs, this folder is " + drive + f);
+    if (unc) {
+        L(o, "This folder is on a network share: " + f);
+        L(o, "WinRE has no network access unless you set it up (reasoning). Copy this folder to a USB stick");
+        L(o, "while Windows still runs, and use the USB steps in A.");
+    }
     L(o, "");
     L(o, "A. If Windows doesn't start (WinRE)");
     L(o, "1. Windows opens the recovery environment by itself after failed starts. Choose");
     L(o, "   Troubleshoot > Advanced options > Command Prompt.");
+    L(o, "   If it doesn't open, start the PC from Windows installation media (a USB stick), choose");
+    L(o, "   your language, then Repair your computer > Troubleshoot > Advanced options > Command Prompt.");
     L(o, "2. If the Windows drive uses BitLocker, unlock it first (you need the recovery key):");
     L(o, "     manage-bde -unlock C: -RecoveryPassword <your-48-digit-key>");
     L(o, "   (use the drive letter WinRE shows for Windows; it is often not C:).");
     L(o, "3. Find the drive that holds Windows. Either try:  dir C:\\Windows  then  dir D:\\Windows");
     L(o, "   or run:  bcdedit | find \"osdevice\"");
-    L(o, "4. Run, replacing D: with that drive:");
-    L(o, "     D:" + f + "\\restore.cmd D:");
+    if (unc) {
+        L(o, "4. Run the copy on the USB stick (see below), giving it the Windows drive.");
+    } else {
+        L(o, "4. Run this. Replace the last D: with the Windows drive, and the first D: with the drive");
+        L(o, "   that holds this folder (the same drive, unless Hadron's data folder is on another one):");
+        L(o, "     D:" + f + "\\restore.cmd D:");
+    }
     L(o, "   The script refuses if D:\\Windows\\System32\\config\\SYSTEM is missing, loads that hive,");
     L(o, "   reads Select\\Current, writes the values below for keys that exist, and unloads it.");
     L(o, "5. Close the window and choose Continue.");
     L(o, "");
+    L(o, "Which folder to use");
+    L(o, "Each apply has its own folder in the recovery folder, named by the UTC time it started");
+    L(o, "(yyyyMMdd-HHmmss), so the names sort oldest first. \"first\" holds the start types from when");
+    L(o, "Hadron first ran on this PC. List them with:");
+    L(o, std::string("     dir ") + (unc ? "" : "D:") + data + "\\recovery");
+    L(o, "Run the newest folder first. If Windows still doesn't start, run the next older one, and so on:");
+    L(o, "each puts back the start types from before its own apply. \"first\" goes back to how Hadron");
+    L(o, "first saw this PC.");
+    L(o, "");
     L(o, "If you copied this folder to a USB stick, run it from there and give the Windows drive:");
     L(o, "     E:\\restore.cmd D:");
-    L(o, "WinRE can't open .zip files: use the plain folder. The .zip beside it is the same files.");
+    L(o, "WinRE has no Explorer to open a .zip (reasoning): use the plain folder. The zip");
+    L(o, "     " + std::string(unc ? "" : drive.empty() ? "D:" : drive) + data + "\\recovery-" + A(stamp) + ".zip");
+    L(o, "holds the same files, for copying.");
     L(o, "");
     L(o, "B. If Windows starts in Safe Mode");
     L(o, "Open an administrator Command Prompt and run:");
-    L(o, "     C:" + f + "\\restore-online.cmd     (C: is where Windows normally runs)");
+    if (unc) L(o, "     " + f + "\\restore-online.cmd");
+    else if (!drive.empty()) L(o, "     " + drive + f + "\\restore-online.cmd");
+    else L(o, "     C:" + f + "\\restore-online.cmd     (C: is where Windows normally runs)");
     L(o, "It checks for admin rights with fltmc and writes the same values to the running registry.");
-    L(o, "Or start Hadron in Safe Mode and use Undo.");
+    L(o, "Or start Hadron in Safe Mode and use " + undoName + ".");
     L(o, "");
-    std::vector<const RestoreRow*> manual;
-    for (auto& r : rows) if (!CmdSafeName(r.name)) manual.push_back(&r);
+    std::vector<const RestoreRow*> manual, byHand;
+    for (auto& r : rows) {
+        if (CmdSafeName(r.name)) continue;
+        (RegSafeName(r.name) ? manual : byHand).push_back(&r);
+    }
     L(o, "C. Names the scripts can't carry");
-    if (manual.empty()) {
+    if (manual.empty() && byHand.empty()) {
         L(o, "None.");
     } else {
-        L(o, "These names have characters a batch file can't hold safely. They are in");
-        L(o, "restore-unicode-ControlSet001.reg (and ...002, ...003). In WinRE: run regedit, select");
-        L(o, "HKEY_LOCAL_MACHINE, File > Load Hive, pick <drive>:\\Windows\\System32\\config\\SYSTEM,");
-        L(o, "name it HXOFF, check HXOFF\\Select\\Current, check each key below exists under that");
-        L(o, "control set, then File > Import the matching file. Importing creates a missing key, so");
-        L(o, "check first. Then select HXOFF and File > Unload Hive.");
-        L(o, "Count: " + std::to_string(manual.size()));
+        if (!manual.empty()) {
+            L(o, "These names have characters a batch file can't hold safely. They are in");
+            L(o, "restore-unicode-ControlSet001.reg (and ...002, ...003). In WinRE: run regedit, select");
+            L(o, "HKEY_LOCAL_MACHINE, File > Load Hive, pick <drive>:\\Windows\\System32\\config\\SYSTEM,");
+            L(o, "name it HXOFF, check HXOFF\\Select\\Current, check each key below exists under that");
+            L(o, "control set, then File > Import the matching file. Importing creates a missing key, so");
+            L(o, "check first. Then select HXOFF and File > Unload Hive.");
+            L(o, "Count: " + std::to_string(manual.size()));
+        }
+        if (!byHand.empty()) {
+            L(o, "These names can't go in a .reg file either (control characters or ]). Set their Start value by");
+            L(o, "hand in regedit, under the loaded hive as above. Control characters show as spaces in D.");
+            L(o, "Count: " + std::to_string(byHand.size()));
+        }
     }
     L(o, "");
     L(o, "D. Values (" + std::to_string(rows.size()) + " items)");
     for (auto& r : rows) {
-        std::string n = CmdSafeName(r.name) ? A(r.name) : "(see C) " + ToUtf8(r.name);
+        std::string n = CmdSafeName(r.name) ? A(r.name) : "(see C) " + ToUtf8(NoCtl(r.name));
         L(o, "  " + n + "  Start=" + std::to_string(r.cfg.start) + " (" + StartNameA(r.cfg.start) + ")" +
                  (r.writeDelayed ? "  DelayedAutostart=" + std::to_string(r.cfg.delayed < 0 ? 0 : r.cfg.delayed) : "") +
                  (r.ti ? "  (needed TrustedInstaller: see E)" : ""));
@@ -225,21 +287,23 @@ std::string ReadmeTxt(const std::wstring& stamp, const std::wstring& folder, con
     L(o, "");
     L(o, "E. Rows that may print FAILED");
     L(o, "Some service keys accept writes only from TrustedInstaller, not from administrators or SYSTEM.");
-    L(o, "Hadron changed those while impersonating TrustedInstaller. In WinRE and in Safe Mode the scripts");
+    L(o, "Hadron writes those while impersonating TrustedInstaller. In WinRE and in Safe Mode the scripts");
     L(o, "run as SYSTEM or as an administrator, so the reg add for such a key may fail and print FAILED.");
-    L(o, "That changes nothing else. Restore those rows with Hadron's Undo, with the TrustedInstaller");
-    L(o, "toggle on, once Windows starts.");
+    L(o, "That changes nothing else. Restore those rows with Hadron's " + undoName + ",");
+    L(o, "with the TrustedInstaller toggle on, once Windows starts.");
     int ti = 0;
     for (auto& r : rows) if (r.ti) ti++;
     L(o, ti ? "Rows here that needed TrustedInstaller: " + std::to_string(ti) + " (marked in D)." : "No row here needed TrustedInstaller.");
     if (!notRestored.empty()) {
         L(o, "");
         L(o, "F. Not in these scripts (" + std::to_string(notRestored.size()) + " items)");
-        L(o, "Hadron never changes these, so the scripts never write them either: Boot- and System-start");
-        L(o, "values, the storage and boot path, never-touch items and launch-protected services. Windows sets");
-        L(o, "those per PC, and writing an old value back after a disk or controller change can stop Windows");
-        L(o, "from starting.");
-        for (auto& n : notRestored) L(o, "  " + (CmdSafeName(n) ? A(n) : ToUtf8(n)));
+        L(o, "Hadron never changes these, so the scripts never write them either: items at Boot or System");
+        L(o, "start, storage and boot-path drivers, items Hadron never touches (core services Windows needs");
+        L(o, "to start, sign in or reach the network, filter drivers, and services whose failure restarts");
+        L(o, "Windows), items it never puts in a preset (Defender, TrustedInstaller, Volume Shadow Copy and");
+        L(o, "others) and launch-protected services. Windows sets the storage and boot-path drivers per PC:");
+        L(o, "writing an old value back after a disk or controller change can stop Windows from starting.");
+        for (auto& n : notRestored) L(o, "  " + (CmdSafeName(n) ? A(n) : ToUtf8(NoCtl(n))));
     }
     return o;
 }
@@ -249,7 +313,7 @@ std::string UnicodeReg(const std::vector<RestoreRow>& rows, int controlSet) {
     wchar_t cs[8];
     swprintf(cs, 8, L"%03d", controlSet);
     for (auto& r : rows) {
-        if (CmdSafeName(r.name)) continue;
+        if (CmdSafeName(r.name) || !RegSafeName(r.name)) continue;   // R16: never a name that could break the line
         t += L"[HKEY_LOCAL_MACHINE\\HXOFF\\ControlSet" + std::wstring(cs) + L"\\Services\\" + r.name + L"]\r\n";
         wchar_t v[64];
         swprintf(v, 64, L"\"Start\"=dword:%08x\r\n", (unsigned)r.cfg.start);
@@ -330,13 +394,12 @@ bool ParseZip(const std::string& z, std::vector<ZipEntry>* out, std::wstring* er
 
 bool WriteRecovery(Store& store, const std::wstring& stamp, const std::wstring& title, const std::vector<RestoreRow>& rows,
                    std::wstring* dir, std::wstring* zip, std::wstring* err, const std::vector<std::wstring>& notRestored) {
-    // The folder as seen from WinRE: the data dir without its drive letter.
+    // The folder without the \\?\ prefix; README.txt shows it without its drive letter for WinRE.
     std::wstring rel = L"recovery\\" + stamp;
     std::wstring full = store.Path(rel);
     std::wstring folder = full;
     if (folder.rfind(L"\\\\?\\UNC\\", 0) == 0) folder = L"\\\\" + folder.substr(8);
     else if (folder.rfind(L"\\\\?\\", 0) == 0) folder = folder.substr(4);
-    if (folder.size() > 2 && folder[1] == L':') folder = folder.substr(2);
     if (!store.MakeDir(L"recovery", err) || !store.MakeDir(rel, err)) return false;
     std::vector<ZipEntry> files;
     files.push_back({"restore.cmd", RestoreCmd(stamp, title, rows)});

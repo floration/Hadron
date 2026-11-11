@@ -24,11 +24,15 @@ struct RestoreRow {
 // True when a name can go into the ASCII batch file as-is: an allow-list of ASCII letters, digits, space and
 // _ - . { } # $ @ + ~. Anything else, ( ) included, goes to the .reg files and README section C.
 bool CmdSafeName(const std::wstring& name);
+// True when a name can go into a .reg key line: no control characters, no ] and no backslash (R16). Names that are
+// neither are listed in README section C for regedit by hand.
+bool RegSafeName(const std::wstring& name);
 
-// folder: the recovery folder as it will look from WinRE without the drive, e.g.
-// "\ProgramData\Hadron\services\recovery\20261111-101500". CRLF, ASCII only.
+// CRLF, ASCII only.
 std::string RestoreCmd(const std::wstring& stamp, const std::wstring& title, const std::vector<RestoreRow>& rows);
 std::string RestoreOnlineCmd(const std::wstring& stamp, const std::vector<RestoreRow>& rows);   // Safe Mode variant
+// folder: the recovery folder with its drive ("C:\ProgramData\...\recovery\<stamp>"), a UNC path, or a path without
+// the drive. The WinRE steps show it without the drive.
 // notRestored: names deliberately left out of the scripts (README section F), e.g. the first-run recovery's
 // Boot/System-start, storage and never-touch items.
 std::string ReadmeTxt(const std::wstring& stamp, const std::wstring& folder, const std::wstring& title,
