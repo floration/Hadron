@@ -1,0 +1,16 @@
+{
+  "tree": "tree",
+  "file_count_per_link": 17,
+  "bytes_per_link": 18112005,
+  "bytes_unique_fileid": 17992005,
+  "hard_link": [
+    "Documents/report.pdf",
+    "Documents/report-hardlink.pdf"
+  ],
+  "symlink_outside": "Links/outside-symlink",
+  "junction_outside": null,
+  "sentinel_bytes": 10000000,
+  "long_path": "deep_folder_name_00/deep_folder_name_01/deep_folder_name_02/deep_folder_name_03/deep_folder_name_04/deep_folder_name_05/deep_folder_name_06/deep_folder_name_07/deep_folder_name_08/deep_folder_name_09/deep_folder_name_10/deep_folder_name_11/deep_folder_name_12/deep_folder_name_13/long_path_file.dat",
+  "long_path_chars": 382,
+  "note": "A correct scan never includes sentinel_bytes."
+}

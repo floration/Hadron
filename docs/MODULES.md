@@ -4,8 +4,8 @@ Status: `legacy` = a working tool to port. `idea` = needs his OK before anyone b
 
 | id | Name | Status | Admin | Summary |
 |---|---|---|---|---|
-| `diskmap` | DiskMap | legacy | None | Drive-space treemap and folder list. First port, proves the contract |
-| `bios` | BIOS Settings Explorer | legacy | Optional | Every setup setting with live value, default, explanation and per-goal advice. Includes snapshots (absorbs `legacy/uefi-dump`) and snapshot compare |
+| `diskmap` | DiskMap | legacy | Required | Drive-space treemap and folder list. First port, proves the contract |
+| `bios` | BIOS Settings Explorer | legacy | Required | Every setup setting with live value, default, explanation and per-goal advice. Includes snapshots (absorbs `legacy/uefi-dump`) and snapshot compare |
 
 Dropped by the owner: Organizer, OrganizerRescue, SaveFinder.
 

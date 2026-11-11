@@ -10,7 +10,7 @@ deeply, and writes some C. Talk to him as a peer: be direct, skip filler, and pu
 he's wrong. Change your mind when *he* brings evidence.
 
 ## Team
-- **Lead (main thread): Claude Fable 5.2.** Owns the architecture, `core/`, specs, review, merges and talking to the owner.
+- **Lead (main thread): Claude Opus 5.5** (owner's call 2026-11-11; only the project coordinator runs on Fable 5.2). Owns the architecture, `core/`, specs, review, merges and talking to the owner.
 - **Subagents (`.claude/agents/`):**
   - `module-builder`: medium effort; read-only modules and features.
   - `module-builder-careful`: high effort; `core/fs` and anything that moves or deletes files.
@@ -45,14 +45,13 @@ and gets the owner's OK once, as a batch, before building. Known cases are in `d
    flashes, never runs SCEWIN/AMISCE. CI fails if the source contains `SetFirmwareEnvironmentVariable` or `NtSetSystemEnvironmentValue`.
 3. **Nothing third-party is linked into, embedded in or shipped with Hadron.** Win32, GDI, the C++ standard library
    and the Windows SDK only; write your own parsers. Build and test tools (CMake, MinGW, Wine, ImageMagick, Python) are fine.
-4. **Elevation.** The suite may run as admin: `Hadron.exe` requests elevation (`requireAdministrator`), so every
-   module inside it, including live BIOS reads, works without relaunching. Standalone exes request admin only if
-   their module is `Admin::Required`. A module launched without admin offers a relaunch with `--elevated`. Rules:
+4. **Elevation.** Every exe, the suite and each standalone, is `requireAdministrator` (owner's call, 2026-11-11, for ease
+   of production). There is no non-admin mode and no elevation relaunch. Anything that needs more than admin (SYSTEM or
+   TrustedInstaller) is off by default behind an explicit per-feature toggle, and the toggle is built only when a module
+   needs it. Rules:
    - Detect elevation with `GetTokenInformation(TokenElevation)`.
    - A privilege counts as enabled only if `AdjustTokenPrivileges` succeeded and `GetLastError() != ERROR_NOT_ALL_ASSIGNED`.
-   - `ERROR_CANCELLED` (1223) from `ShellExecuteExW` is final.
-   - Make all arguments absolute paths before relaunching.
-   - `--elevated` means never relaunch again.
+   - If the process somehow runs without elevation (manifest ignored, e.g. Wine), say so in the UI and degrade; never relaunch in a loop.
    - Scripts check admin with `fltmc`, not `net session` (LanmanServer is disabled on the owner's PC).
    - Elevated windows can't receive drag-and-drop from Explorer (UIPI), so every drop target also offers a Browse button.
 5. **The owner's PC.** The lead and every subagent may use the tools that reach the owner's computer: read and write
