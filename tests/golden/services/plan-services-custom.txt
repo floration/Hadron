@@ -1,6 +1,6 @@
 Plan: Custom: Gaming rig (Services)
 Source: custom:services:Gaming rig
-Rows: 3 ticked, 3 unticked, 1 kept or protected; already set: 1
+Rows: 3 ticked, 3 unticked, 1 kept, protected or not applied; already set: 1
 Note: 1 row(s) need TrustedInstaller (Windows refuses the write to administrators): left out while the TrustedInstaller toggle is off.
 Note: Your custom preset "Gaming rig": nothing is changed until you press Apply, and the apply is snapshotted and undoable like every plan.
 Note: Dropped 3 item(s) that every preset leaves alone: Fax (Hadron's KB keeps it out of every preset), WinDefend (launch-protected (Antimalware light (protected process light)): only a protected process can change it), RpcSs (core Windows service: boot, sign-in, RPC, audio, network or Hadron itself needs it).

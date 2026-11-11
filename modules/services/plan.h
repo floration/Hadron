@@ -29,6 +29,8 @@ struct Ctx {
     std::wstring build;                // running build, e.g. "19045"
     std::wstring machine;              // machine GUID (first.txt must match)
     bool tiOn = false;
+    const SxsStock* sxs = nullptr;     // this PC's WinSxS manifest values, when read (fix/svcdrv-stock)
+    bool sxsPending = false;           // the manifest pass is still running (review F2: the stock plan waits)
     // Filled by Prepare() from hw.
     std::set<std::wstring> filters, bootChain;
     void Prepare();
@@ -43,6 +45,23 @@ struct Guard {
 Guard CheckGuard(const SvcItem& s, const Ctx& c);
 bool IsStorageDriver(const std::wstring& name);   // never given a Windows-stock value (spec §0.5)
 
+// An item's Windows-stock value (fix/svcdrv-stock; DECISIONS 2026-11-11, owner). This PC's own WinSxS manifests come
+// first (owner-measured, read on this PC), cross-checked with the KB's value (two agreeing third-party tables, a
+// Microsoft page, or a measurement). Apply: one value, sources agree or only one has a value. Show: shown with its
+// sources, never applied (the manifests and the KB disagree; the tables disagree; only a configuration-setting
+// default, which can be a Server value, gives it and no table agrees; or Windows sets it at runtime). Drivers take a
+// manifest value only when their KB entry has sysok; storage drivers never get one.
+struct StockPick {
+    enum Kind { None, Apply, Show } kind = None;
+    StartCfg cfg;                // Apply: the target (delayed 0/1 for Auto, -1 otherwise); Show: a value to display
+    bool hasCfg = false;         // Show: cfg holds a value
+    std::wstring value;          // the detail pane's "Windows stock" text
+    std::wstring reason, basis, basisNote;   // a plan row's texts
+    std::wstring basisCond;      // BasisLabel's condition for an owner-measured value read from the manifests
+    std::wstring why;            // Show: why it is not applied
+};
+StockPick StockFor(const SvcItem& s, const Ctx& c);
+
 enum class PlanKind { Preset, Single, Undo, Resume, Control };
 
 struct PlanRow {
@@ -55,6 +74,7 @@ struct PlanRow {
     bool include = true, canToggle = true;
     std::wstring blocked;              // non-empty: shown for information, never applied
     std::wstring reason, basis, basisNote, evidence, warning, contested;
+    std::wstring basisCond;            // BasisLabel's condition (manifest stock rows: "read on this PC by Hadron (...)")
     std::wstring depWarning;           // DependencyCheck's own warning, recomputed on every toggle
     bool depUnticked = false;          // DependencyCheck unticked it (ticked again when the reason goes)
     bool depKept = false;              // the user ticked it while it had a dependency warning: never unticked by the check

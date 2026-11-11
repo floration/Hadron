@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Hand-written fixture (not Microsoft's file): HxClr's DelayedAutostart=1 again, from a second component (an x86
+     netfx4 manifest's shape). The same value twice is not a conflict. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
+  <assemblyIdentity name="Microsoft-Windows-Fixture-LiveCases-x86" version="10.0.19041.1" processorArchitecture="x86" />
+  <registryKey keyName="HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\HxClr">
+    <registryValue name="DelayedAutostart" valueType="REG_DWORD" value="1" />
+  </registryKey>
+</assembly>

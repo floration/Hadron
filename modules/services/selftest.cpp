@@ -107,7 +107,26 @@ T& At(std::vector<T>& v, int i) {
     return none;
 }
 
-bool WriteAll(const std::wstring& path, const std::string& data) {   // test outputs only (goldens, --out)
+// Review F1: --out of the headless modes runs in an elevated exe, so it never replaces or follows anything: CREATE_NEW
+// with FILE_FLAG_OPEN_REPARSE_POINT, and an existing path is refused with that reason.
+bool WriteNewOut(const std::wstring& path, const std::string& data, std::wstring* err) {
+    HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        *err = e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS
+                   ? path + L" already exists; Hadron never overwrites an --out file, so pick a new name"
+                   : L"could not create " + path + L": " + sys::ErrorText(e);
+        return false;
+    }
+    DWORD put = 0;
+    bool ok = WriteFile(h, data.data(), (DWORD)data.size(), &put, nullptr) && put == data.size() && FlushFileBuffers(h);
+    if (!ok) *err = L"could not write " + path + L": " + sys::ErrorText(GetLastError());
+    CloseHandle(h);
+    return ok;
+}
+
+bool WriteAll(const std::wstring& path, const std::string& data) {   // test outputs only (goldens)
     HANDLE h = CreateFileW(sys::ToExtended(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     DWORD put = 0;
@@ -339,6 +358,7 @@ std::vector<SvcItem> Folded(FakeBackend& b) {
 
 struct World {
     FixtureData fx;
+    std::shared_ptr<const SxsStock> sxs;   // the fixture's sxs\ manifests, when it has them
     std::vector<SvcItem> items;
     HwInfo hw;
     Ctx ctx;
@@ -354,6 +374,8 @@ bool MakeWorld(const std::wstring& dir, const Kb* kb, World* w, std::wstring* er
     w->ctx.first = w->fx.hasFirst ? &w->fx.first : nullptr;
     w->ctx.build = w->fx.backend.Build();
     w->ctx.machine = w->fx.backend.MachineGuid();
+    if (std::unique_ptr<SxsReader> r = w->fx.backend.MakeSxs()) w->sxs = std::make_shared<const SxsStock>(ScanSxs(*r));
+    w->ctx.sxs = w->sxs.get();
     w->ctx.Prepare();
     return true;
 }
@@ -614,6 +636,191 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
     if (golden.empty()) golden = Parent(Parent(fixture)) + L"\\golden\\services";
     World w;
     check(MakeWorld(fixture, &kb, &w, &err), L"fixture loads (snapshot.txt, hw.txt, first.txt)" + (err.empty() ? L"" : L": " + err));
+
+    // ---- WinSxS manifest stock (fix/svcdrv-stock): the scanner on hand-written XML, the fake reader, the cache ----------
+    {
+        SxsScan a;
+        ScanManifestXml("<assembly><assemblyIdentity name='C1'/>"
+                        "<serviceData name=\"Svc&amp;A\" start='delayedAuto'/>"
+                        "<serviceData name=\"B\" start=\"bogus\"/>"
+                        "<!-- <serviceData name=\"Cm\" start=\"disabled\"/> -->"
+                        "<registryKey keyName=\"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Drv1\">"
+                        "<registryValue name=\"Start\" valueType=\"REG_DWORD\" value=\"0x00000000\"/></registryKey>"
+                        "<registryKey keyName=\"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Drv1\\Parameters\">"
+                        "<registryValue name=\"Start\" value=\"4\"/></registryKey>"
+                        "<registryValue name=\"Start\" value=\"4\"/>"
+                        "<registryKey keyName=\"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\StorX\">"
+                        "<registryValue name=\"DelayedAutostart\" value=\"1\"/></registryKey>"
+                        "<serviceData name=\"StorX\" start=\"auto\"/></assembly>", &a);
+        auto at = [&](const wchar_t* n) { auto it = a.byName.find(n); return it == a.byName.end() ? nullptr : &it->second; };
+        check(at(L"svc&a") && at(L"svc&a")->Cfg().Delayed() && at(L"svc&a")->StartSrc() == SxsValue::SERVICE && !at(L"b") && !at(L"cm"),
+              L"sxs scanner: serviceData start (delayedAuto -> Auto delayed), entities decoded, a bad start and a comment ignored");
+        check(at(L"drv1") && at(L"drv1")->Cfg().start == 0 && at(L"drv1")->StartSrc() == SxsValue::REGISTRY && a.byName.size() == 3,
+              L"sxs scanner: registryKey Services\\X Start; a subkey's Start and a value outside a key are ignored");
+        check(at(L"storx") && at(L"storx")->Cfg().Delayed() && !at(L"storx")->LowConfidence(),
+              L"sxs scanner: DelayedAutostart=1 from the registry value makes serviceData auto delayed (StorSvc's case)");
+        ScanManifestXml("<assembly><serviceData name=\"svc&amp;a\" start=\"demand\"/></assembly>", &a);
+        check(at(L"svc&a")->conflict && !at(L"svc&a")->Usable(), L"sxs scanner: two manifests with different values -> conflict, no value");
+        SxsScan s;
+        ScanManifestXml("<assembly><assemblyIdentity name=\"Comp-A\"/><dependency><dependentAssembly><assemblyIdentity name=\"Other\"/>"
+                        "</dependentAssembly></dependency><serviceData name=\"Q\" start=\"demand\"/><xsd:element name=\"Start_Q\" default=\"3\" "
+                        "wcm:handler=\"regkey('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Q')\" wcm:legacyName=\"Start\"/>"
+                        "<xsd:element name=\"Start_T\" default=\"4\" wcm:handler=\"regkey('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\T')\" "
+                        "wcm:legacyName=\"Start\"/></assembly>", &s);
+        const SxsValue* t = s.byName.count(L"t") ? &s.byName[L"t"] : nullptr;
+        check(t && t->Usable() && t->LowConfidence() && t->Cfg().start == 4 && s.settings.count(L"comp-a|start_q"),
+              L"sxs scanner: a setting default alone is a low-confidence value; settings keyed by the manifest's own component");
+        int n = ApplyEditionXml("<unattend><component name=\"Comp-A\"><Start_Q>2</Start_Q></component>"
+                                "<component name=\"Other\"><Start_Q>4</Start_Q></component></unattend>", &s);
+        check(n == 1 && s.byName[L"q"].Cfg().start == 2 && s.byName[L"q"].StartSrc() == SxsValue::EDITION && s.byName[L"q"].Usable(),
+              L"sxs edition file: overrides serviceData and the setting default; another component's setting is not mapped");
+
+        const SxsStock* fs = w.sxs.get();
+        check(fs && fs->ok && fs->manifests == 7 && fs->editionRead && fs->overrides == 2 && fs->build == L"19045.5737" &&
+                  fs->edition == L"Professional",
+              L"sxs fake reader: 7 fixture manifests, the Professional edition file (2 overrides), build 19045.5737");
+        const SxsValue* au = fs ? fs->Find(L"Audiosrv") : nullptr;
+        const SxsValue* dps = fs ? fs->Find(L"DPS") : nullptr;
+        check(au && au->Cfg().start == 2 && au->StartSrc() == SxsValue::EDITION && dps && dps->LowConfidence() && dps->Cfg().Delayed(),
+              L"sxs layers: AudioSrv demand + setting 3 + edition 2 -> Auto (edition); DPS from setting defaults only -> low confidence");
+        check(fs && fs->Find(L"CDPUserSvc_4f2a1", true) && fs->Find(L"CDPUserSvc_4f2a1", true)->Cfg().start == 2 &&
+                  !fs->Find(L"CDPUserSvc_4f2a1") && !fs->Find(L"Foo_zz", true) &&
+                  !fs->Find(L"Commented") && !fs->Find(L"InCdata") && fs->Find(L"Beep") && fs->Find(L"Beep")->Cfg().start == 1,
+              L"sxs: a per-user instance maps to its template (only when asked: review F6); comments and CDATA are not read; a "
+              L"driver's registry Start is");
+        if (fs) {
+            SxsStock back;
+            std::wstring e;
+            std::string text = WriteSxsCache(*fs);
+            bool rt = ParseSxsCache(text, &back, &e) && back.fromCache && WriteSxsCache(back) == text && back.Usable() == fs->Usable();
+            SxsStock torn;
+            bool tornFails = !ParseSxsCache(text.substr(0, text.size() - 4), &torn, &e) && !torn.ok;
+            check(rt && tornFails, L"sxs cache: write -> parse -> write reproduces it; a torn file (no end line) is refused");
+            std::string old = text;
+            old.replace(0, old.find('\n'), "HXSVC\t1\tsxsstock\t1");
+            SxsStock ov;
+            std::wstring oe;
+            check(!ParseSxsCache(old, &ov, &oe) && oe.find(L"another scanner version") != std::wstring::npos,
+                  L"sxs cache (review F5): a cache from another scanner version is refused (the caller renames it aside)");
+            SxsStock c1 = *fs;
+            c1.fixture = false;
+            SxsStock c2 = c1, c3 = c1, c4 = c1;
+            c2.failed = 1;
+            c3.editionRead = false;
+            c4.truncated = true;
+            check(fs->fixture && !fs->Cacheable() && c1.Cacheable() && !c2.Cacheable() && !c3.Cacheable() && !c4.Cacheable(),
+                  L"sxs cache (review F3/F4): only a complete scan with the edition file read is cached; never the fixture's");
+        }
+        {   // review F3: an unreadable edition file: services its settings target are shown, not applied.
+            struct NoEdition : SxsReader {
+                bool List(std::vector<std::wstring>* n, bool* t, std::wstring*) override { *n = {L"a.manifest"}; *t = false; return true; }
+                bool ReadXml(const std::wstring&, std::string* x, bool*, std::wstring*) override {
+                    *x = "<assembly><assemblyIdentity name=\"Comp-A\"/><serviceData name=\"Audiosrv\" start=\"demand\"/>"
+                         "<xsd:element name=\"Start_AudioSrv\" default=\"3\" wcm:handler=\"regkey('HKEY_LOCAL_MACHINE\\SYSTEM\\"
+                         "CurrentControlSet\\Services\\AudioSrv')\" wcm:legacyName=\"Start\"/><serviceData name=\"PcaSvc\" "
+                         "start=\"demand\"/></assembly>";
+                    return true;
+                }
+                std::wstring BuildUbr() override { return L"19045.1"; }
+                std::wstring Edition() override { return L"Professional"; }
+                bool ReadEdition(std::string*, std::wstring* e) override { *e = L"access denied (test)"; return false; }
+            } ne;
+            SxsStock ns = ScanSxs(ne);
+            Ctx nc = w.ctx;
+            nc.sxs = &ns;
+            StockPick au = {}, pc = {};
+            for (auto& i : w.items) {
+                if (IEq(i.name, L"Audiosrv")) au = StockFor(i, nc);
+                if (IEq(i.name, L"PcaSvc")) pc = StockFor(i, nc);
+            }
+            Plan np = BuildDefault(true, TAB_SERVICES, w.items, nc);
+            bool note = false;
+            for (auto& n : np.notes) if (n.find(L"The edition file could not be read (access denied (test))") == 0) note = true;
+            check(ns.ok && !ns.editionRead && !ns.Cacheable() && au.kind == StockPick::Show &&
+                      au.why.find(L"the edition file could not be read") == 0 && pc.kind == StockPick::Apply && note,
+                  L"sxs (review F3): without the edition file, services its settings target are shown, not applied; the plan says why");
+            ns.failed = 2;
+            StockPick pf = {};
+            for (auto& i : w.items) if (IEq(i.name, L"PcaSvc")) pf = StockFor(i, nc);
+            Plan fp = BuildDefault(true, TAB_SERVICES, w.items, nc);
+            bool fnote = false;
+            for (auto& n : fp.notes) if (n.find(L"2 component manifests could not be read and 0 were skipped") == 0) fnote = true;
+            check(pf.kind == StockPick::Show && fnote, L"sxs (review F4): with failed manifests, manifest values are shown, not applied, "
+                                                       L"and the plan gives the counts");
+            Ctx pc2 = w.ctx;
+            pc2.sxsPending = true;
+            Plan pp = BuildDefault(true, TAB_SERVICES, w.items, pc2);
+            check(pp.rows.empty() && pp.emptyText == L"still reading this PC's component manifests",
+                  L"stock plan (review F2): waits while the manifests are being read, never a KB-only plan");
+        }
+        {   // review F1: --out never overwrites or follows an existing path.
+            wchar_t tmp[MAX_PATH];
+            DWORD n = GetTempPathW(MAX_PATH, tmp);
+            std::wstring p = std::wstring(tmp, n) + L"hx-out-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                             std::to_wstring(GetTickCount64()) + L".txt";
+            std::wstring e1, e2;
+            bool first = WriteNewOut(p, "a", &e1);
+            bool second = WriteNewOut(p, "b", &e2);
+            std::string back;
+            bool same = ReadAll(p, &back) && back == "a";
+            DeleteFileW(p.c_str());   // the test's own temp file
+            check(first && !second && e2.find(L"already exists") != std::wstring::npos && same,
+                  L"--out (review F1): written with CREATE_NEW; an existing path is refused with the reason and left as it was");
+        }
+        check(SxsCacheName(L"19045.5737", L"Professional") == L"sxs-v2-19045.5737-Professional.txt" && SxsCacheName(L"19045", L"Pro").empty() &&
+                  SxsCacheName(L"19045.1", L"..\\x").empty() && SxsCacheName(L"", L"Pro").empty(),
+              L"sxs cache name: build.UBR and an alphanumeric edition only");
+        if (fs) {
+            std::string tsv = SxsDumpTsv(*fs, 7);
+            check(tsv.find("# build.UBR\t19045.5737\n") != std::string::npos && tsv.find("# elapsed ms\t7\n") != std::string::npos &&
+                      tsv.find("\naudiosrv\t2\t-\tedition\t0\tProfessionalEdition.xml\n") != std::string::npos &&
+                      tsv.find("\ndps\t2\t1\tsettingDefault\t0\tc-settings.manifest\n") != std::string::npos &&
+                      tsv.find("\nbeep\t1\t-\tregistry\t0\td-driver.manifest\n") != std::string::npos,
+                  L"--dump-stock-live TSV: header (build.UBR, elapsed), start, delayed, layer, conflict and source file per name");
+            const SxsValue* dtc = fs->Find(L"HxDtc");
+            check(tsv.find("\nhxdtc\t3\t1\tserviceData\t0\tf-live-cases.manifest\n") != std::string::npos && dtc &&
+                      dtc->setDelayed == 1 && dtc->Cfg().start == 3,
+                  L"sxs live run (a): a setting element named DelayedAutostart with no legacyName fills delayed as the lowest layer");
+            check(tsv.find("\nhxclr\t-\t1\tnone\t0\t\n") != std::string::npos && !fs->Find(L"HxClr"),
+                  L"sxs live run (b): the same DelayedAutostart in two manifests is no conflict, and with no Start gives no start value");
+            check(tsv.find("\nhxauto\t2\t-\tserviceData\t0\tf-live-cases.manifest\n") != std::string::npos,
+                  L"sxs live run (c): no DelayedAutostart in any file prints \"-\" (absent), not 0");
+        }
+        check(SxsRuntimeStart(L"WlanSvc") && !SxsRuntimeStart(L"BITS") && SxsRuntimeDelayed(L"BITS") && !SxsRuntimeDelayed(L"Spooler"),
+              L"sxs: the after-setup lists: start type (WlanSvc, ...) and DelayedAutostart (BITS, ...)");
+        auto pick = [&](const wchar_t* n) {
+            for (auto& i : w.items) if (IEq(i.name, n)) return StockFor(i, w.ctx);
+            return StockPick{};
+        };
+        StockPick pca = pick(L"PcaSvc"), one = pick(L"OneSyncSvc"), sm = pick(L"SysMain"), sti = pick(L"stisvc"), dp = pick(L"DPS"),
+                  au2 = pick(L"Audiosrv"), bp = pick(L"Beep"), ws = pick(L"WSearch");
+        check(pca.kind == StockPick::Apply && pca.basis == L"owner-measured" && pca.cfg.start == 3 &&
+                  pca.basisNote.find(L"The start type the test fixture's hand-written manifests (not a real PC) give the service (build 19045.5737") == 0 &&
+                  pca.basisCond == L"read from the test fixture's hand-written manifests (not a real PC), build 19045.5737" &&
+                  BasisLabel(pca.basis, pca.basisCond) == pca.basisCond && BasisLabel(L"owner-measured") == L"measured by Hadron's author" &&
+                  pca.basisNote.find(L"Two agreeing third-party tables agree") != std::wstring::npos,
+              L"stock: manifest and tables agree -> applied, owner-measured kind labelled by its condition (fixture: not a real PC), the tables named");
+        check(one.kind == StockPick::Apply && one.cfg.start == 3 && one.basis == L"owner-measured", L"stock: manifest only -> applied");
+        check(sm.kind == StockPick::Show && sm.why.find(L"sources disagree: the test fixture's manifests say Manual; two agreeing third-party tables say Auto") == 0 &&
+                  sm.basisNote.find(L"tweakhound.com") != std::wstring::npos,
+              L"stock: manifest and tables disagree -> shown with both sources, not applied");
+        check(sti.kind == StockPick::Show && sti.why.find(L"start type may be changed after setup") != std::wstring::npos, L"stock: a runtime-set service -> shown, not applied");
+        check(dp.kind == StockPick::Show && dp.why.find(L"only a configuration-setting default") == 0,
+              L"stock: a setting default alone that no table confirms -> shown, not applied");
+        check(au2.kind == StockPick::Apply && au2.cfg.start == 2 && bp.kind == StockPick::None && ws.kind == StockPick::Apply &&
+                  ws.reason == L"Windows stock start type from a Microsoft page (it names no build)",
+              L"stock: AudioSrv's edition value agrees with the tables; a driver without sysok gets none; no manifest -> the KB's value");
+        Ctx other = w.ctx;
+        other.build = L"22631";
+        StockPick o = StockFor(w.items.front(), other);
+        bool anyKb = false;
+        for (auto& i : w.items) {
+            StockPick k = StockFor(i, other);
+            if (k.kind == StockPick::Apply && k.basis != L"owner-measured") anyKb = true;
+        }
+        (void)o;
+        check(!anyKb, L"stock: on another build only this PC's manifests give values (the KB's are for 19045)");
+    }
     {
         std::string raw;
         Snapshot s;
@@ -998,6 +1205,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         }
         Ctx co = w.ctx;
         co.build = L"22631";
+        co.sxs = nullptr;   // without this PC's manifests (they would give values on any build)
         Plan so = BuildDefault(true, TAB_SERVICES, w.items, co);
         check(so.rows.empty() && !so.notes.empty() && so.notes[0].find(L"no Windows-stock data for build 22631") != std::wstring::npos,
               L"Windows stock on another build: refused with the reason");
@@ -2364,6 +2572,7 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
     {
         World a;
         freshWorld(&a);
+        a.ctx.sxs = nullptr;   // the KB's own wording (the manifest wording is checked with the sxs fixture)
         Plan s0 = PlanFor(-2, TAB_DRIVERS, a);   // no driver has a stock value in the KB
         Ctx co = a.ctx;
         co.build = L"22631";
@@ -2902,6 +3111,31 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
 }
 
 // ============================================================================================
+// --dump-stock-live [--out <file>]: this PC's WinSxS stock values, read with the live reader only. Read only: no
+// backend (nothing armed, no SCM or registry writes), no data folder, no cache. Exit 1 with the reason when the
+// reader can't start (wcp.dll or msdelta.dll) or no manifest could be read.
+int RunDumpStockLive(const std::vector<std::wstring>& args) {
+    const std::wstring out = ArgValue(args, L"--out");
+    std::unique_ptr<SxsReader> r = MakeLiveSxsReader();
+    ULONGLONG t0 = GetTickCount64();
+    SxsStock s = ScanSxs(*r);
+    std::string text = SxsDumpTsv(s, GetTickCount64() - t0);
+    bool wrote = true;
+    std::wstring werr;
+    if (!out.empty()) wrote = WriteNewOut(out, text, &werr);
+    else {
+        fflush(stdout);
+        _setmode(_fileno(stdout), _O_BINARY);
+        fwrite(text.data(), 1, text.size(), stdout);
+        fflush(stdout);
+    }
+    if (!wrote) { fwprintf(stderr, L"dump-stock-live: %ls\n", werr.c_str()); return 1; }
+    if (!s.ok) { fwprintf(stderr, L"dump-stock-live: %ls\n", s.err.c_str()); return 1; }
+    fwprintf(stderr, L"dump-stock-live: %d manifests, %d failures, %d skipped, %d values\n", s.manifests, s.failed, s.skipped,
+             s.Usable());
+    return 0;
+}
+
 int RunDumpPlan(const std::vector<std::wstring>& args) {
     std::wstring lv = ArgValue(args, L"--dump-plan"), tab = ArgValue(args, L"--tab"), fx = ArgValue(args, L"--fixture"),
                  out = ArgValue(args, L"--out");
@@ -2914,7 +3148,8 @@ int RunDumpPlan(const std::vector<std::wstring>& args) {
     std::string text = DumpFixturePlan(fx, level, tab == L"drivers" ? TAB_DRIVERS : TAB_SERVICES, &err);
     if (text.empty()) { fwprintf(stderr, L"dump-plan: %ls\n", err.c_str()); return 1; }
     if (!out.empty()) {
-        if (!WriteAll(out, text)) { fwprintf(stderr, L"dump-plan: could not write %ls\n", out.c_str()); return 1; }
+        std::wstring werr;
+        if (!WriteNewOut(out, text, &werr)) { fwprintf(stderr, L"dump-plan: %ls\n", werr.c_str()); return 1; }
         return 0;
     }
     fflush(stdout);

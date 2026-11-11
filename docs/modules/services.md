@@ -24,10 +24,12 @@ it was designed.
 - **Presets, the same levels on both tabs:**
   - **Default: as first seen**: back to how Hadron first saw this PC (dated). That is not Windows' default, and the
     label says so.
-  - **Default: Windows stock**: restores only the items with a sourced stock value: five services (msiserver,
-    W32Time, TimeBrokerSvc, WSearch, BrokerInfrastructure), each quoted from a Microsoft troubleshooting page that
-    names no build. No driver has one, so on the Drivers tab it says so and changes nothing. A full 19045 table needs
-    an owner-measured capture of a clean install (`docs/pipeline/fixes/svcdrv-kb.md` §1).
+  - **Default: Windows stock**: values come first from this PC's own WinSxS component manifests (read-only,
+    decompressed with Windows' msdelta against the servicing stack's wcp.dll, cached per build, UBR and edition),
+    cross-checked with the KB: five Microsoft troubleshooting pages and two third-party tables that must agree
+    (wintips.org, TweakHound 20H2), each labelled with its source and "names no build". Where the manifest, the
+    tables or a runtime-set service disagree, both values are shown and the row is never applied. No driver has a
+    value. Details: `docs/pipeline/fixes/svcdrv-kb.md` §7.
   - **Pure bloat removal**, **Stripped** and **Minimum**, cumulative (an item in a level is in every stricter
     level unless that level names another target). Stripped removes only hardware that was never seen; Minimum
     ticks rows whose use can't be detected, Stripped leaves them unticked; hot-plug classes are never ticked. Membership is stock
@@ -88,6 +90,7 @@ The safety mechanics, file formats and every resolved ambiguity are in `docs/des
 | `modules/services/plan.*` | Guards, presets, single, Default, Undo and Resume plans, dependency checks, `RunApply` |
 | `modules/services/store.*` | The data folder checks, snapshot and undo-log formats, `CREATE_NEW` writers, the apply lock |
 | `modules/services/recovery.*` | The restore scripts, `.reg` files and a stored-only zip writer (rule 3) |
+| `modules/services/sxsstock.*` | Windows-stock start types from this PC's WinSxS manifests (read-only), the cache and the cross-check |
 | `modules/services/custom.*` | Custom presets: the `HXPRESET 1` format, the preset store, export and import |
 | `modules/services/measure.*` | Before/after measurements: taking, storing and pairing records |
 | `modules/services/ti.*` | TrustedInstaller impersonation (module-local; moving it to core is a lead follow-up) |

@@ -76,7 +76,7 @@ target_sources(mod_services PRIVATE modules/services/model.cpp modules/services/
                                     modules/services/store.cpp modules/services/recovery.cpp modules/services/plan.cpp
                                     modules/services/backend_fake.cpp modules/services/backend_live.cpp
                                     modules/services/ti.cpp modules/services/selftest.cpp
-                                    modules/services/custom.cpp modules/services/measure.cpp)
+                                    modules/services/sxsstock.cpp modules/services/custom.cpp modules/services/measure.cpp)
 # Custom preset files carry the Hadron version that wrote them (custom.h).
 target_compile_definitions(mod_services PRIVATE HX_HADRON_VERSION="${PROJECT_VERSION}")
 # The embedded services.db (RCDATA SERVICES_KB), an INTERFACE source as for bios.

@@ -28,6 +28,8 @@ bool FakeBackend::Load(const std::wstring& dir, std::wstring* err) {
         hw_ = HwInfo{};
         hw_.error = L"no hw.txt in the fixture";
     }
+    DWORD a = GetFileAttributesW((dir + L"\\sxs").c_str());
+    sxsDir_ = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) ? dir + L"\\sxs" : L"";
     return true;
 }
 

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Hand-written fixture in the shape of a decompressed driver INF manifest (not Microsoft's file).
+     Beep: a registryKey Start value; a driver without KB sysok gets no stock value. The Parameters subkey's Start
+     is not a service start. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
+  <assemblyIdentity name="dual_fixture_beep.inf" version="10.0.19041.1" processorArchitecture="amd64" />
+  <registryKeys>
+    <registryKey keyName="HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Beep">
+      <registryValue name="Start" valueType="REG_DWORD" value="0x00000001" />
+      <registryValue name="Type" valueType="REG_DWORD" value="0x00000001" />
+    </registryKey>
+    <registryKey keyName="HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Beep\Parameters">
+      <registryValue name="Start" valueType="REG_DWORD" value="0x00000004" />
+    </registryKey>
+  </registryKeys>
+</assembly>
