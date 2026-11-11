@@ -963,6 +963,38 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         Plan sd = BuildDefault(true, TAB_DRIVERS, w.items, cs);
         check(sm.Included() == 1 && RowOf(sm, L"WSearch") && RowOf(sm, L"WSearch")->basis == L"owner-measured" && !RowOf(sd, L"disk"),
               L"Windows stock: applies a KB stock value with its basis; never for a storage driver");
+        // A KB `never` (explanation-only) entry doesn't block its stock row; never-touch (floor), protected and the
+        // named never-preset list still do (DECISIONS 2026-11-11, proxy Small fixes).
+        {
+            const PlanRow* tb = RowOf(sk, L"TimeBrokerSvc");
+            check(tb && tb->blocked.empty() && tb->include && tb->after.start == 3,
+                  L"Windows stock: TimeBrokerSvc (KB entry explanation-only) is a ticked row Disabled -> Manual");
+            Kb kn;
+            kn.Parse("V\t1\tservices\nB\t19045\n"
+                     "K\tTimeBrokerSvc\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t1\treasoning\tn\t\t\t3/-\towner-measured\tclean VM\t\t\t\n"
+                     "K\tRpcSs\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t1\treasoning\tn\t\t\t3/-\towner-measured\tclean VM\t\t\t\n"
+                     "K\tSecurityHealthService\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t1\treasoning\tn\t\t\t2/0\towner-measured\tclean VM\t\t\t\n"
+                     "K\tTrustedInstaller\tsvc\t19045\tt\te\t\t\t\t\t\t\t\t\t0\t1\treasoning\tn\t\t\t2/0\towner-measured\tclean VM\t\t\t\n",
+                     &err);
+            Ctx cn = w.ctx;
+            cn.kb = &kn;
+            Plan sn = BuildDefault(true, TAB_SERVICES, w.items, cn);
+            const PlanRow *t2 = RowOf(sn, L"TimeBrokerSvc"), *rp = RowOf(sn, L"RpcSs"), *sh = RowOf(sn, L"SecurityHealthService"),
+                          *ti = RowOf(sn, L"TrustedInstaller");
+            check(t2 && t2->blocked.empty() && t2->include && rp && !rp->blocked.empty() && !rp->include && sh &&
+                      !sh->blocked.empty() && ti && !ti->blocked.empty(),
+                  L"Windows stock: a never entry's row is ticked; never-touch (RpcSs), protected (SecurityHealthService) "
+                  L"and named never-preset (TrustedInstaller) rows with a stock value stay blocked");
+            bool presetsSame = true;
+            for (int lv : {LV_BLOAT, LV_STRIPPED, LV_MINIMUM}) {
+                Plan pp = PlanFor(lv, TAB_SERVICES, w);
+                const PlanRow* pr = RowOf(pp, L"TimeBrokerSvc");
+                if (pr && pr->blocked.empty()) presetsSame = false;
+            }
+            Plan pd = PlanFor(LEVEL_DEFAULT, TAB_SERVICES, w);
+            check(presetsSame && !RowOf(pd, L"TimeBrokerSvc"),L"presets never offer TimeBrokerSvc (KB never), and Default as first seen leaves it "
+                                      L"(already as first seen)");
+        }
         Ctx co = w.ctx;
         co.build = L"22631";
         Plan so = BuildDefault(true, TAB_SERVICES, w.items, co);

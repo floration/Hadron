@@ -142,9 +142,16 @@ Goldens changed in this round, and why:
   `first-README.txt` (one more value line): only because the fixture has one more service (TimeBrokerSvc).
 - `services.db`: the wording above and the rendered TimeBrokerSvc note.
 
-Found while doing M1, not fixed (plan logic, outside this fix's scope): the stock plan blocks every item whose KB
-entry is `never` ("Protected: not in presets. Hadron's KB keeps it out of every preset"), and every explanation-only
-entry is `never`. So of the five stock values only WSearch (a Stripped entry) can be applied; msiserver, W32Time,
-TimeBrokerSvc and BrokerInfrastructure show as blocked rows. The golden now shows this for TimeBrokerSvc. Fix: in
-`BuildDefault(stock)`, block on `g.neverTouch` and the named never-preset list only, not on a KB `never`, which means
-"not in a preset level", not "never restore to stock". That needs the lead's call.
+Found while doing M1, then fixed on the lead's go-ahead (DECISIONS 2026-11-11, `proxy (Small fixes)`): the stock
+plan blocked every item whose KB entry is `never` ("Protected: not in presets. Hadron's KB keeps it out of every
+preset"), and every explanation-only entry is `never`, so of the five stock values only WSearch could be applied.
+- `plan.h` `Guard` gains `kbNever` (set only by the KB `never` branch of `CheckGuard`). In the Windows-stock plan only,
+  a row is blocked by `neverTouch` or by `neverPreset` without `kbNever`: never-touch items, protected services and
+  the named never-preset list block as before. Presets and Default as first seen are unchanged (their goldens match).
+- BrokerInfrastructure is on the floor list (never-touch), so its stock row stays blocked; on the fixture it is
+  already at Automatic.
+- Selftests: TimeBrokerSvc on the fixture is a ticked row Disabled -> Manual; with an in-memory KB whose entries
+  are all `never`, TimeBrokerSvc is ticked while RpcSs (floor), SecurityHealthService (protected) and
+  TrustedInstaller (named never-preset) stay blocked; no preset offers TimeBrokerSvc and Default as first seen
+  leaves it.
+- `plan-services-stock.txt`: the TimeBrokerSvc row is now `[x]` (2 ticked, 0 kept).

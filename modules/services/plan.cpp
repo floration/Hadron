@@ -196,7 +196,7 @@ Guard CheckGuard(const SvcItem& s, const Ctx& c) {
         g.reason = L"Hadron's KB entry is for build " + Join(e->builds, L", ") + L", not " + (c.build.empty() ? L"this one" : c.build);
         return g;
     }
-    if (e->never) { g.neverPreset = true; g.reason = L"Hadron's KB keeps it out of every preset"; return g; }
+    if (e->never) { g.neverPreset = g.kbNever = true; g.reason = L"Hadron's KB keeps it out of every preset"; return g; }
     return g;
 }
 
@@ -400,7 +400,9 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             r.basis = e->stockBasis;
             r.basisNote = e->stockNote;
             Guard g = CheckGuard(s, c);
-            if (g.neverTouch || g.neverPreset) r.blocked = L"Protected: not in presets. " + g.reason;
+            // DECISIONS 2026-11-11 (proxy, Small fixes): a KB `never` means "not in a preset level", not "never restore
+            // to a sourced Microsoft default"; never-touch, protected and the named never-preset list still block.
+            if (g.neverTouch || (g.neverPreset && !g.kbNever)) r.blocked = L"Protected: not in presets. " + g.reason;
             else if (t.start < 2) r.blocked = L"Kept: Hadron never sets Boot or System start";
             else if (r.driver && s.cfg.start < 2 && !SysOk(s, c))
                 r.blocked = kSysStartKept + std::wstring(L" (its start type now)");

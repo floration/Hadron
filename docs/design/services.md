@@ -260,6 +260,8 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
   is "no data": `docs/pipeline/fixes/svcdrv-kb.md` says why the larger tables that exist (IoT, per-user services,
   Server 2016) are not used.
   - The plan writes only items with a stock value; the note says how many of the tab's items have one.
+  - An explanation-only (`never`) KB entry doesn't block its stock row: `never` means not in a preset level.
+    Never-touch items, protected services and the named never-preset list still block (DECISIONS 2026-11-11).
   - With no stock value on a tab or build the plan is empty and says "Hadron has no Windows-stock data for build N
     yet: nothing will be changed." (R20, proxy Q2), with no Apply button and no sum; the chip says "(no data for
     this build yet)" and the detail's Windows stock line uses the same words. `StockKnown()` counts per tab, so
