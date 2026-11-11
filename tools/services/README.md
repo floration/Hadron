@@ -7,7 +7,7 @@ The KB has three files:
 
 Commands:
 ```
-python3 tools/services/genkb.py --selftest          # 50 must-fail cases, 15 ok texts, a warning case, the committed KB
+python3 tools/services/genkb.py --selftest          # 62 must-fail cases, 17 ok texts, a warning case, the committed KB
 python3 tools/services/genkb.py                     # regenerates modules/services/data/services.db
 python3 tools/services/genkb.py /tmp/services.db    # writes elsewhere (CI then runs cmp against the committed file)
 ```

@@ -34,10 +34,10 @@ bool ParseSnapshot(const std::string& utf8, Snapshot* out, std::wstring* err);
 // T  started  pid  pstart                          (Hadron's own request started it: its pid and process creation time)
 // T  notstarted                                    (it was running already, or someone else started it: not Hadron's)
 // T  stopped | stopfailed  text                    (Hadron stopped it again / could not)
-// I  seq  observed  identity-verified              (flushed BEFORE the SCM call)
+// I  seq  observed  identity                       (flushed BEFORE the SCM call; the planned ti|admin, not verified)
 // D  seq  ok|skip|fail  observed-after  text       (flushed after the call and a re-read)
 // N  text                                          (a resolution record: what happened, in words)
-// E  stamp  ok  skipped  failed                    (end)
+// E  stamp  ok  skipped  failed  done|cancelled    (end)
 // Every record ends with a TAB and the CRC-32 (hex) of the text before it. A record with a bad or
 // missing CRC (a torn last write) is ignored and counted.
 // A resolution log has no rows: B with source "dismiss:<stamp>" (the user dismissed that interrupted apply) or

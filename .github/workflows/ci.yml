@@ -96,7 +96,7 @@ jobs:
           export WINEPREFIX="$PWD/.wine"
           bash tests/tools/bios_check.sh build shots
       # Hard rule 7 gate (genkb selftest + byte-for-byte services.db), the fixture cmp, both selftests,
-      # the 8 golden plans and the screenshots. Fixture mode only: nothing is applied to any service.
+      # the 10 golden plans plus the delayedlinger plan, and the screenshots. Fixture mode only: nothing is applied to any service.
       # Wine can't set a folder owner or make a reparse point, so this runs a separate test build with the Store
       # selftest hooks (HADRON_SERVICES_TEST_HOOKS); the build above, like every release build, has none.
       - name: Services KB, selftests, golden plans and screenshots (Wine + Xvfb)

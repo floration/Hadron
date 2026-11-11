@@ -354,7 +354,9 @@ public:
             DWORD e = GetLastError();
             if (e == ERROR_SERVICE_NOT_ACTIVE) return true;
             if (e == ERROR_INVALID_PARAMETER) {
-                // The stop reason code is not documented as accepted with MAJOR_NONE/MINOR_NONE: stop without one.
+                // PLANNED|MAJOR_NONE|MINOR_NONE is a documented reason (Learn's page prints MINOR_NONE as 0x00060000, a
+                // typo for winsvc.h's 0x17), but no CI step has run this stop on Windows: if it is refused as an
+                // invalid reason, stop without one.
                 SERVICE_STATUS ss{};
                 if (!ControlService(s.h, SERVICE_CONTROL_STOP, &ss)) {
                     e = GetLastError();

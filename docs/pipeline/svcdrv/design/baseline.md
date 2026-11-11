@@ -74,6 +74,12 @@ against text2 for the others, so it stays the anchor. This is a one-line core/ui
 it can be dropped alone). Headers stay 15px semibold (one header row, scanned once). Page hierarchy is unchanged:
 20px title, 12px source line, 15px semibold detail title and section heads (now in the readable accent).
 
+**Amended in Finalize (round 2, mini-design 3).** The core change was reverted (e5ee164): the owner's proxy (Finalize
+Q7) ruled "no core font change" (9209b03 had changed DiskMap's and RunAs's first columns too). Baseline lists
+therefore keep core's two cell sizes: the Name (first) column at 15px, the other cells at 12px; the plan grid's
+names stay 12px. The suite truncation that motivated the change is fixed inside `modules/services` instead: the Name
+column is as wide as the names on the tab need (up to 180 units), and Display name drops before Company (§3).
+
 ## 3. Column plan
 
 List width is 60% of the content: 732 units standalone at 1280x800, 619 in the suite (188 px sidebar), about 674 in a
@@ -103,6 +109,18 @@ fits from about 1670 px of window. The Company column drops a trailing legal for
 " GmbH"…): "Microsoft Corporation" becomes "Microsoft"; the detail pane and the filter use the full text the file
 claims. The filter placeholder is now "Filter by name, company or group" (it no longer ellipsises; it still matches
 display name and account too).
+
+**Amended in Finalize (round 2, mini-design 4 and 5).** Q7 made the Name column as wide as the tab's names need
+(140/124 to 180), which pushed Company out of the suite. The drop order is now: Type, Image path, Account, Basis,
+vs first, **Display name**, **Company** (Drivers: Type, Image path, Basis, vs first, Load group, Display name,
+Company). Company stays longest, as this section asks; Display name goes just before it, since the detail pane's
+title shows it in full. With no flexible column left, spare width goes to Company. Start type is 136 (services) so
+"Auto (delayed) +trigger" fits; a cell that still doesn't fit says `+t`, as Console does. The column is now titled
+"Preset" (§4). Results (Wine's Segoe UI substitute): 1280x800 standalone shows Name, Display name, State, Start
+type, Preset, Company; the suite at 1280x800 shows Name, State, Start type, Preset, Company; the suite on a
+1024x768 screen shows Name, State, Start type, Preset only. When
+"Display name" would be cut its header says "Display", and the filter's placeholder says "Filter" when the full
+text doesn't fit.
 
 Console keeps the build's table unchanged (Consolas cells are wider and the Console designer owns them).
 
@@ -182,7 +200,7 @@ All in `core/ui/widgets.cpp`, no public declaration changed:
 | Commit | Change | Effect elsewhere |
 |---|---|---|
 | 667ca24 | Focus rect in the selection text colour, inset; sort arrow gets its own slot; WCAG text pick on the selection | DiskMap's lists now show keyboard focus (was invisible); titles of sorted narrow columns ellipsise instead of overlapping |
-| 9209b03 | One 12px cell font in Baseline lists | DiskMap's and RunAs's first columns draw at 12px (were 15px). BIOS has its own list: pixel-identical. Console unchanged (Consolas) |
+| 9209b03 | One 12px cell font in Baseline lists (**reverted in e5ee164**, Finalize Q7; see §2) | Was: DiskMap's and RunAs's first columns at 12px. After the revert they are back at 15px, as before this design pass |
 | 19e4fd9, b0ed957 | Pure white/black selection text, white while it reaches 4.5:1 | Same colours as before on the shipped fallback accents (white on blue, black on the dark/fun fallbacks) |
 
 Re-rendered DiskMap (Baseline and Console, dark and light), BIOS (dark, light) and RunAs (dark, light) before and after:
@@ -199,8 +217,7 @@ Hadron column could tint "protected" and "bloat".
 - Only 96 DPI rendered. Widths are in 96-dpi units and scale with the DPI as before.
 - Keyboard traversal has no automated test (selftest has no UI harness); it was checked by rendering focus states
   (`--focus list|search|detail|<n>`) and by reading the code paths. Needs a hands-on pass on Windows.
-- The Display name column is about 107 px in the suite: names cut at ~16 characters there. Giving it more would drop
-  Company; the detail title shows the full name.
+- In the suite Display name is not shown (it drops before Company, §3 amendment); the detail title shows it.
 - Rendering is Wine's Segoe UI substitute; real Segoe UI is slightly narrower, so Windows truncates less.
 - The list's border contrast (1.2–1.6:1) was left as built (decorative, see §1).
 
@@ -208,8 +225,9 @@ Hadron column could tint "protected" and "bloat".
 
 1. Text forms of accent and semantic colours are derived per theme for 4.5:1; fills keep the theme/Windows colours.
 2. Selection and filled-control text: white while ≥ 4.5:1 (Windows convention), else black.
-3. One 12px cell font in Baseline lists (core, separate commit).
-4. Column priority: Company before vs first before Basis/Account/Type.
+3. One 12px cell font in Baseline lists (core, separate commit). Reverted (e5ee164, Finalize Q7); see §2.
+4. Column priority: Company before vs first before Basis/Account/Type; since Finalize round 2, Company also
+   before Display name.
 5. Hadron column labels and order (bloat < stripped < minimum < kept < no preset < protected < not in KB).
 6. A sort key that doesn't fit falls back to name order (choice kept); arrow always shown.
 7. After a sort, centre the selection; after a tab switch, select and show the first row.
