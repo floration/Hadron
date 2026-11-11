@@ -75,14 +75,17 @@ hadron_add_module(services NAME HadronServices DESC "Hadron Services: Windows se
 target_sources(mod_services PRIVATE modules/services/model.cpp modules/services/kb.cpp modules/services/hw.cpp
                                     modules/services/store.cpp modules/services/recovery.cpp modules/services/plan.cpp
                                     modules/services/backend_fake.cpp modules/services/backend_live.cpp
-                                    modules/services/ti.cpp modules/services/selftest.cpp)
+                                    modules/services/ti.cpp modules/services/selftest.cpp
+                                    modules/services/evidence.cpp modules/services/evidence_view.cpp modules/services/regfallback.cpp
+                                    modules/services/selftest_evidence.cpp)
 # The embedded services.db (RCDATA SERVICES_KB), an INTERFACE source as for bios.
 target_sources(mod_services INTERFACE "${HADRON_ROOT}/modules/services/resources/services.rc")
 set_property(SOURCE "${HADRON_ROOT}/modules/services/resources/services.rc" APPEND PROPERTY OBJECT_DEPENDS
              "${HADRON_ROOT}/modules/services/data/services.db")
 # Windows SDK libraries only (hard rule 3): advapi32 (SCM, registry, tokens), version (VERSIONINFO company),
-# shell32/ole32 (known folders), cfgmgr32/setupapi (devnodes and the boot disk).
-target_link_libraries(mod_services PUBLIC advapi32 version shell32 ole32 cfgmgr32 setupapi)
+# shell32/ole32 (known folders), cfgmgr32/setupapi (devnodes, device interfaces and the boot disk), wintrust/crypt32
+# (the Signer column: WinVerifyTrust, catalogs, certificate names) and wevtapi (System-log event 7040, read only).
+target_link_libraries(mod_services PUBLIC advapi32 version shell32 ole32 cfgmgr32 setupapi wintrust crypt32 wevtapi)
 # Two selftest hooks in Store (owner check and reparse injection) for Wine, which can't set an owner or make a
 # reparse point. OFF by default: a release build has no such code at all. CI turns it on for the Wine run only, in
 # a separate build folder.

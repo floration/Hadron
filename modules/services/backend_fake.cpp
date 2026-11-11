@@ -28,6 +28,17 @@ bool FakeBackend::Load(const std::wstring& dir, std::wstring* err) {
         hw_ = HwInfo{};
         hw_.error = L"no hw.txt in the fixture";
     }
+    // Evidence fixtures (optional): the Signer column's results and the System log's 7040 events.
+    signers_.clear();
+    events_.clear();
+    std::string ev;
+    std::wstring eerr;
+    if (s.Exists(L"signers.txt")) {
+        if (!s.Read(L"signers.txt", &ev, &eerr) || !ParseSigners(ev, &signers_, &eerr)) { *err = L"signers.txt: " + eerr; return false; }
+    }
+    if (s.Exists(L"events7040.txt")) {
+        if (!s.Read(L"events7040.txt", &ev, &eerr) || !ParseEventsFixture(ev, &events_, &eerr)) { *err = L"events7040.txt: " + eerr; return false; }
+    }
     return true;
 }
 
@@ -142,6 +153,36 @@ bool FakeBackend::Control(const std::wstring& name, Op op, const std::atomic<boo
         i->pstart = 0;
         controlLog.push_back(L"stop " + name);
     }
+    return true;
+}
+
+// ---- the fake registry (registry fallback) ------------------------------------------------------------------
+bool FakeBackend::ReadRegStart(const std::wstring& name, RegStartVals* out, std::wstring* err) {
+    SvcItem* i = Find(name);
+    if (!i || faults.vanish.count(Lower(name))) { *err = L"The system cannot find the file specified."; return false; }
+    if (faults.regDrift.erase(Lower(name))) {   // someone else wrote Start since the plan
+        int now = i->regStart >= 0 ? i->regStart : i->cfg.start;
+        i->regStart = now == 3 ? 4 : 3;
+    }
+    out->start = i->regStart >= 0 ? i->regStart : i->cfg.start;
+    out->delayed = i->cfg.delayed;   // the live backend reads cfg.delayed from the same registry value
+    return true;
+}
+
+bool FakeBackend::WriteRegStart(const std::wstring& name, const WriteOp& w, std::wstring* err) {
+    SvcItem* i = Find(name);
+    if (!i || faults.vanish.count(Lower(name))) { *err = L"The system cannot find the file specified."; return false; }
+    // The same refusals as the live backend (backend_live.cpp), so the selftest exercises them.
+    if (w.start < 2 || w.start > 4) { *err = L"refused: Hadron never writes Boot or System start through the registry"; return false; }
+    int now = i->regStart >= 0 ? i->regStart : i->cfg.start;
+    if (now < 2) { *err = L"refused: its registry Start is Boot or System"; return false; }
+    if (i->protect != 0) { *err = L"refused: a launch-protected service is never written through the registry"; return false; }
+    if (faults.onRegWrite) faults.onRegWrite(name);
+    faults.regWrites++;
+    if (faults.regDeny.count(Lower(name))) { *err = L"RegOpenKeyEx: Access is denied."; return false; }
+    if (faults.regReadBack.count(Lower(name))) return true;   // "succeeded", but something else put the old value back
+    if (w.delayed >= 0) i->cfg.delayed = w.delayed;
+    i->regStart = w.start;   // the service manager's start type (cfg.start) changes at the next restart, not now
     return true;
 }
 
