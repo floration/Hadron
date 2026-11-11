@@ -41,8 +41,20 @@ and gets the owner's OK once, as a batch, before building. Known cases are in `d
      is allowed only through `IFileOperation` + `FOFX_RECYCLEONDELETE`, checking `PostDeleteItem`: if
      `psiNewlyCreated` is null the item was destroyed, so abort. Never use `SHFileOperation` or `FOF_NOCONFIRMATION`;
    - takes a per-folder lock so two instances can't operate on the same folder.
-2. **Firmware is read-only.** Hadron reads UEFI variables, SMBIOS and BIOS images. It never writes NVRAM, never
-   flashes, never runs SCEWIN/AMISCE. CI fails if the source contains `SetFirmwareEnvironmentVariable` or `NtSetSystemEnvironmentValue`.
+2. **Firmware writes are guarded and narrow** (owner's call, 2026-11-11; was "firmware is read-only"). Hadron reads UEFI
+   variables, SMBIOS and BIOS images. It never flashes, never runs SCEWIN/AMISCE, never deletes or creates a variable.
+   The only write path is BIOS Settings changing setup values in an existing variable of the settings map, and it lives
+   in `modules/bios/fwwrite.cpp` alone. CI fails if `SetFirmwareEnvironmentVariable` appears anywhere else, or
+   `NtSetSystemEnvironmentValue` anywhere. That path must:
+   - be off at every start behind an explicit "Allow BIOS writes" switch that is never persisted;
+   - write only when the board/BIOS guard actively matched (never on an unverified or unknown map), from live values;
+   - accept only values from the setting's option list or its numeric range/step: no free hex;
+   - show the full plan (setting, old → new, variable, offset, bytes) and change nothing until the user confirms;
+   - before each write, re-read the variable, abort if the old bytes drifted, and save the whole original variable to a
+     flushed backup (`CREATE_NEW`) that the module can restore;
+   - keep the variable's size and attributes, refuse authenticated or non-runtime variables, and change only the
+     planned bytes; read back after writing and restore the backup on any mismatch;
+   - run on a Worker with `SeSystemEnvironmentPrivilege` on that thread only; never from `--selftest`/`--screenshot`.
 3. **Nothing third-party is linked into, embedded in or shipped with Hadron.** Win32, GDI, the C++ standard library
    and the Windows SDK only; write your own parsers. Build and test tools (CMake, MinGW, Wine, ImageMagick, Python) are fine.
 4. **Elevation.** Every exe, the suite and each standalone, is `requireAdministrator` (owner's call, 2026-11-11, for ease

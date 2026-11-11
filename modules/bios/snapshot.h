@@ -4,7 +4,7 @@
 // Layout (docs/legacy/bios-explorer.md §3): index.csv (Name, Guid, Size, Attributes, Error, File),
 // vars\<file>.bin, system.txt. Fixes: file names carry an index prefix (NNNN_<sanitised>__<guid>.bin) so
 // two variables never share a file; nothing is ever overwritten; the CSV parser handles "" and quoted
-// newlines. Saving writes files only (CREATE_NEW), never moves or deletes anything.
+// newlines. Saving writes files only (CREATE_NEW, flushed), never moves or deletes anything.
 #pragma once
 
 #include "modules/bios/db.h"
@@ -62,6 +62,16 @@ struct SaveResult {
     std::wstring folder, error;
     int found = 0, read = 0;
 };
+// Writes one new file: CREATE_NEW (never overwrites), every byte, then FlushFileBuffers before closing.
+// sa: the file's security descriptor (the write backups' admin-only one), or null for the default.
+bool WriteNewFile(const std::wstring& path, const std::string& data, std::wstring* err,
+                  SECURITY_ATTRIBUTES* sa = nullptr);
+// Writes the snapshot layout (vars\, index.csv, system.txt) into folder, which must already exist and
+// be empty. savedBy is system.txt's "Saved by:" line. Used by SaveSnapshot and by the BIOS write
+// backups (fwwrite.cpp), so Load snapshot reads both. Leaves out->folder as the caller set it.
+// sa: applied to vars\ and every file (the write backups), or null for the default.
+bool WriteSnapshotFiles(const std::wstring& folder, const std::vector<FwVar>& vars, const SmbiosInfo& smbios,
+                        const std::wstring& savedBy, SaveResult* out, SECURITY_ATTRIBUTES* sa = nullptr);
 // Writes UEFI_Dump_<yyyyMMdd_HHmm>[-N]\ under parent (never overwrites: CREATE_NEW everywhere, and the
 // folder gets -2, -3 ... if the name exists).
 bool SaveSnapshot(const std::wstring& parent, const std::vector<FwVar>& vars, const SmbiosInfo& smbios,

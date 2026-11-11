@@ -369,6 +369,11 @@ int Host::Screenshot(const CommandLine& cl) {
 }
 
 int Host::Run(const CommandLine& cl) {
+    // Test and fixture runs can never write firmware (docs/design/bios-write.md "Test mode latch").
+    // Set before any module code runs; never cleared.
+    bool snapshotArg = false;
+    for (auto& a : cl.rest) if (a == L"--snapshot") snapshotArg = true;
+    if (cl.selftest || !cl.screenshot.empty() || !cl.fixture.empty() || snapshotArg) sys::SetNoFirmwareWrites();
     elevated_ = sys::IsElevated();
 
     if (cl.selftest) {

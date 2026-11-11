@@ -1,5 +1,5 @@
-// modules/bios/firmware.h — read-only firmware access for the bios module (hard rule 2: this module
-// only ever reads UEFI variables and SMBIOS; there is no write path anywhere in it).
+// modules/bios/firmware.h — firmware reads for the bios module: UEFI variables and SMBIOS. Nothing here
+// writes. Hard rule 2: the one guarded write path is modules/bios/fwwrite.cpp (docs/design/bios-write.md).
 //
 // Everything here that touches firmware runs on a core/sys Worker thread. SeSystemEnvironmentPrivilege
 // is enabled on that thread's own impersonation token only (ThreadPrivilege), never on the process.
