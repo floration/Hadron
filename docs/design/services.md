@@ -29,7 +29,7 @@ disagree, the spec wins.
 | `hw.*` | Hardware evidence. The pure part reads a dump; the live part uses CfgMgr32 over every devnode, present or not |
 | `backend.h` | The `Backend` interface: Enumerate, Query, CanWrite, SetStart, Control, Arm/Disarm |
 | `backend_live.cpp` | **The only file that writes to the SCM.** Every write refuses until `Arm()` |
-| `backend_fake.*` | In-memory backend for the selftest, `--dump-plan` and screenshots. Supports fault injection |
+| `backend_fake.cpp` | In-memory backend for the selftest, `--dump-plan` and screenshots. Supports fault injection |
 | `store.*` | The data dir, the snapshot and undo-log formats, `CREATE_NEW` writers, the apply lock |
 | `recovery.*` | `restore.cmd`, `restore-online.cmd`, `README.txt` and `.reg` files, plus a stored-only zip writer |
 | `plan.*` | Guards, presets, single/default/undo/resume/control plans, dependency checks, apply order, `RunApply` |
@@ -39,7 +39,7 @@ disagree, the spec wins.
 | `standalone.cpp` | `HadronServices.exe`. Intercepts `--dump-plan` and `--live-test` before the GUI starts |
 | `tools/services/kb.py`, `genkb.py` | The KB source and the rule-7 gate (see `tools/services/README.md`) |
 | `tests/fixtures/services/` | The fixture machine (`make_services_fixture.py` writes it; CI compares) |
-| `tests/golden/services/` | 8 plan goldens and a `restore.cmd` golden |
+| `tests/golden/services/` | 8 plan goldens, `plan-services-default-delayedlinger.txt`, `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt` |
 
 ## Formats
 All formats share these rules:
@@ -49,10 +49,17 @@ All formats share these rules:
 - Unknown lines are skipped, and there is a 16 MB cap.
 
 **Snapshot** (`first.txt`, `snap-<stamp>.txt`, fixture `snapshot.txt`, kind `snapshot`):
-- `M key value` meta lines (machine GUID, build, created), sorted.
+- `M key value` meta lines, sorted by key:
+  - `kind`: `first`, `baseline (not first run)` (a corrupt first.txt was renamed aside), `pre-apply`
+    (`snap-<stamp>.txt`) or `fixture`;
+  - `created`: in `first.txt` the **local** time `yyyy-MM-dd HH:mm`; in `snap-<stamp>.txt` the apply's **UTC**
+    stamp (`yyyyMMdd-HHmmss`);
+  - `build` and `machine` (the machine GUID);
+  - `source`: only in `snap-<stamp>.txt`, the plan source (as in the undo log's `B`).
+  (`store.h` also names a `hadron` key; nothing writes it.)
 - One `S` line per item, 22 fields: name, display, type (hex), cfg (`2/1`, `3/-`), trigger, state, errctl,
-  account, image, group, deps (`/`-joined), description, regStart, protect, controls (hex), pid, failure,
-  triggers, interfaces, company, readError.
+  account, image, group, deps (`;`-joined), description, regStart, protect, controls (hex), pid, failure,
+  triggers, interfaces (`;`-joined), company, readError.
 - `X name acl=ti` lines exist only in fixtures: they make the fake backend refuse an admin write.
 
 **Undo log** (`undo-<stamp>.log`, kind `undo`). Every record ends with TAB and the CRC-32 (`%08X`) of the text
@@ -60,12 +67,17 @@ before it. A record with a bad CRC (a torn write) is ignored.
 ```
 B  stamp source count machine build order  begin; source = preset:<lvl>:<tab> | single | default-first:<tab> |
                                           default-stock:<tab> | undo:<stamp> | resume:<stamp>
-P  seq name start before after identity  every plan row, written before any change
+P  seq name start before after identity  every plan row, written before any change; the 4th field is the
+                                          literal word `start`; identity is `ti` or `admin` (planned)
 T  started|stopped                       Hadron started / stopped the TrustedInstaller service
-I  seq observed identity                 flushed BEFORE the SCM call
-D  seq ok|skip|fail afterObserved text   flushed after the call and a re-read
+I  seq observed identity                 flushed BEFORE the SCM call; identity is the planned `ti|admin`,
+                                          not a verified one
+D  seq ok|skip|fail afterObserved text   flushed after the call and a re-read; on `ok` the text is the
+                                          identity the write ran as, otherwise the reason
 E  stamp ok skipped failed done|cancelled
 ```
+(`store.h`'s comment still calls the `I` field "identity-verified" and leaves `done|cancelled` off `E`; this
+note follows the code, `plan.cpp` `RunApply`.)
 - Start/Stop/Restart (control plans) write no log file: one host log line per operation (spec §5.2).
 - Stamps are UTC (`yyyyMMdd-HHmmss`, `-N` when taken). `order` is 1 + the highest `order` of the logs already
   there, so logs sort by `order`, then by stamp with `-N` compared as a number; a clock change can't reorder them.
@@ -85,7 +97,8 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 
 ## Safety mechanics (hard rules 1, 4 and 5; spec §5)
 - **Write path.** `ChangeServiceConfigW` and `ChangeServiceConfig2W` (delayed flag), `StartServiceW` and
-  `ControlServiceExW` appear only in `backend_live.cpp`. Each refuses until `Arm()`.
+  `ControlServiceExW` appear only in `backend_live.cpp`. Each refuses until `Arm()`. A stop whose reason code
+  `ControlServiceExW` refuses (`ERROR_INVALID_PARAMETER`) is retried with plain `ControlService`.
   - The UI arms the backend after the user confirms a plan, and disarms it when the apply ends.
   - Selftest and screenshot modes use the fake backend.
   - CI fails on `DeleteService`, `CreateService`, `RegDeleteKey`, `RegDeleteTree` or a firmware-write API under
@@ -187,7 +200,9 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 
 ## Spec ambiguities resolved in the build
 - **Hardware evidence.**
-  - Never-seen hot-plug classes are offered unticked.
+  - Never-seen hot-plug classes are offered unticked, at every level, and the user can tick them. DECISIONS.md
+    (svcdrv research row) says Stripped removes "never hot-plug classes"; Hadron reads that as never ticked by
+    default, which is what 2-research.md §8 Q9 says ("never auto-removed").
   - Never-seen non-hot-plug hardware is ticked.
   - Present or phantom ("seen before") hardware is blocked as "Kept".
   - Use-based Stripped items (no hardware hint) are offered unticked with "use cannot be detected: tick if you don't use it" (kb-auditor M16, spec §5.3).
@@ -229,8 +244,12 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 - **Drift.** If Hadron wrote a value and Windows later changed it, the undo row is unticked with a warning.
 - **TI marker.** The undo log's `T started` with no `T stopped` marks a crash while TI was running. The banner shows
   only while TI is still running.
-- **List mode** has no "selected level", so the Hadron column shows the item's lowest preset level, or
-  `protected` / `no preset` / `—`. Opening a preset starts on the selected item when the plan contains it.
+- **List mode** has no "selected level", so the Hadron column (`KbVerdict`, the same tests `BuildPreset` runs)
+  shows, in this order: `protected` (a never-touch guard); `—` (not in Hadron's KB); `no preset` (a not-in-presets
+  guard, a KB entry with no level, or a driver without `sysok`); `kept` (its hardware hint matched hardware that is
+  present or was seen before); otherwise the first preset that lists it. That level is not a promise the preset
+  changes the item: a row already at its target is skipped, and hot-plug or undetectable-use rows can be offered
+  unticked. Opening a preset starts on the selected item when the plan contains it.
 - **`--live-test`** refuses any name not starting with `HadronTest`. It also refuses drivers, and refuses when
   not elevated.
 
@@ -243,6 +262,35 @@ parent; class filters; the boot-disk chain; and the hypervisor and VM flags.
 
   Both only make the evidence less specific: a hardware-bound KB entry still needs a devnode hint, and
   present or phantom hardware still keeps the item. Follow-up idea.
+
+## Command line
+Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `--fixture` or `--screenshot`
+(fixture mode never applies anything).
+
+| Flag | Where | What it does |
+|---|---|---|
+| `--fixture <dir>` | module, selftest | Load a fixture machine (`snapshot.txt`, `hw.txt`, `first.txt`, logs) instead of live data |
+| `--tab services\|drivers` | module, `--dump-plan` | Start on that tab (live, a saved preference overrides it) |
+| `--select <name>` | module | Select that item and centre it |
+| `--plan <p>` | module | Open a plan: `bloat`, `stripped`, `minimum`, `default`, `stock`, `undo` (the interrupted log), `undo-last` (the newest undoable log), `resume`, `ti-stop` |
+| `--focus list\|search\|detail\|<n>` | module | Draw that focus state, or focus the n-th tab stop (design screenshots) |
+| `--sort <key>[:desc]` | module | Sort the list by a column key, e.g. `kb:desc` |
+| `--keys F1,F2,text:abc,...` | module | Replay keys after the fixture loads (`F1`-`F12`, `up`, `down`, `pgup`, `pgdn`, `home`, `end`, `tab`, `esc`, `space`, `enter`, `text:<chars>`) |
+| `--ti on` | module | Start with the TrustedInstaller toggle on (fixture renders only; live it is off at every launch) |
+| `--data-dir <dir>` | module, `--live-test` | Use another data folder instead of `%ProgramData%\Hadron\services\` |
+| `--readonly` | module | Never arm the backend. Without `--data-dir` it also sets no data folder, so the page shows no first-run snapshot, no undo logs and no interrupted banner |
+| `--selftest [--update-golden] [--golden <dir>]` | selftest | Run the selftest. `--golden` points at another golden folder (default `<fixture>\..\..\golden\services`); `--update-golden` rewrites every golden it compares instead of comparing |
+| `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` works but has no golden |
+| `--live-test HadronTest<name> [--ti] [--data-dir <dir>]` | `HadronServices.exe` | CI's round trip on a dummy service (see below) |
+
+**Regenerating goldens** (only when a change is meant to alter them, and review every diff):
+```
+python3 -I tools/services/genkb.py                     # the KB first: plan text carries pbasis notes
+wine build/HadronServices.exe --selftest --fixture tests/fixtures/services --update-golden
+```
+`--update-golden` rewrites the 8 plan goldens, `plan-services-default-delayedlinger.txt`, `restore.cmd`,
+`restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt`. Then run `tests/tools/services_check.sh`, which
+compares them again (with `--dump-plan`) and fails on any difference.
 
 ## Acceptance
 `tests/tools/services_check.sh <build> <out>` runs:
