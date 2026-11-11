@@ -167,7 +167,8 @@ and their output is committed so a C++-only build works. Copyrighted inputs (ven
 ## core/ui (theme, layouts, widgets)
 - **Two layouts** (`ui::Layout`): `Baseline` (default, Segoe UI card look) and `Console` (dense, Consolas). The
   layout changes widget metrics and fonts, not the palette.
-- **Four themes** (`ui::ThemeId`): `Light`, `Dark`, `Fun` (colourful), `Boring` (beige). Each supplies the neutral
+- **Four themes** (`ui::ThemeId`): `Light`, `Dark`, `Fun` (colourful), `Boring` (the "Reading Room" look: warm charcoal with a sand accent, which it keeps
+  whatever the Windows accent is). Each supplies the neutral
   tokens (bg/panels/border/text/warn/bad/good) in `ThemeBase()`.
 - **Accent**: the main accent is the live **Windows accent colour** (`SystemAccent()` reads
   `HKCU\...\DWM\AccentColor`, then `ColorizationColor`, then `DwmGetColorizationColor`). Three more accents are the

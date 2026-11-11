@@ -48,13 +48,14 @@ const Theme& ThemeBase(ThemeId id) {
         RGB(255,190,70),  RGB(255,96,120),  RGB(90,220,170),
         false,
     };
+    // "Reading Room" palette from the owner's UI directions canvas (direction 9): warm charcoal, sand accent.
+    // Owner, 2026-11-11: Boring should look like that, not a bright beige.
     static const Theme boring{
         ThemeId::Boring,
-        // Dimmed 2026-11-11 (owner: "make the beige less bright"); text darkened to keep contrast.
-        RGB(198,191,176), RGB(207,200,185), RGB(189,181,164), RGB(176,167,149), RGB(165,155,136),
-        RGB(42,37,29),    RGB(80,72,58),    RGB(112,102,85),
-        RGB(150,110,70), RGB(150,110,70), RGB(150,110,70), RGB(150,110,70),
-        RGB(170,120,30),  RGB(170,70,50),   RGB(90,130,70),
+        RGB(28,26,23),    RGB(33,31,27),    RGB(38,35,31),    RGB(53,48,42),    RGB(58,54,47),
+        RGB(239,233,223), RGB(207,200,186), RGB(163,155,140),
+        RGB(232,216,176), RGB(232,216,176), RGB(232,216,176), RGB(232,216,176),
+        RGB(240,180,80),  RGB(240,128,112), RGB(110,200,140),
         false,
     };
     switch (id) {
@@ -71,7 +72,7 @@ COLORREF FallbackAccent(ThemeId id) {
         case ThemeId::Light:  return RGB(0,120,215);
         case ThemeId::Dark:   return RGB(96,160,255);
         case ThemeId::Fun:    return RGB(255,80,170);
-        case ThemeId::Boring: return RGB(150,110,70);
+        case ThemeId::Boring: return RGB(232,216,176);
     }
     return RGB(96,160,255);
 }
@@ -187,7 +188,8 @@ Theme Resolve(ThemeId id, COLORREF baseAccent) {
 Theme ResolveLive(ThemeId id) {
     bool achromatic = false;
     COLORREF a = SystemAccent(&achromatic);
-    if (achromatic) a = FallbackAccent(id);
+    // Boring is the Reading Room look, whose sand accent is part of it: it ignores the Windows accent.
+    if (achromatic || id == ThemeId::Boring) a = FallbackAccent(id);
     return Resolve(id, a);
 }
 
