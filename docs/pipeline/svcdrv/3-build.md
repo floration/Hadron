@@ -97,3 +97,34 @@ For Analyze (spec §10, verify on Windows):
 Lead follow-ups (core, not this pipeline): move the TI helper into `core/sys`; `ui::ListView` EnsureVisible and per-cell
 style; a core word-wrap helper (Wine's `DT_WORDBREAK` overflows long words); `SERVICE_TRIGGER_INFO` into `win_compat.h`;
 runas's missing TI-state restore.
+
+## Round 2: fixes for Analyze (2026-11-11)
+Analyze (b97f5d0) sent back A1–A7. Fixed in 8c66aa7 and c427726; the Build thread re-ran everything on a clean build.
+
+| # | Fix | Test |
+|---|---|---|
+| A1 | `:put` uses gotos with no `( )` block around names; `CmdSafeName` is an allow-list, so `Intel(R) ...` goes to `.reg`; DelayedAutostart, `reg unload` and `fltmc` errorlevels checked | `restore.cmd` golden with an `Intel(R)` row, block-free check, `restore-dryrun.cmd` golden; new windows-latest step runs the echo-only script on real cmd.exe |
+| A2 | First-run recovery applies Default's exclusions (never-touch, Boot/System, storage, never-preset, launch-protected, System without sysok); README section F lists them | `first-restore.cmd`, `first-README.txt` goldens; no stornvme on disk |
+| A3 | `TiService` claims "started" only for its own start from STOPPED, reset in Acquire/Release; START_PENDING never claimed | two-apply selftest with TI already running; START_PENDING case |
+| A4 | Undo/Resume refuse a log from another machine GUID or build; per-row guard (never-touch, no Boot target, no Boot/System on a service, sysok) | committed `forged/` log: 3 rows blocked; mismatch refusals; `services-forged-undo` screenshot |
+| A5 | Data dir: no reparse point on any component, owner must be Administrators or SYSTEM, protected DACL re-applied; otherwise nothing is read, writes are off, red banner | default-owner refusal under Wine; injected reparse point (Wine can't make one); prefixed missing-parent root |
+| A6 | Dependency check on the end state, both directions, to a fixed point, re-run on every toggle and at apply time | aaa←bbb←ccc chain, toggles, enable direction, apply-time cascades |
+| A7 | Default, stock, Undo, Resume and the apply re-check compare and write the raw DelayedAutostart value | `plan-services-default-delayedlinger.txt` golden (`Spooler 3/1 -> 2/0`) |
+
+Minors fixed: TI released on any failure after Acquire; `--ti on` fixture-only; delayed flag before Start=2 and no delayed for grouped
+services; hardware guards fail closed with a banner; dropped-CRC count shown; UTC stamps plus an order sequence; interrupted undo
+no longer hides the original apply; TiLeftRunning checks all logs; logic M5/M6 and Win32 services with Start 0/1 guarded; WaitState
+and stop-reason fallback; `--data-dir` without `\\?\`; HwEvidence unknown hint = kept; BuildSingle cleanups; plan building and
+CanWrite moved to Workers, load worker honours cancel; precomputed sort keys; design note D4/D5; D3 (trigger GUID→hardware mapping
+and last-arrival date not built) recorded as a deviation in DECISIONS.md, tagged proxy.
+
+Not fixed: canonical en-us KB URLs (learn.microsoft.com still blocked by the container proxy; no KB text changed, so no kb-auditor
+round); logic M3 (Resume orphans rows from undo/drift tracking); UNC data dir untested under Wine; the UI items, coverage and stock
+table are left for Design and Ideas as 4-analyze.md says.
+
+For Analyze to look at: two static test hooks in `Store` (`AcceptTokenUserAsOwner`, needed because Wine ignores SD owners, and
+`InjectedReparsePoint`) are set only by the selftest; check nothing else can set them. The live worker path, real cmd.exe, the live
+write order, WaitState and the stop fallback run only in CI or on Windows.
+
+Checks: MinGW build 0 new warnings; `services_check.sh` rc 0 (genkb selftest + cmp, fixtures cmp, selftest 178/178 standalone and
+`--solo`, 8 plan goldens + delayedlinger, 12 screenshots in shared `pipeline/svcdrv/build/`). MSVC still CI-only.
