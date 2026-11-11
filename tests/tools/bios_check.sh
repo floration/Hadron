@@ -6,7 +6,8 @@
 # 2. --selftest standalone (folder fixture) and in the suite (--snapshot zip).
 # 3. Screenshots, one xvfb-run each: Baseline/Console x dark/light from the folder fixture, a non-solo
 #    suite shot from the zip, the empty state, a goal shot (Goal column colours) and a detail-pane shot
-#    of a sourced entry (--select: Basis row and "Sources for numbers").
+#    of a sourced entry (--select: Basis row and "Sources for numbers"), and the guarded-write plan
+#    overlay and value editor over a MockBackend (--write-demo plan|edit).
 set -euo pipefail
 BUILD="${1:?build dir}"; OUT="${2:?output dir}"
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -52,4 +53,8 @@ shot bios-suite-console "$BUILD/Hadron.exe" --module bios --snapshot "$FIX/snap"
 shot bios-empty-dark "$BUILD/HadronBios.exe"
 shot bios-goal-latency-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --goal 5
 shot bios-detail-iccmax-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --goal 5 --select "IA ICC Max Current Limit Override"
+# Guarded writes (docs/design/bios-write.md): --write-demo drives a MockBackend built from the fixture;
+# nothing real is read or written (the --screenshot latch blocks the real backend anyway).
+shot bios-write-plan "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --write-demo plan
+shot bios-write-edit-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --write-demo edit
 echo "fixture left at $FIX (temp; not deleted by this script)"

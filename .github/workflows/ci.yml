@@ -165,6 +165,9 @@ jobs:
             }
           }
           build\Hadron.exe --module bios --snapshot biosfix\snap --screenshot "shots\bios-suite-baseline.png"
+          # Guarded writes: the plan overlay and value editor over a MockBackend built from the fixture.
+          build\HadronBios.exe --fixture biosfix\snap --write-demo plan --screenshot "shots\bios-write-plan.png"
+          build\HadronBios.exe --fixture biosfix\snap --write-demo edit --screenshot "shots\bios-write-edit-dark.png"
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-windows

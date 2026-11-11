@@ -9,6 +9,7 @@ parity checklist §4, theme §5, edge cases §6, rule violations §7). Read that
 `settings.db`) with its live value, default, menu path, help, explanation and per-goal advice; snapshots
 (save / load / compare to live); export of the changes a goal recommends. **Read-only firmware (rule 2):**
 the module never writes NVRAM, never flashes, never runs SCEWIN/AMISCE.
+**Since 2026-11-11:** guarded setting writes (rule 2 rewritten) are specified in `docs/design/bios-write.md`.
 
 ## Two work packages (run in parallel)
 **A — module** (`modules/bios/*`): UI, live firmware read, version guard, snapshots, export.
