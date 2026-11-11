@@ -127,7 +127,10 @@ def render_basis(basis, note, where, kb, errors, warnings):
 
 
 def expand(text, kb, with_url):
-    """@KEY -> the source's label (and its URL in basis and contested notes)."""
+    """@KEY -> the source's label (and its URL in basis and contested notes). A [[shown|kind|@KEY]] marker becomes
+    its shown text first: the module never renders markers (kb-audit svcdrv-kb M1)."""
+    text = B.MARK_RE.sub(lambda m: m.group(1), text)
+
     def sub(m):
         k = m.group(1)
         if k not in kb.SOURCES:
@@ -245,7 +248,10 @@ def check_entry(e, kb, errors, warnings=None):
                hw, B.esc(expand(con, kb, True)), B.esc(e.get('sources', ''))]
     if len(fields) != FIELDS:
         errors.append('%s: internal: %d fields' % (where, len(fields)))
-    return '\t'.join(fields)
+    line = '\t'.join(fields)
+    if '[[' in line or ']]' in line:
+        errors.append('%s: marker shipped literally' % where)
+    return line
 
 
 def generate(kb, warnings=None):
@@ -407,6 +413,15 @@ def selftest():
                  'Present on Server 2016 (the 1607 release).', 'Windows 10 (1903 and up)']
     for t in ok_texts:
         expect(errors_for(good(expl=t), base) == [], 'passes: ' + t)
+    # kb-audit svcdrv-kb M1: a marked number reaches the db as its shown text, in text and in every note.
+    for f, e in (('expl', good(expl='Frees [[200 MB|published|@IOT]] of RAM.')),
+                 ('basis note', good(basis_note='@IOT says [[200 MB|published|@IOT]].')),
+                 ('stock note', good(stock='3/-', stock_basis='published',
+                                     stock_note='@IOT: Start "is set to [[3|published|@IOT]] by default".'))):
+        errs = []
+        ln = check_entry(e, FakeKb([e], base), errs)
+        expect(errs == [] and '[[' not in ln and ']]' not in ln and ('200 MB' in ln or 'set to 3 by' in ln),
+               'a marker in the %s is rendered to its shown text, never shipped as [[...]]' % f)
     w = []
     expect(errors_for(good(expl='Starts twice as fast.'), base, w) == [] and len(w) == 1,
            'warns, does not fail: a vague quantity ("twice")')

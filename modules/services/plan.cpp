@@ -393,7 +393,10 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             r.before = s.cfg; r.deps = s.deps; r.group = s.group;
             r.op = OpTo(s.cfg, t);
             r.after = AfterOf(s.cfg, r.op);
-            r.reason = L"Windows stock start type for build 19045";
+            // kb-audit svcdrv-kb M2: only a measured value is a fact about this build; the published ones name no build.
+            r.reason = e->stockBasis == L"owner-measured"
+                           ? L"Windows stock start type, measured on build " + c.build
+                           : std::wstring(L"Windows stock start type from a Microsoft page (it names no build)");
             r.basis = e->stockBasis;
             r.basisNote = e->stockNote;
             Guard g = CheckGuard(s, c);
