@@ -7,7 +7,8 @@ std::vector<std::unique_ptr<Module>> MakeAllModules() {
     std::vector<std::unique_ptr<Module>> v;
     v.push_back(MakeHelloModule());
     v.push_back(MakeDiskMapModule());
-    // Ported modules append here: MakeBiosModule(), MakeRunAsModule().
+    v.push_back(MakeRunAsModule());
+    // Ported modules append here: MakeBiosModule().
     return v;
 }
 

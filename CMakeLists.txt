@@ -45,6 +45,13 @@ hadron_add_module(diskmap NAME HadronDiskMap DESC "Hadron DiskMap: drive-space t
 target_sources(mod_diskmap PRIVATE modules/diskmap/scan.cpp modules/diskmap/classify.cpp)
 target_link_libraries(mod_diskmap PUBLIC msimg32)   # GradientFill for the treemap blocks (system lib)
 
+hadron_add_module(runas NAME HadronRunAs DESC "Hadron Run As: launch a file as a chosen identity and integrity level")
+# launch.cpp is the token/launch logic, split out so it stays testable headless (docs/design/runas.md).
+target_sources(mod_runas PRIVATE modules/runas/launch.cpp)
+# Windows SDK libraries only (hard rule 3): CredUI for the password prompt, NetApi for account
+# enumeration, Userenv for the environment block, shlwapi for AssocQueryString, plus the shell.
+target_link_libraries(mod_runas PUBLIC credui netapi32 wtsapi32 userenv shlwapi advapi32)
+
 # --- suite --------------------------------------------------------------------------------------
 # registry.cpp is compiled into the suite exe (not core) so the module factories resolve without a
 # circular static-library dependency.
@@ -53,4 +60,4 @@ add_executable(Hadron WIN32
   app/hadron.cpp
   core/host/registry.cpp
   "${HADRON_SUITE_RC}")
-target_link_libraries(Hadron PRIVATE mod_hello mod_diskmap hadron_core)
+target_link_libraries(Hadron PRIVATE mod_hello mod_diskmap mod_runas hadron_core)

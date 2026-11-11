@@ -42,6 +42,8 @@ jobs:
           wine build/HadronDiskMap.exe --selftest
           wine build/HadronDiskMap.exe --selftest --fixture dmfix/tree
           wine build/Hadron.exe --solo diskmap --selftest --fixture dmfix/tree
+          wine build/HadronRunAs.exe --selftest
+          wine build/Hadron.exe --solo runas --selftest
       - name: Screenshots (Wine + Xvfb)
         run: |
           export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
@@ -64,6 +66,12 @@ jobs:
           for ly in baseline console; do
             shot build/Hadron.exe --module diskmap --fixture dmfix/tree --layout $ly --screenshot shots/diskmap-suite-$ly.png
           done
+          for th in dark light; do
+            for ly in baseline console; do
+              shot build/HadronRunAs.exe --theme $th --layout $ly --screenshot shots/runas-$ly-$th.png
+            done
+          done
+          shot build/Hadron.exe --module runas --screenshot shots/runas-suite-baseline.png
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-linux
@@ -98,6 +106,16 @@ jobs:
           build\HadronDiskMap.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronDiskMap.exe --selftest --fixture dmfix\tree; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\Hadron.exe --solo diskmap --selftest --fixture dmfix\tree; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\HadronRunAs.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\Hadron.exe --solo runas --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # A real de-elevated launch, reading back the child's integrity. Informational: the hosted
+      # runner has no interactive Explorer shell and may run with UAC off (no linked medium token),
+      # so a failure here can be the runner, not the code. The owner's PC is the real check.
+      - name: Run As limited launch (informational)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          build\HadronRunAs.exe --launch-test limited; exit $LASTEXITCODE
       - name: Screenshots
         shell: pwsh
         run: |
@@ -117,6 +135,12 @@ jobs:
           foreach ($ly in 'baseline','console') {
             build\Hadron.exe --module diskmap --fixture dmfix\tree --layout $ly --screenshot "shots\diskmap-suite-$ly.png"
           }
+          foreach ($th in 'dark','light') {
+            foreach ($ly in 'baseline','console') {
+              build\HadronRunAs.exe --theme $th --layout $ly --screenshot "shots\runas-$ly-$th.png"
+            }
+          }
+          build\Hadron.exe --module runas --screenshot "shots\runas-suite-baseline.png"
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots-windows

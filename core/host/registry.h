@@ -9,6 +9,7 @@ namespace hx {
 
 std::unique_ptr<Module> MakeHelloModule();
 std::unique_ptr<Module> MakeDiskMapModule();
+std::unique_ptr<Module> MakeRunAsModule();
 
 // Every module the suite shows, in sidebar order. app/hadron.cpp and the suite tests use this.
 std::vector<std::unique_ptr<Module>> MakeAllModules();
