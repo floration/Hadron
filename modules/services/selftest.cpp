@@ -410,6 +410,12 @@ const SvcItem* ItemOf(const std::vector<SvcItem>& v, const wchar_t* name) {
     return nullptr;
 }
 
+// Both return a pointer into their argument, so a temporary (RowOf(BuildPreset(...)), ItemOf(Folded(...))) would leave
+// it dangling at the end of the statement. That read freed heap: harmless while the block stayed mapped, a page fault in
+// CI when Wine released it. A temporary doesn't compile; bind the result to a named local first.
+const PlanRow* RowOf(const Plan&&, const wchar_t*) = delete;
+const SvcItem* ItemOf(const std::vector<SvcItem>&&, const wchar_t*) = delete;
+
 std::map<std::wstring, StartCfg> CfgMap(FakeBackend& b) {
     std::map<std::wstring, StartCfg> m;
     for (auto& i : b.Items()) m[Lower(i.name)] = i.cfg;
@@ -2464,7 +2470,8 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
         cancel.store(true);
         std::wstring note;
         bool stopped = ts.StopIfStarted(&note);
-        const SvcItem* tiAfter = ItemOf(Folded(d.fx.backend), L"TrustedInstaller");
+        std::vector<SvcItem> after = Folded(d.fx.backend);
+        const SvcItem* tiAfter = ItemOf(after, L"TrustedInstaller");
         check(en && stopped && tiAfter && tiAfter->state == SERVICE_STOPPED && d.fx.backend.controlLog.back() == L"stop TrustedInstaller",
               L"mini-analyze A5: after Cancel, the release still stops the TrustedInstaller Hadron started (cleanup is not cut short)");
         // ...a stop that was sent but not seen to finish is "requested, not confirmed", not "could not stop"...
@@ -2913,7 +2920,8 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             // FrameServer: a camera class never seen is a hot-plug class, offered unticked with its evidence.
             const PlanRow* bt = RowOf(p, L"bthserv");
             const PlanRow* fs = RowOf(p, L"FrameServer");
-            const PlanRow* sbt = RowOf(BuildPreset(LV_STRIPPED, TAB_SERVICES, cw.items, cw.ctx), L"bthserv");
+            Plan stripped = BuildPreset(LV_STRIPPED, TAB_SERVICES, cw.items, cw.ctx);
+            const PlanRow* sbt = RowOf(stripped, L"bthserv");
             check(bt && bt->blocked.find(L"Kept: hardware in use or seen before.") == 0 && !bt->include && !bt->canToggle && !bt->evidence.empty() &&
                       sbt && sbt->blocked == bt->blocked && fs && !fs->include && fs->blocked.empty() && !fs->evidence.empty(),
                   L"custom preset hardware guard: bthserv is kept as by Stripped (\"" + (bt ? bt->blocked : std::wstring(L"no row")) +
@@ -2921,7 +2929,8 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui) {
             World nh;
             freshWorld(&nh);
             nh.ctx.hw = nullptr;
-            const PlanRow* bn = RowOf(BuildCustom(gp, nh.items, nh.ctx), L"bthserv");
+            Plan noHw = BuildCustom(gp, nh.items, nh.ctx);
+            const PlanRow* bn = RowOf(noHw, L"bthserv");
             check(bn && !bn->blocked.empty() && bn->evidence == L"no hardware information: kept",
                   L"custom preset hardware guard: without hardware information a hardware-bound item is kept");
         }
