@@ -204,6 +204,14 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
             int w = S(cols_[ci].width, c.dpi);
             RECT cell{cx + pad, row.top, cx + w - pad, row.bottom};
             COLORREF tc = selected ? p.selText() : (ci == 0 ? p.text1() : p.text2());
+            if (!selected && !c.theme.highContrast && i < (int)ink_.size()) {
+                switch (ink_[i]) {
+                case Ink::Warn: tc = c.theme.warn; break;
+                case Ink::Bad:  tc = c.theme.bad;  break;
+                case Ink::Good: tc = c.theme.good; break;
+                case Ink::Normal: break;
+                }
+            }
             HFONT font = (c.layout == Layout::Console) ? c.fonts.mono
                                                        : (ci == 0 ? c.fonts.ui : c.fonts.caption);
             if (cols_[ci].rightAlign) TextRight(dc, rows_[i][ci], cell, font, tc);
