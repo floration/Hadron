@@ -367,29 +367,49 @@ Type value"). State "Registry only", Start cell "<Start> (reg)", Preset "registr
 every plan, first.txt, the stock pass, the recovery scripts and undo leave it out; `CheckGuard` calls it never-touch,
 custom presets drop it with a note, and plans don't count it as unreadable. The detail pane says why (with the
 reasoning label) and shows the key's Type, Start, ImagePath and Group. Write access is never checked for it.
+A listing that stops part way (`RegEnumKeyEx` fails after N keys) keeps the N and says "the Services key list stopped
+at N: <error>" in the status line and the dump header.
+
+**StartOverride.** With each key the listing reads its `StartOverride` subkey (opened the same way, a link is a leaf;
+values named 0, 1, 2..., `REG_DWORD`). When the registry Start differs from the SCM's start type and a StartOverride
+value is present, the Start type cell says e.g. "Manual (registry: Boot, StartOverride)" (Console: the short form with "(reg ...)"),
+never "pending"; the Drivers tab has a "Registry Start" column (dropped first when the list is narrow; it sorts), and
+the detail pane lists the raw Start, each StartOverride value and "Windows uses StartOverride to demote unused inbox
+boot drivers; the SCM reports the overridden value" labelled reasoning. Plans, guards and writes use the SCM's value;
+nothing writes StartOverride. On the owner's PC 49 inbox boot drivers have this shape (registry Start=0, StartOverride
+0/1/2 = 3), which is why the Boot-start drivers looked missing.
 
 **TrustedInstaller read pass.** With the TrustedInstaller toggle on (session only, never persisted), the load runs the
 same pass again under TrustedInstaller's impersonation token (`LiveTi`: Acquire, Impersonate with its level and SID
 checks, Revert in a scope guard on every path, Release), with Hadron's own file writes refused meanwhile
-(`ImpersonationFlag`). Acquire may start TrustedInstaller if it is stopped: `Backend::AllowTiControl` lets `Control`
-start or stop the service named `TrustedInstaller` and nothing else without `Arm()`, only for that span, and Release
-stops it again if Hadron started it. The union is kept: rows only TI could see, and rows whose configuration only TI
+(`ImpersonationFlag`). Acquire may start TrustedInstaller if it is stopped, and only after a flushed claim: a log with
+source `ti-read` and no rows (B, then `T starting`, under the apply lock) written before the start, `T started <pid>
+<creation time>` after it, `T stopped` or `T stopfailed` and E at the end, the records an apply writes, so the
+TrustedInstaller-left-running banner and its Stop it plan cover a read too ("for the TrustedInstaller read"); a
+`ti-read` log is never offered as an interrupted apply. Without a writable data folder, or when the claim can't be
+written, a stopped TrustedInstaller is left alone and the status says why. `Backend::AllowTiControl` lets `Control`
+start or stop the service named `TrustedInstaller` and nothing else without `Arm()`, only for that span (never when
+TrustedInstaller was already running), and Release stops it again if Hadron started it; one guard does Release, the
+permission and the claim's end on every path. The union is kept: rows only TI could see, and rows whose configuration only TI
 could read, replace the administrator's and are marked "Read as TrustedInstaller". The status line says
 "TrustedInstaller showed N more items and M more configs than administrator", 0 included, or why the pass didn't run.
 Flipping the toggle reloads the list (after a running load, if one is running).
 
 **Protected-items override** (DECISIONS 2026-11-11, owner). A checkbox "Allow changes to protected items. Checking
 this means you understand that changing protected services and drivers will likely break your Windows install." on
-the plan screen of Single, custom-preset, Undo and Resume plans (Baseline under the summary; Console the same line and
-F4). Off at every launch, never persisted, reset when the plan closes (every apply ends with that) and when another
+the plan screen of Single and custom-preset plans (Baseline under the summary; Console the same line and F4). Off at every launch, never persisted, reset when the plan closes (every apply ends with that) and when another
 plan opens. On: rows blocked only by never-touch (the floor, filters, boot path, Critical, hypervisor), the
 never-in-a-preset set or no KB entry (custom presets), or the Boot/System-start driver rule become tickable, unticked,
 with "PROTECTED: <guard reason>" in red (Console: red name and reason; Baseline list: the reason text, the detail pane
 in red, because core's ListView has no per-row colour). Still refused with it on: launch-protected items ("Windows
 itself refuses this"), registry-only and unreadable items, per-user instances, a Boot or System target on a service
 or from a single change, and any registry-fallback write (`MarkRegFallback` refuses a protected row and `RunApply`
-refuses one marked for the registry anyway). Undo and Resume of an override apply offer the protected row again (for
-a Boot-start driver, back to Boot through the SCM) only with the box ticked on that undo plan. Built-in presets,
+refuses one marked for the registry anyway). The apply writes `prot` on each protected row's P record. Undo (and
+Resume of an interrupted undo) show the box only when they hold a marked row, and lift only those rows, only back to
+the value the log recorded before that apply (for a Boot-start driver, back to Boot through the SCM), with the box
+ticked on that undo plan; an unmarked row, a forward resume of a protected change and any other Boot or System target
+stay refused (DECISIONS 2026-11-12, proxy). `TargetGuard` checks Boot/System targets before never-touch. A rebuild
+(reload, TI toggle) brings protected rows back unticked. Built-in presets,
 Default and Stock ignore it (a selftest compares their plans with it on and off). Apply with ticked protected rows
 first shows a red banner (Console tag RISK) that lists each one with its before, after and guard, and applies only
 through its "Apply, including N protected" button: a click only, never a tab stop, as Apply itself. Changing a tick
@@ -585,7 +605,8 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 | `--readonly` | module | Never arm the backend. Without `--data-dir` it opens the default data folder read-only, so the first-run snapshot, undo logs and interrupted banner still show |
 | `--selftest [--update-golden] [--golden <dir>]` | selftest | Run the selftest. `--golden` points at another golden folder (default `<fixture>\..\..\golden\services`); `--update-golden` rewrites every golden it compares instead of comparing |
 | `--dump-stock-live [--out <file>]` | `HadronServices.exe` (Release and test builds) | Read this PC's WinSxS manifests with the live reader and write UTF-8 TSV: `#` header lines (build.UBR, EditionID, manifests, decompress failures, skipped, elapsed ms), then name, start, delayed, layer (`edition`, `serviceData`, `registry`, `settingDefault`), conflict, source file. Read only: no backend, no SCM or registry writes, no data folder, no cache. Exit 1 with the reason when wcp.dll or msdelta.dll can't be loaded or no manifest could be read |
-| `--dump-list-live [--ti on] --out <file>` | `HadronServices.exe` (Release and test builds) | Every row the page would list, as UTF-8 TSV: `#` header lines (build, elapsed ms, the type mask `EnumServicesStatusEx` accepted and the masks tried, the raw SCM count with drivers, pages, duplicates and unreadable configs, Services keys and links, rows read by name, registry-only rows, folded per-user instances, the TI result, counts per tab, kind, start and source), then name, tab, kind, type, start, state, source (`scm`, `scm-direct`, `registry`, `+ti`), readError. Read only: never arms the backend, no data folder; `--ti on` uses TrustedInstaller only when it is already running (never starts a service). Writes only `--out`, `CREATE_NEW` with `FILE_FLAG_OPEN_REPARSE_POINT`, refusing an existing path |
+| `--dump-list-live [--ti on] --out <file>` | `HadronServices.exe` (Release and test builds) | Every row the page would list, as UTF-8 TSV: `#` header lines (build, elapsed ms, the type mask `EnumServicesStatusEx` accepted and the masks tried, the raw SCM count with drivers, pages, duplicates and unreadable configs, Services keys and links, rows read by name, registry-only rows, folded per-user instances, the TI result, counts per tab, kind, start and source), then name, tab, kind, type, start, state, source (`scm`, `scm-direct`, `registry`, `+ti`), readError, raw_start (the key's Start, `-` when unknown), start_override (`0=3;1=3;2=3`, `-` without one), with
+`#start_overridden` in the header. Read only: never arms the backend, no data folder; `--ti on` uses TrustedInstaller only when it is already running (never starts a service). Writes only `--out`, `CREATE_NEW` with `FILE_FLAG_OPEN_REPARSE_POINT`, refusing an existing path |
 | `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (Services: manifest, table and Microsoft rows and the shown-not-applied rows from the fixture's `sxs\`; Drivers: no data, the plan says so) |
 | `--live-test HadronTest<name> [--ti] [--data-dir <dir>]` | `HadronServices.exe`, test build only (R25) | CI's round trip on a dummy service (see below) |
 
