@@ -151,7 +151,7 @@ off-by-default toggle. The old `Admin::Optional` / `RequestElevation()` / single
   SHA256SUMS, the swap in a temp folder).
 - **Trust.** HTTPS plus SHA256SUMS from the same release catches corruption and a wrong asset, not a compromised
   GitHub account; the exes are not code-signed.
-- **Releasing.** Push a tag `vX.Y.Z` on a commit on main; `.github/workflows/release.yml` builds with that version
+- **Releasing.** Push a tag `vX.Y.Z` on a commit on main, or run the Release workflow by hand on main with a version (it creates the tag on main's head; agent sessions use this because they can't push tags); `.github/workflows/release.yml` builds with that version
   and publishes the exes (suite and every standalone) and `SHA256SUMS`.
 
 ## Settings, logs, crashes

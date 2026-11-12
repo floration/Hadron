@@ -51,9 +51,16 @@ private:
 class ListView {
 public:
     struct Column { std::wstring title; int width; bool rightAlign = false; };
+    // Per-row text colour from the theme's status colours (Normal = the usual text1/text2). The selected
+    // row always uses the selection text colour, and high contrast always uses the system text colour,
+    // so ink never costs legibility. Never the only signal: say the status in the cell text too.
+    enum class Ink : unsigned char { Normal, Warn, Bad, Good };
 
     void SetColumns(std::vector<Column> cols) { cols_ = std::move(cols); }
     void SetRows(std::vector<std::vector<std::wstring>> rows);
+    // Optional, parallel to the rows of the last SetRows; missing entries are Normal. SetRows clears it,
+    // so call SetRowInk after every SetRows (re-sort included).
+    void SetRowInk(std::vector<Ink> ink) { ink_ = std::move(ink); }
     int  RowCount() const { return (int)rows_.size(); }
 
     int  Selected() const { return sel_; }
@@ -79,6 +86,7 @@ private:
 
     std::vector<Column> cols_;
     std::vector<std::vector<std::wstring>> rows_;
+    std::vector<Ink> ink_;
     ScrollBar sb_;
     int  sel_ = -1;
     int  sortCol_ = -1;
