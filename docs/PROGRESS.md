@@ -19,6 +19,8 @@
 | `services` custom presets + Measure (svcdrv-presets) | merged | Small fixes | fix/svcdrv-presets | #10 |
 | `services` Windows-stock from WinSxS + tables (svcdrv-stock) | merged | Small fixes | fix/svcdrv-stock | #11 |
 | `services` Signer, event 7040, interface evidence, registry fallback (svcdrv-evidence) | merged | Small fixes | fix/svcdrv-evidence | #12 |
+| `services` selftest use-after-free fix (svcdrv-selftest-crash) | merged | Small fixes | fix/svcdrv-selftest-crash | #14 |
+| `services` every Services key, StartOverride, TI read pass, protected-items override (svcdrv-visibility) | in PR | Small fixes | fix/svcdrv-visibility | #15 |
 
 ## Handoff notes
 (Newest first. The lead adds a dated note at the end of every session: what changed, what's next, what's blocked.)

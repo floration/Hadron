@@ -8,6 +8,16 @@
 namespace hx::services {
 
 const wchar_t kCfgUnreadable[] = L"configuration unreadable";
+const wchar_t kRegOnlyKind[] = L"Registry only (not loaded by the SCM)";
+
+const wchar_t* SourceName(const SvcItem& s) {
+    switch (s.src) {
+        case SvcItem::Source::Scm: return L"scm";
+        case SvcItem::Source::ScmDirect: return L"scm-direct";
+        case SvcItem::Source::Registry: return L"registry";
+    }
+    return L"scm";
+}
 
 std::wstring CfgText(const StartCfg& c) {
     std::wstring s = std::to_wstring(c.start) + L"/";
@@ -45,6 +55,7 @@ std::wstring StartLabel(const StartCfg& c, bool trigger) {
 
 std::wstring StateName(DWORD state) {
     switch (state) {
+        case 0: return L"Registry only";   // a Services key the SCM doesn't have (collect.h): no SCM state
         case SERVICE_STOPPED: return L"Stopped";
         case SERVICE_START_PENDING: return L"Starting";
         case SERVICE_STOP_PENDING: return L"Stopping";
@@ -76,6 +87,7 @@ bool OnTab(const SvcItem& s, Tab t) {
 }
 
 std::wstring TypeName(DWORD type) {
+    if (type == 0) return L"No Type value";   // a registry-only key without one
     switch (KindOf(type)) {
         case Kind::KernelDriver: return (type & SERVICE_KERNEL_DRIVER) ? L"Kernel driver" : L"Adapter driver";
         case Kind::FsDriver: return (type & SERVICE_FILE_SYSTEM_DRIVER) ? L"File system driver" : L"File system recognizer driver";

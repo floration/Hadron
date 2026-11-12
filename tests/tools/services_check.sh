@@ -22,7 +22,7 @@ echo "ok: services.db is what genkb.py generates"
 
 echo "== fixture"
 python3 -I "$HERE/tests/fixtures/services/make_services_fixture.py" "$TMP/fix" > /dev/null
-for f in snapshot.txt hw.txt first.txt signers.txt events7040.txt interrupted/snapshot.txt interrupted/hw.txt interrupted/first.txt \
+for f in snapshot.txt hw.txt first.txt signers.txt events7040.txt regkeys.txt interrupted/snapshot.txt interrupted/hw.txt interrupted/first.txt \
          interrupted/undo-20261110-213012.log delayedlinger/snapshot.txt delayedlinger/hw.txt delayedlinger/first.txt \
          forged/snapshot.txt forged/hw.txt forged/first.txt forged/undo-20261110-210000.log \
          multi/snapshot.txt multi/hw.txt multi/first.txt multi/undo-20261110-210000.log multi/undo-20261110-220000.log; do
@@ -90,6 +90,14 @@ shot services-regfallback-plan "$S" --fixture "$FIX" --plan stripped --regfallba
 shot services-console-signer "$S" --fixture "$FIX" --layout console --sort signer --select ExampleUpdater
 shot services-console-drift-7040 "$S" --fixture "$FIX" --layout console --select XblGameSave
 shot services-console-regfallback-plan "$S" --fixture "$FIX" --layout console --plan stripped --regfallback on --select dmwappushservice
+# fix/svcdrv-visibility: a registry-only row, and the protected-items override (on; its second confirmation). --protected
+# and --plan single: are fixture-only.
+for L in baseline console; do
+    shot services-regonly-$L "$S" --fixture "$FIX" --layout $L --tab drivers --select Fs_Rec
+    shot services-startoverride-$L "$S" --fixture "$FIX" --layout $L --tab drivers --select hyperkbd
+    shot services-protected-on-$L "$S" --fixture "$FIX" --layout $L --plan single:BrokerInfrastructure:4 --protected on
+    shot services-protected-ask-$L "$S" --fixture "$FIX" --layout $L --plan single:ACPI:4 --protected ask
+done
 # Custom presets and measured before/after (docs/pipeline/fixes/svcdrv-presets.md); fixture mode writes nothing.
 for L in baseline console; do
     shot services-presets-$L "$S" --fixture "$FIX" --layout $L --presets

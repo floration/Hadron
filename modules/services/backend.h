@@ -49,9 +49,34 @@ struct RegStartVals {
     StartCfg Cfg() const { return StartCfg{start, delayed < 0 ? -1 : (delayed ? 1 : 0)}; }
 };
 
+// One subkey of HKLM\SYSTEM\<current control set>\Services (fix/svcdrv-visibility), opened with REG_OPTION_OPEN_LINK
+// and KEY_QUERY_VALUE only. A link is a leaf: its values are never read. -1 / "" when a value is absent.
+struct RegSvcKey {
+    std::wstring name, image, display, group;
+    long long type = -1;   // REG_DWORD Type; -1 when the key has none
+    int start = -1;        // REG_DWORD Start; -1 when the key has none
+    bool link = false;     // the key is a registry link (SymbolicLinkValue of type REG_LINK)
+    // Its StartOverride subkey's REG_DWORD values, by name ("0", "1", ...); empty when it has none. A StartOverride
+    // subkey that is a link is a leaf (not read).
+    std::vector<std::pair<std::wstring, DWORD>> startOverride;
+    std::wstring err;      // the key could not be opened (its name is still listed)
+};
+
+// What the last Enumerate saw before any Hadron processing (the --dump-list-live header).
+struct EnumStats {
+    DWORD mask = 0;                // the type mask that EnumServicesStatusEx accepted
+    std::wstring masksTried;       // e.g. "0x3FF rejected (The parameter is incorrect.); 0x13F ok"
+    int raw = 0;                   // entries the SCM returned (all pages, duplicates included)
+    int rawDrivers = 0;            // of those, with a driver type bit
+    int pages = 0;                 // calls that returned entries
+    int duplicates = 0;            // names returned twice across pages (dropped)
+    int unreadable = 0;            // ReadOne failed: kept with cfgUnknown
+};
+
 class Backend {
 public:
     virtual ~Backend() = default;
+    EnumStats lastEnum;            // filled by Enumerate (live), counted by the fake
     virtual bool IsLive() const = 0;
     virtual bool Enumerate(std::vector<SvcItem>* out, std::wstring* err) = 0;   // services + drivers, full config
     virtual bool Query(const std::wstring& name, SvcItem* out, std::wstring* err) = 0;   // false = vanished/unreadable
@@ -72,6 +97,20 @@ public:
     virtual std::unique_ptr<SxsReader> MakeSxs() { return nullptr; }
     virtual void Arm() {}
     virtual void Disarm() {}
+    // The TrustedInstaller read pass (fix/svcdrv-visibility): while on, Control may start or stop the service named
+    // TrustedInstaller and nothing else, without Arm(). Only the load worker turns it on, only while the user's
+    // TrustedInstaller toggle is on, and only for Acquire/Release around its read; never --dump-list-live.
+    virtual void AllowTiControl(bool on) { (void)on; }
+    // Every subkey of the current control set's Services key (read only). False only when the Services key itself
+    // could not be enumerated.
+    // *partial: the listing stopped part way (RegEnumKeyEx failed after N keys); out holds the N, *err says why, and the
+    // call still returns true (review R10).
+    virtual bool ListServiceKeys(std::vector<RegSvcKey>* out, bool* partial, std::wstring* err) {
+        out->clear();
+        *partial = false;
+        *err = L"this backend has no registry access";
+        return false;
+    }
     // Registry fallback (regfallback.h). ReadRegStart reads the service key's Start and DelayedAutostart (query rights
     // only). WriteRegStart refuses until Arm(), refuses a Boot or System target, a key whose Start is Boot or System
     // now, a launch-protected service and a key that is a registry link. Under its write handle it reads the values
@@ -168,8 +207,18 @@ public:
     // The fixture's sxs\ folder (hand-written XML manifests), when it has one.
     std::unique_ptr<SxsReader> MakeSxs() override { return sxsDir_.empty() ? nullptr : MakeFakeSxsReader(sxsDir_); }
     void SetSxsDir(std::wstring d) { sxsDir_ = std::move(d); }
+    // The fake registry's Services keys: one per item, plus the fixture's regkeys.txt (keys the SCM doesn't have).
+    bool ListServiceKeys(std::vector<RegSvcKey>* out, bool* partial, std::wstring* err) override;
+    int keysStopAt = -1;   // fault: the key listing stops after this many keys (partial, review R10)
+    void SetExtraKeys(std::vector<RegSvcKey> k) { extraKeys_ = std::move(k); }
+    // Identity of the calling "thread" for the fixture's scm=ti and cfg=ti items: set by the selftest's TI provider
+    // while it impersonates.
+    bool asTi = false;
+    bool tiControlAllowed = false;   // AllowTiControl's state (the selftest checks it is off after every load)
+    void AllowTiControl(bool on) override { tiControlAllowed = on; }
 
 private:
+    std::vector<RegSvcKey> extraKeys_;
     std::wstring sxsDir_;
     SvcItem* Find(const std::wstring& name);
     std::vector<SvcItem> items_;

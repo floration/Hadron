@@ -36,7 +36,8 @@ disagree, the spec wins.
 | `evidence.*` | Read-only evidence: the Authenticode signer of an item's file (`ReadSigner`, offline, cached) and the System log's event 7040 (`ReadLive7040`, `ParseEvent7040`), plus their fixture formats |
 | `evidence_view.*` | The page's two evidence Worker passes (signer, event 7040), so `module.cpp` holds one member and a few hooks |
 | `regfallback.*` | The registry fallback's planning side: `RegRowRefusal`, `MarkRegFallback`, the plan lines; the write is `RunApply`'s through `Backend::WriteRegStart` |
-| `backend.h` | The `Backend` interface: Enumerate, Query, CanWrite, SetStart, Control, Arm/Disarm |
+| `backend.h` | The `Backend` interface: Enumerate (with `lastEnum` counts), Query, CanWrite, SetStart, Control, Arm/Disarm, `ListServiceKeys`, `AllowTiControl` |
+| `collect.*` | What the page lists (fix/svcdrv-visibility): the SCM enumeration, the registry cross-check (read-by-name and "Registry only" rows), the TrustedInstaller read pass, and the `--dump-list-live` text |
 | `backend_live.cpp` | **The only file that writes to the SCM or the registry** (`WriteRegStart`, the registry fallback). Every write refuses until `Arm()` |
 | `backend_fake.cpp` | In-memory backend for the selftest, `--dump-plan` and screenshots. Supports fault injection |
 | `store.*` | The data dir, the snapshot and undo-log formats, `CREATE_NEW` writers, the apply lock |
@@ -48,9 +49,10 @@ disagree, the spec wins.
 | `module.cpp` | The UI (`hx::Module`) |
 | `selftest.cpp`, `cli.h` | `--selftest`, `--dump-plan` and `--live-test` |
 | `selftest_evidence.*` | The selftest part for follow-ups 6-9 (signer, 7040, interface evidence, registry fallback), on the fake backend |
-| `standalone.cpp` | `HadronServices.exe`. Intercepts `--dump-plan` and `--live-test` before the GUI starts |
+| `selftest_visibility.*` | The selftest part for fix/svcdrv-visibility (cross-check, missed rows, TI read pass, dump text) and the protected-items override, on the fake backend |
+| `standalone.cpp` | `HadronServices.exe`. Intercepts `--dump-plan`, `--live-test`, `--dump-stock-live` and `--dump-list-live` before the GUI starts |
 | `tools/services/kb.py`, `genkb.py` | The KB source and the rule-7 gate (see `tools/services/README.md`) |
-| `tests/fixtures/services/` | The fixture machine (`make_services_fixture.py` writes it; CI compares), with `signers.txt`, `events7040.txt`, `sxs\`, `presets\`, `measure\` and `import\` |
+| `tests/fixtures/services/` | The fixture machine (`make_services_fixture.py` writes it; CI compares), with `signers.txt`, `events7040.txt`, `regkeys.txt` (Services keys the fake SCM doesn't have), `sxs\`, `presets\`, `measure\` and `import\` |
 | `tests/golden/services/` | 10 plan goldens (`plan-<services\|drivers>-<default\|bloat\|stripped\|minimum\|stock>.txt`), `plan-services-default-delayedlinger.txt`, `plan-services-custom.txt` (the fixture's "Gaming rig"), `restore.cmd`, `restore-dryrun.cmd`, `first-restore.cmd` and `first-README.txt` |
 
 ## Formats
@@ -351,6 +353,72 @@ name<TAB><preset name>
     old build's values are not what WinRE should write back, and a notice says so. README "Which folder to use"
     names `first-2` .. `first-9`.
 
+## What the page lists, and the protected-items override (fix/svcdrv-visibility)
+Write-up: docs/pipeline/fixes/svcdrv-visibility.md.
+
+**Every Services key.** The load (`CollectItems`, live and fixture) runs the SCM enumeration, then lists the
+subkeys of `HKLM\SYSTEM\ControlSet<Select\Current>\Services` (each opened with `REG_OPTION_OPEN_LINK` and
+`KEY_QUERY_VALUE`; a key whose `SymbolicLinkValue` is `REG_LINK` is a leaf and none of its values is read; Wine,
+which has no `ControlSetNNN`, falls back to `CurrentControlSet`). A key the enumeration did not return is read from
+the SCM by name; when that works the row is an ordinary row with source `scm-direct` and a detail-pane line saying so.
+When the SCM has no service by that name (or would not open it), the row is **"Registry only (not loaded by the
+SCM)"**: on the Drivers tab when its `Type` has a driver bit, otherwise on the Services tab (no `Type`: labelled "No
+Type value"). State "Registry only", Start cell "<Start> (reg)", Preset "registry only". It carries `cfgUnknown`, so
+every plan, first.txt, the stock pass, the recovery scripts and undo leave it out; `CheckGuard` calls it never-touch,
+custom presets drop it with a note, and plans don't count it as unreadable. The detail pane says why (with the
+reasoning label) and shows the key's Type, Start, ImagePath and Group. Write access is never checked for it.
+A listing that stops part way (`RegEnumKeyEx` fails after N keys) keeps the N and says "the Services key list stopped
+at N: <error>" in the status line and the dump header.
+
+**StartOverride.** With each key the listing reads its `StartOverride` subkey (opened the same way, a link is a leaf;
+values named 0, 1, 2..., `REG_DWORD`). When the registry Start differs from the SCM's start type and a StartOverride
+value is present, the Start type cell says e.g. "Manual (registry: Boot, StartOverride)" (Console: the short form with "(reg ...)"),
+never "pending"; the Drivers tab has a "Registry Start" column (dropped first when the list is narrow; it sorts), and
+the detail pane lists the raw Start, each StartOverride value and "Windows uses StartOverride to demote unused inbox
+boot drivers; the SCM reports the overridden value" labelled reasoning. Plans and writes use the SCM's value;
+nothing writes StartOverride. `CheckGuard` keeps a driver whose registry Start is 0 under a StartOverride as a
+Boot-start driver (never-touch), and every plan row for an item with a StartOverride carries "Windows applies
+StartOverride over Start, so this change may not take effect (reasoning, not tested)", with one plan note naming them. On the owner's PC 49 inbox boot drivers have this shape (registry Start=0, StartOverride
+0/1/2 = 3), which is why the Boot-start drivers looked missing.
+
+**TrustedInstaller read pass.** With the TrustedInstaller toggle on (session only, never persisted), the load runs the
+same pass again under TrustedInstaller's impersonation token (`LiveTi`: Acquire, Impersonate with its level and SID
+checks, Revert in a scope guard on every path, Release), with Hadron's own file writes refused meanwhile
+(`ImpersonationFlag`). Acquire may start TrustedInstaller if it is stopped, and only after a flushed claim: a log with
+source `ti-read` and no rows (B, then `T starting`, under the apply lock) written before the start, `T started <pid>
+<creation time>` after it, `T stopped` or `T stopfailed` and E at the end, the records an apply writes (a finished read that stopped it again
+stays on disk and leaves the page's history; nothing is deleted), so the
+TrustedInstaller-left-running banner and its Stop it plan cover a read too ("for the TrustedInstaller read"); a
+`ti-read` log is never offered as an interrupted apply. Without a writable data folder, or when the claim can't be
+written, a stopped TrustedInstaller is left alone and the status says why. `Backend::AllowTiControl` lets `Control`
+start or stop the service named `TrustedInstaller` and nothing else without `Arm()`, only for that span (never when
+TrustedInstaller was already running), and Release stops it again if Hadron started it; one guard does Release, the
+permission and the claim's end on every path. The union is kept: rows only TI could see, and rows whose configuration only TI
+could read, replace the administrator's and are marked "Read as TrustedInstaller". The status line says
+"TrustedInstaller showed N more items and M more configs than administrator", 0 included, or why the pass didn't run.
+Flipping the toggle reloads the list (after a running load, if one is running).
+
+**Protected-items override** (DECISIONS 2026-11-11, owner). A checkbox "Allow changes to protected items. Checking
+this means you understand that changing protected services and drivers will likely break your Windows install." on
+the plan screen of Single and custom-preset plans (Baseline under the summary; Console the same line and F4). Off at every launch, never persisted, reset when the plan closes (every apply ends with that) and when another
+plan opens. On: rows blocked only by never-touch (the floor, filters, boot path, Critical, hypervisor), the
+never-in-a-preset set or no KB entry (custom presets), or the Boot/System-start driver rule become tickable, unticked,
+with "PROTECTED: <guard reason>" in red (Console: red name and reason; Baseline list: the reason text, the detail pane
+in red, because core's ListView has no per-row colour). Still refused with it on: launch-protected items ("Windows
+itself refuses this"), registry-only and unreadable items, per-user instances, a Boot or System target on a service
+or from a single change, and any registry-fallback write (`MarkRegFallback` refuses a protected row and `RunApply`
+refuses one marked for the registry anyway). The apply writes `prot` on each protected row's P record. Undo (and
+Resume of an interrupted undo) show the box only when they hold a marked row (finished, D ok, with a target of Manual
+or higher), and lift only those rows, only back to
+the value the log recorded before that apply (for a Boot-start driver, back to Boot through the SCM), with the box
+ticked on that undo plan; an unmarked row, a forward resume of a protected change and any other Boot or System target
+stay refused (DECISIONS 2026-11-12, proxy). `TargetGuard` checks Boot/System targets before never-touch. A rebuild
+(reload, TI toggle) brings protected rows back unticked. Built-in presets,
+Default and Stock ignore it (a selftest compares their plans with it on and off). Apply with ticked protected rows
+first shows a red banner (Console tag RISK) that lists each one with its before, after and guard, and applies only
+through its "Apply, including N protected" button: a click only, never a tab stop, as Apply itself. Changing a tick
+withdraws it. Everything else is the normal path: snapshot, recovery folder and zip, flushed undo log.
+
 ## Spec ambiguities resolved in the build
 - **Hardware evidence.**
   - Never-seen hot-plug classes are offered unticked, at every level, and the user can tick them. DECISIONS.md
@@ -534,11 +602,15 @@ Every flag below except `--data-dir`, `--readonly` and `--tab` acts only with `-
 | `--save <name>` | module | With `--plan`: open the "save ticks as custom preset" form with that name typed (fixture mode refuses the write) |
 | `--measure` | module | Open the measure page (the fixture's `measure\` pair) |
 | `--ti on` | module | Start with the TrustedInstaller toggle on (fixture renders only; live it is off at every launch) |
+| `--protected on\|ask` | module | The protected-items override on the opened plan (`ask`: its protected rows ticked and the second confirmation showing). Fixture renders only; live it is off at every launch and on every new plan |
+| `--plan single:<name>:<2\|3\|4>` | module | Open a single change (fixture renders) |
 | `--regfallback on` | module | Start with the registry fallback switch on (fixture renders only; live it is off at every launch and after every apply) |
 | `--data-dir <dir>` | module, `--live-test` | Use another data folder instead of `%ProgramData%\Hadron\services\` |
 | `--readonly` | module | Never arm the backend. Without `--data-dir` it opens the default data folder read-only, so the first-run snapshot, undo logs and interrupted banner still show |
 | `--selftest [--update-golden] [--golden <dir>]` | selftest | Run the selftest. `--golden` points at another golden folder (default `<fixture>\..\..\golden\services`); `--update-golden` rewrites every golden it compares instead of comparing |
 | `--dump-stock-live [--out <file>]` | `HadronServices.exe` (Release and test builds) | Read this PC's WinSxS manifests with the live reader and write UTF-8 TSV: `#` header lines (build.UBR, EditionID, manifests, decompress failures, skipped, elapsed ms), then name, start, delayed, layer (`edition`, `serviceData`, `registry`, `settingDefault`), conflict, source file. Read only: no backend, no SCM or registry writes, no data folder, no cache. Exit 1 with the reason when wcp.dll or msdelta.dll can't be loaded or no manifest could be read |
+| `--dump-list-live [--ti on] --out <file>` | `HadronServices.exe` (Release and test builds) | Every row the page would list, as UTF-8 TSV: `#` header lines (build, elapsed ms, the type mask `EnumServicesStatusEx` accepted and the masks tried, the raw SCM count with drivers, pages, duplicates and unreadable configs, Services keys and links, rows read by name, registry-only rows, folded per-user instances, the TI result, counts per tab, kind, start and source), then name, tab, kind, type, start, state, source (`scm`, `scm-direct`, `registry`, `+ti`), readError, raw_start (the key's Start, `-` when unknown), start_override (`0=3;1=3;2=3`, `-` without one), with
+`#start_overridden` in the header. Read only: never arms the backend, no data folder; `--ti on` uses TrustedInstaller only when it is already running (never starts a service). Writes only `--out`, `CREATE_NEW` with `FILE_FLAG_OPEN_REPARSE_POINT`, refusing an existing path |
 | `--dump-plan <default\|stock\|bloat\|stripped\|minimum> --tab <t> --fixture <dir> [--out <file>]` | `HadronServices.exe` | Print a plan as golden text. `stock` has goldens `plan-<tab>-stock.txt` (Services: manifest, table and Microsoft rows and the shown-not-applied rows from the fixture's `sxs\`; Drivers: no data, the plan says so) |
 | `--live-test HadronTest<name> [--ti] [--data-dir <dir>]` | `HadronServices.exe`, test build only (R25) | CI's round trip on a dummy service (see below) |
 
@@ -559,7 +631,8 @@ compares them again (with `--dump-plan`) and fails on any difference.
 4. the 10 `--dump-plan` comparisons (5 plans on each tab, `stock` included) against `tests/golden/services`, plus
    `plan-services-default-delayedlinger.txt` (the `delayedlinger` fixture);
 5. the screenshots (including the `forged` Undo plan and the `multi` banner, and the presets page, the import
-   refusal, the custom plan, the save form and the measure page in both layouts).
+   refusal, the custom plan, the save form and the measure page in both layouts; a registry-only row and the
+   protected-items override, on and at its second confirmation, in both layouts).
 
 Regression fixtures from Analyze (written by `make_services_fixture.py`, compared by CI): `delayedlinger/` (A7),
 `forged/` (A4), `multi/` (an interrupted undo of an interrupted apply).

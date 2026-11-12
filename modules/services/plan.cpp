@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 
 namespace hx::services {
 
@@ -112,17 +113,78 @@ bool SysOk(const SvcItem& s, const Ctx& c) {
 // A4: what an undo or resume row may write. Undo logs are integrity-checked (CRC), not authenticated, so every
 // row passes the same guards a plan would: never-touch items, Boot start, a Boot/System value on a service,
 // and a System-start driver without a curated sysok entry are refused whatever the log says.
-std::wstring TargetGuard(const SvcItem& live, const StartCfg& target, const Ctx& c) {
+// *overridable (optional): the refusal is one the protected-items override may lift (never-touch, a Boot/System-start
+// driver without the KB's clearance being lowered), and OverrideRefusal has nothing against the item. The Boot/System
+// target checks run first, so never-touch can't hide them (review R1), and a refusal of a Boot or System target is
+// never overridable, except for restoreMarked: an undo row of an override apply (its P record carries "prot")
+// putting back the value its log recorded before that apply.
+std::wstring TargetGuard(const SvcItem& live, const StartCfg& target, const Ctx& c, bool* overridable = nullptr,
+                         bool restoreMarked = false) {
+    if (overridable) *overridable = false;
     if (live.kind == Kind::UserInstance) return L"Per-user instance: change its template instead";
-    Guard g = CheckGuard(live, c);
-    if (g.neverTouch) return L"Protected: never touched by Hadron. " + g.reason;
-    bool drv = IsDriverType(live.type);
-    if (target.start == 0) return L"Refused: Hadron never sets Boot start";
+    const bool drv = IsDriverType(live.type);
     if (!drv && target.start < 2) return L"Refused: Boot and System start are for drivers only";
-    if (drv && (target.start < 2 || live.cfg.start < 2) && !SysOk(live, c))
+    const bool free = OverrideRefusal(live).empty() && (target.start >= 2 || restoreMarked);
+    if (target.start == 0) { if (overridable) *overridable = free; return L"Refused: Hadron never sets Boot start"; }
+    if (drv && target.start < 2 && !SysOk(live, c)) { if (overridable) *overridable = free; return kSysStartKept; }
+    Guard g = CheckGuard(live, c);
+    if (g.neverTouch) { if (overridable) *overridable = free; return L"Protected: never touched by Hadron. " + g.reason; }
+    if (drv && live.cfg.start < 2 && !SysOk(live, c)) {
+        if (overridable) *overridable = free;
         return kSysStartKept;
+    }
     return L"";
 }
+
+}  // namespace
+
+const wchar_t kOverrideWarning[] =
+    L"Checking this means you understand that changing protected services and drivers will likely break your Windows install.";
+
+std::wstring OverrideRefusal(const SvcItem& s) {
+    if (s.RegOnly()) return L"registry only: the SCM has not loaded it";
+    if (s.cfgUnknown) return L"its configuration could not be read";
+    if (s.protect != 0) return L"launch-protected (" + ProtectName(s.protect) + L"): Windows itself refuses this change";
+    if (s.kind == Kind::UserInstance) return L"a per-user instance: change its template instead";
+    return L"";
+}
+
+bool OverrideOffered(const Plan& p) {
+    switch (p.kind) {
+        case PlanKind::Single: return true;
+        // Review R1: Undo and Resume offer the box only to put back rows an override apply marked ("prot").
+        case PlanKind::Undo: case PlanKind::Resume: return p.protMarked > 0;
+        case PlanKind::Preset: return p.source.rfind(L"custom:", 0) == 0;
+        case PlanKind::Control: return false;
+    }
+    return false;
+}
+
+namespace {
+// A row the override freed: offered, never ticked by default, marked with the guard it lifted.
+void MakeProtected(PlanRow* r, const std::wstring& reason) {
+    r->blocked.clear();
+    r->protectedRow = true;
+    r->protReason = reason;
+    r->include = false;
+    r->canToggle = true;
+}
+// An Undo/Resume row a guard refused: a marked row the override may lift is counted (it offers the box) and, with the
+// box on and through the service manager, offered PROTECTED; anything else stays blocked.
+void ProtectedOrBlocked(PlanRow* r, Plan* p, const std::wstring& g, bool liftable, bool viaReg, const Ctx& c) {
+    if (liftable && !viaReg) {
+        p->protMarked++;
+        if (c.overrideProtected) { MakeProtected(r, g.rfind(L"Protected: ", 0) == 0 ? g.substr(11) : g); return; }
+    }
+    r->blocked = g + (liftable && c.overrideProtected ? L". Not with the override: a registry write is never made for a protected row"
+                      : liftable ? L". Hadron's override changed it: tick \"Allow changes to protected items\" to put it back"
+                                 : L"");
+    r->include = false;
+    r->canToggle = false;
+}
+const wchar_t kProtNote[] =
+    L"The protected-items override is on: rows marked PROTECTED are offered unticked. Apply asks a second time and lists each "
+    L"one. Every change still goes through the snapshot, the flushed undo log and the recovery zip.";
 
 std::wstring LogRefusal(const UndoLog& log, const Ctx& c) {
     if (c.machine.empty()) return L"Refused: this PC's machine GUID could not be read, so the log can't be matched to it.";
@@ -170,8 +232,14 @@ Guard CheckGuard(const SvcItem& s, const Ctx& c) {
     bool drv = IsDriverType(s.type);
     auto never = [&](const std::wstring& r) { g.neverTouch = true; g.reason = r; return g; };
     // R2: an item whose configuration could not be read has a placeholder start type: never planned from it.
+    if (s.RegOnly()) return never(L"registry only: the SCM has not loaded it, so Hadron has no service to change and never writes its key");
     if (s.cfgUnknown) return never(L"its configuration could not be read, and Hadron never changes what it can't read");
     if (drv && s.cfg.start == 0) return never(L"Boot-start driver: loaded by the boot loader before Windows can read the disk");
+    // A Boot-start driver that a StartOverride value demotes in the SCM's view (registry Start=0) is still one in the
+    // registry: kept the same way (review A3).
+    if (drv && !s.startOverride.empty() && s.regStart == 0)
+        return never(L"Boot-start driver in its registry Start (StartOverride makes the SCM report " + StartName(s.cfg.start) +
+                     L"): loaded by the boot loader before Windows can read the disk");
     if (!drv && s.cfg.start < 2 && s.kind != Kind::UserInstance)
         return never(L"a service whose registry Start is " + StartName(s.cfg.start) + L": not a start type Windows uses for services, so Hadron leaves it");
     // Fail closed: without the device list or the boot disk the filter and boot-path checks can't run.
@@ -224,6 +292,7 @@ std::wstring UnreadableNote(int n) {
 int Plan::Included() const { int n = 0; for (auto& r : rows) if (r.blocked.empty() && r.include) n++; return n; }
 int Plan::Optional() const { int n = 0; for (auto& r : rows) if (r.blocked.empty() && !r.include) n++; return n; }
 int Plan::Blocked() const { int n = 0; for (auto& r : rows) if (!r.blocked.empty()) n++; return n; }
+int Plan::Protected() const { int n = 0; for (auto& r : rows) if (r.protectedRow && r.blocked.empty() && r.include) n++; return n; }
 
 // ---- builders ------------------------------------------------------------------------------------------
 Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ctx& c) {
@@ -237,6 +306,7 @@ Plan BuildPreset(int level, int tab, const std::vector<SvcItem>& items, const Ct
     int stricter = 0, unreadable = 0;
     for (auto& s : items) {
         if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
+        if (s.RegOnly()) continue;   // registry-only keys are never planned (fix/svcdrv-visibility)
         if (s.cfgUnknown) { unreadable++; continue; }   // R2: its start type is not known
         const KbEntry* e = c.kb ? c.kb->Find(s.name) : nullptr;
         if (!e) { p.unknown++; continue; }
@@ -462,6 +532,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
             const SvcItem* f = c.first->Find(s.name);
             // R2: an item unreadable now, or recorded as unreadable (an older first.txt), has no real value to compare.
+            if (s.RegOnly()) continue;
             if (s.cfgUnknown || (f && f->cfgUnknown)) { unreadable++; continue; }
             if (!f) { added++; continue; }
             if (SameStart(s.cfg, f->cfg)) { p.alreadySet++; continue; }
@@ -523,7 +594,7 @@ Plan BuildDefault(bool stock, int tab, const std::vector<SvcItem>& items, const 
             p.notes.push_back(L"This PC's component manifests could not be read, so only Hadron's KB is used: " + c.sxs->err);
         int withStock = 0, total = 0, shown = 0;
         for (auto& s : items) {
-            if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance) continue;
+            if (!OnTab(s, (Tab)tab) || s.kind == Kind::UserInstance || s.RegOnly()) continue;
             total++;
             if (s.cfgUnknown) continue;   // R2: CheckGuard would refuse it anyway
             StockPick k = StockFor(s, c);
@@ -609,15 +680,26 @@ Plan BuildCustom(const CustomPreset& cp, const std::vector<SvcItem>& items, cons
         for (auto& i : items) if (IEq(i.name, ci.name) && i.kind != Kind::UserInstance) { s = &i; break; }
         if (!s) { missing.push_back(ci.name); continue; }
         if (!OnTab(*s, (Tab)cp.tab)) { otherTab.push_back(s->name); continue; }
+        if (s->RegOnly()) { dropped.push_back(s->name + L" (registry only: not loaded by the SCM)"); continue; }
         if (s->cfgUnknown) { unreadable++; continue; }   // R2
         // The guards every built-in preset gets: never-touch and never-in-a-preset items, and drivers without sysok.
         Guard g = CheckGuard(*s, c);
         const bool drv = IsDriverType(s->type);
-        if (g.neverTouch || g.neverPreset) { dropped.push_back(s->name + L" (" + g.reason + L")"); continue; }
-        if (drv && !SysOk(*s, c)) {
-            dropped.push_back(s->name + L" (" + std::wstring(s->cfg.start == 1 ? L"a System-start driver" : L"a driver") +
-                              L" that Hadron's KB does not list as safe to change)");
-            continue;
+        // The protected-items override offers what only these guards drop, unticked and marked (never OverrideRefusal's).
+        const std::wstring refusal = OverrideRefusal(*s);
+        const bool lift = c.overrideProtected && refusal.empty() && ci.target.start >= 2;
+        std::wstring protWhy;
+        if (g.neverTouch || g.neverPreset) {
+            if (!lift) {
+                dropped.push_back(s->name + L" (" + g.reason + (c.overrideProtected && !refusal.empty() ? L"; not even with the override: " + refusal : L"") + L")");
+                continue;
+            }
+            protWhy = g.reason;
+        } else if (drv && !SysOk(*s, c)) {
+            std::wstring why = std::wstring(s->cfg.start == 1 ? L"a System-start driver" : L"a driver") +
+                               L" that Hadron's KB does not list as safe to change";
+            if (!lift) { dropped.push_back(s->name + L" (" + why + L")"); continue; }
+            protWhy = why;
         }
         if (SameStart(s->cfg, ci.target)) { p.alreadySet++; continue; }
         PlanRow r;
@@ -645,11 +727,14 @@ Plan BuildCustom(const CustomPreset& cp, const std::vector<SvcItem>& items, cons
                 else if (h == 2) r.include = false;
             }
         }
+        if (!protWhy.empty() && r.blocked.empty()) MakeProtected(&r, protWhy);
         if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
         p.rows.push_back(std::move(r));
     }
     DependencyCheck(&p, items);
     SortRows(&p);
+    for (auto& r : p.rows)
+        if (r.protectedRow && r.blocked.empty()) { p.notes.insert(p.notes.begin(), kProtNote); break; }
     p.notes.push_back(L"Your custom preset \"" + cp.name + L"\": nothing is changed until you press Apply, and the apply is "
                       L"snapshotted and undoable like every plan.");
     if (!dropped.empty())
@@ -700,15 +785,31 @@ Plan BuildSingle(const SvcItem& s, StartCfg target, const std::vector<SvcItem>& 
     r.reason = L"your choice in the detail pane";
     r.basis = L"user";
     Guard g = CheckGuard(s, c);
+    // The protected-items override lifts never-touch and the Boot/System-start driver rule, never OverrideRefusal's cases.
+    const std::wstring refusal = OverrideRefusal(s);
+    const bool lift = c.overrideProtected && refusal.empty();
     if (s.kind == Kind::UserInstance) r.blocked = L"Per-user instance: change its template instead";
-    else if (g.neverTouch) r.blocked = L"Protected: " + g.reason;
+    else if (g.neverTouch && lift) MakeProtected(&r, g.reason);
+    else if (g.neverTouch) r.blocked = L"Protected: " + g.reason + (c.overrideProtected ? L". Not even with the override: " + refusal : L"");
     else if (target.start < 2) r.blocked = L"Hadron never sets Boot or System start";
     // R6: lowering a System-start driver could never be put back by Hadron (Undo, a single change and Default all
     // refuse to set System start without the KB's clearance), so a single change needs the same clearance a preset does.
-    else if (r.driver && s.cfg.start < 2 && !SysOk(s, c)) r.blocked = kSysStartKept;
-    else if (c.tiOn && IEq(s.name, L"TrustedInstaller")) r.blocked = L"Not while the TrustedInstaller toggle is on: the toggle needs this service";
+    else if (r.driver && s.cfg.start < 2 && !SysOk(s, c)) {
+        if (lift) MakeProtected(&r, std::wstring(kSysStartKept).substr(11));   // without "Protected: "
+        else r.blocked = kSysStartKept;
+    } else if (c.tiOn && IEq(s.name, L"TrustedInstaller")) r.blocked = L"Not while the TrustedInstaller toggle is on: the toggle needs this service";
     else if (target.start == 2 && target.delayed == 1 && !s.group.empty())
         r.blocked = L"Windows doesn't allow a delayed auto-start service in a load-order group (" + s.group + L"): use Auto";
+    // With the override on, a launch-protected item says plainly that Windows refuses it (off, the plan is as before).
+    if (r.blocked.empty() && c.overrideProtected && s.protect != 0)
+        r.blocked = L"Launch-protected (" + ProtectName(s.protect) + L"): Windows itself refuses this change, so the override doesn't offer it";
+    if (r.protectedRow) {   // the checks after the lifted guard still apply
+        if (target.start < 2) r.blocked = L"Hadron never sets Boot or System start";
+        else if (c.tiOn && IEq(s.name, L"TrustedInstaller")) r.blocked = L"Not while the TrustedInstaller toggle is on: the toggle needs this service";
+        else if (target.start == 2 && target.delayed == 1 && !s.group.empty())
+            r.blocked = L"Windows doesn't allow a delayed auto-start service in a load-order group (" + s.group + L"): use Auto";
+        if (!r.blocked.empty()) r.protectedRow = false;   // refused after all: not a protected row (review R1)
+    }
     if (!r.blocked.empty()) { r.include = false; r.canToggle = false; }
     if (r.blocked.empty() && r.before.start == r.after.start && r.before.Delayed() == r.after.Delayed()) {
         p.alreadySet = 1;
@@ -716,8 +817,10 @@ Plan BuildSingle(const SvcItem& s, StartCfg target, const std::vector<SvcItem>& 
         return p;
     }
     const bool drv = r.driver;
+    const bool prot = r.protectedRow && r.blocked.empty();
     p.rows.push_back(std::move(r));
     DependencyCheck(&p, items);
+    if (prot) p.notes.insert(p.notes.begin(), kProtNote);
     if (!drv) p.notes.push_back(L"Manual doesn't stop trigger starts; Disabled does. Hadron never removes triggers.");
     p.notes.push_back(L"Takes effect at the next restart (or the next start of the service); Hadron never restarts the PC.");
     return p;
@@ -851,8 +954,13 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items
             r.include = false;
             r.warning = L"changed since Hadron set it: now " + StartLabel(now, false) + L" (unticked; tick to restore anyway)";
         }
-        if (std::wstring g = TargetGuard(live, u0.before, c); !g.empty()) { r.blocked = g; r.include = false; r.canToggle = false; }
-        else if (viaReg) {
+        bool lift = false;
+        // Review R1: only a row an override apply marked is lifted, only back to its logged before value.
+        // Review A1: and only a row the apply finished (D ok) whose override target was not Boot or System.
+        const bool marked = u0.prot && u0.after.start >= 2 && u0.hasD && u0.result == L"ok";
+        if (std::wstring g = TargetGuard(live, u0.before, c, &lift, marked); !g.empty()) {
+            ProtectedOrBlocked(&r, &p, g, lift && marked, viaReg, c);
+        } else if (viaReg) {
             if (std::wstring w = RegRowRefusal(live, rv, now, u0.before, &c); !w.empty()) {
                 r.blocked = L"Registry fallback refused: " + w; r.include = false; r.canToggle = false;
             }
@@ -864,6 +972,8 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items
     DependencyCheck(&p, items);
     SortRows(&p);
     p.notes.push_back(L"Undo restores only the start values Hadron changed, from the values recorded before the change.");
+    for (auto& r : p.rows)
+        if (r.protectedRow && r.blocked.empty()) { p.notes.insert(p.notes.begin(), kProtNote); break; }
     return p;
 }
 
@@ -872,6 +982,7 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
     p.kind = PlanKind::Resume;
     p.source = L"resume:" + log.stamp;
     p.title = L"Resume the apply of " + StampText(log.stamp);
+    const bool undoOf = log.source.rfind(L"undo:", 0) == 0;
     if (std::wstring why = LogRefusal(log, c); !why.empty()) { p.notes.push_back(why); return p; }
     if (std::wstring bad = BadRecordsNote(log); !bad.empty()) p.notes.push_back(bad);
     for (auto& u : log.rows) {
@@ -911,8 +1022,13 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
             r.include = false;
             r.warning = L"changed since the plan: now " + StartLabel(now, false) + L" (unticked)";
         }
-        if (std::wstring g = TargetGuard(live, u.after, c); !g.empty()) { r.blocked = g; r.include = false; r.canToggle = false; }
-        else if (viaReg) {
+        bool lift = false;
+        // Review R1: a resume lifts only a marked row of an undo's log, whose planned value is the value the undone
+        // apply's log recorded before it. A protected forward change is never resumed: apply it again, or undo it.
+        const bool marked = u.prot && undoOf;
+        if (std::wstring g = TargetGuard(live, u.after, c, &lift, marked); !g.empty()) {
+            ProtectedOrBlocked(&r, &p, g, lift && marked, viaReg, c);
+        } else if (viaReg) {
             if (std::wstring w = RegRowRefusal(live, rv, now, u.after, &c); !w.empty()) {
                 r.blocked = L"Registry fallback refused: " + w; r.include = false; r.canToggle = false;
             }
@@ -922,6 +1038,8 @@ Plan BuildResume(const UndoLog& log, Backend& b, const std::vector<SvcItem>& ite
     DependencyCheck(&p, items);
     SortRows(&p);
     p.notes.push_back(L"Resume re-plans the rows the interrupted apply never finished, against the live state.");
+    for (auto& r : p.rows)
+        if (r.protectedRow && r.blocked.empty()) { p.notes.insert(p.notes.begin(), kProtNote); break; }
     return p;
 }
 
@@ -1245,6 +1363,19 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     snap.meta[L"machine"] = env.machine;
     snap.meta[L"source"] = p.source;
     if (!b.Enumerate(&snap.items, &err)) { r->aborted = true; r->error = L"Could not read the services for the snapshot: " + err; return false; }
+    {
+        // Review R4: a row the enumeration missed (the page read it from the SCM by name, collect.h) is in the snapshot
+        // too, read the same way; one the SCM won't open now is caught by the row's own Query below.
+        std::set<std::wstring> have;
+        for (auto& i : snap.items) have.insert(Lower(i.name));
+        for (size_t i : order) {
+            const std::wstring& n = p.rows[i].name;
+            if (have.count(Lower(n))) continue;
+            SvcItem x;
+            std::wstring qe;
+            if (b.Query(n, &x, &qe)) { x.src = SvcItem::Source::ScmDirect; have.insert(Lower(n)); snap.items.push_back(std::move(x)); }
+        }
+    }
     std::wstring snapRel = L"snap-" + r->stamp + L".txt";
     if (!st.WriteNew(snapRel, WriteSnapshot(snap), &err)) { r->aborted = true; r->error = err; return false; }
     r->snapPath = st.Path(snapRel);
@@ -1273,9 +1404,11 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
     if (!put(Record({L"B", r->stamp, Esc(p.source), Num((int)order.size()), env.machine, env.build, Num(order1)}))) return false;
     for (size_t k = 0; k < order.size(); k++) {
         const PlanRow& row = p.rows[order[k]];
-        if (!put(Record({L"P", Num((int)k + 1), Esc(row.name), L"start", CfgText(row.before), CfgText(row.after),
-                         row.viaReg ? kRegIdentity : row.needsTi ? L"ti" : L"admin"})))
-            return false;
+        // "prot": a row the protected-items override freed; only such a row's undo may be lifted again (review R1).
+        std::vector<std::wstring> rec{L"P", Num((int)k + 1), Esc(row.name), L"start", CfgText(row.before), CfgText(row.after),
+                                      row.viaReg ? kRegIdentity : row.needsTi ? L"ti" : L"admin"};
+        if (row.protectedRow) rec.push_back(L"prot");
+        if (!put(Record(rec))) return false;
     }
 
     // TrustedInstaller, once, only if a ticked row needs it and the toggle is on.
@@ -1351,8 +1484,9 @@ bool RunApply(const Plan& p, const ApplyEnv& env, ApplyResult* r) {
             continue;
         }
         if (row.viaReg) {   // the toggle, and every refusal, checked again on the live item at write time
-            std::wstring why = !env.regFallbackOn ? std::wstring(L"the registry fallback is off for this apply")
-                                                  : RegRowRefusal(live, rv, row.before, row.after, env.ctx);
+            std::wstring why = row.protectedRow ? std::wstring(L"a protected row is never written through the registry")
+                               : !env.regFallbackOn ? std::wstring(L"the registry fallback is off for this apply")
+                                                    : RegRowRefusal(live, rv, row.before, row.after, env.ctx);
             if (!why.empty()) {
                 if (lowering) failedLowering.insert(Lower(row.name));
                 if (!done(L"skip", have, L"not written to the registry: " + why)) return false;
@@ -1544,7 +1678,8 @@ bool IsUndoLog(const std::vector<UndoLog>& logs, int k) {
 }
 
 bool IsResolutionLog(const UndoLog& l) {
-    return l.source.rfind(L"dismiss:", 0) == 0 || l.source.rfind(L"ti-resolved:", 0) == 0;
+    // "ti-read": a load's TrustedInstaller claim (review R2), never an apply to resume or undo.
+    return l.source.rfind(L"dismiss:", 0) == 0 || l.source.rfind(L"ti-resolved:", 0) == 0 || l.source == L"ti-read";
 }
 
 // A finished "dismiss:<stamp of logs[i]>" log exists.
@@ -1743,6 +1878,7 @@ std::wstring SourceLabel(const std::wstring& source) {
         return L"the custom preset \"" + (colon == std::wstring::npos ? rest : rest.substr(colon + 1)) + L"\" (" + tab + L")";
     }
     if (source == L"single") return L"a single start-type change";
+    if (source == L"ti-read") return L"the TrustedInstaller read";
     if (!after(L"undo:").empty()) return L"the undo of the apply of " + StampText(after(L"undo:"));
     if (!after(L"resume:").empty()) return L"the resume of the apply of " + StampText(after(L"resume:"));
     return source;
@@ -1813,7 +1949,7 @@ void MarkTiStop(Plan* p, const std::vector<UndoLog>& logs, const std::vector<Svc
     p->tiPstart = c.pstart;
     for (auto& r : p->rows)
         if (r.ctl == Op::Stop && IEq(r.name, L"TrustedInstaller") && r.blocked.empty())
-            r.reason = L"Hadron started this process (" + std::to_wstring(c.pid) + L") for the apply of " + StampText(c.stamp) +
+            r.reason = L"Hadron started this process (" + std::to_wstring(c.pid) + L") for " + (c.source == L"ti-read" ? L"the TrustedInstaller read of " : L"the apply of ") + StampText(c.stamp) +
                        L" and has no record of stopping it. Its start type is " + StartLabel(ti->cfg, ti->trigger) +
                        L": Windows starts it again when it next installs updates or features (reasoning).";
 }
@@ -2001,6 +2137,7 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
     // would make Default (first snapshot) and recovery\first write a value this PC never had.
     int unreadable = 0;
     for (auto& i : items) {
+        if (i.RegOnly()) continue;   // not a service the SCM has: nothing to record or restore
         if (i.cfgUnknown) { unreadable++; continue; }
         snap.items.push_back(i);
         snap.items.back().company.clear();   // the file's claim, not configuration
@@ -2020,6 +2157,92 @@ FirstRunResult EnsureFirstSnapshot(Store& s, const std::vector<SvcItem>& items, 
     r.wrote = true;
     EnsureFirstRecovery(s, parsed, c, &r);
     return r;
+}
+
+// ---- the TrustedInstaller read's claim (review R2) ---------------------------------------------------------
+namespace {
+class TiReadClaim : public TiClaimLog {
+public:
+    TiReadClaim(const Store& st, std::wstring machine, std::wstring build, std::wstring lockName)
+        : st_(st), machine_(std::move(machine)), build_(std::move(build)), lockName_(std::move(lockName)) {}
+    ~TiReadClaim() override { End(); }
+    bool Begin(std::wstring* err) override {
+        std::wstring e;
+        if (!lock_.Acquire(lockName_, &e)) { *err = L"another Hadron window holds the apply lock (" + e + L")"; return false; }
+        if (!st_.EnsureRoot(true, &e)) { *err = L"the data folder can't hold the record (" + e + L")"; lock_.Release(); return false; }
+        const int order = NextOrder(LoadLogs(st_, nullptr));
+        stamp_ = st_.NewStamp();
+        if (!log_.Open(st_.Path(L"undo-" + stamp_ + L".log"), &e) || !log_.Append("HXSVC\t1\tundo\n", &e) ||
+            !log_.Append(Record({L"B", stamp_, L"ti-read", L"0", machine_, build_, std::to_wstring(order)}), &e) ||
+            !log_.Append(Record({L"T", L"starting"}), &e)) {
+            *err = L"the record could not be written (" + e + L")";
+            open_ = true;   // End closes what was written; an unfinished ti-read log is never offered as an apply
+            End();
+            return false;
+        }
+        open_ = true;
+        return true;
+    }
+    bool Started(DWORD pid, uint64_t pstart, std::wstring* err) override {
+        return open_ && log_.Append(Record({L"T", L"started", std::to_wstring(pid), Hex16(pstart)}), err);
+    }
+    bool NotStarted(std::wstring* err) override { return open_ && log_.Append(Record({L"T", L"notstarted"}), err); }
+    void Stopped(bool ok, const std::wstring& note) override {
+        std::wstring e;
+        if (open_) log_.Append(ok ? Record({L"T", L"stopped"}) : Record({L"T", L"stopfailed", Esc(note)}), &e);
+    }
+    void End() override {
+        if (!open_) return;
+        open_ = false;
+        std::wstring e;
+        log_.Append(Record({L"E", stamp_, L"0", L"0", L"0", L"done"}), &e);
+        log_.Close();
+        lock_.Release();
+    }
+private:
+    Store st_;
+    std::wstring machine_, build_, lockName_, stamp_;
+    ApplyLock lock_;
+    LogWriter log_;
+    bool open_ = false;
+};
+}  // namespace
+
+std::unique_ptr<TiClaimLog> MakeTiReadClaim(const Store& st, const std::wstring& machine, const std::wstring& build,
+                                            const std::wstring& lockName) {
+    return std::make_unique<TiReadClaim>(st, machine, build, lockName);
+}
+
+// ---- StartOverride notes and the TrustedInstaller read's history (review A2, A3) ------------------------------
+const wchar_t kStartOverrideNote[] =
+    L"Windows applies StartOverride over Start, so this change may not take effect (reasoning, not tested)";
+
+void AddStartOverrideNotes(Plan* p, const std::vector<SvcItem>& items) {
+    std::vector<std::wstring> names;
+    for (auto& r : p->rows) {
+        const SvcItem* s = nullptr;
+        for (auto& i : items) if (IEq(i.name, r.name)) { s = &i; break; }
+        if (!s || s->startOverride.empty()) continue;
+        if (r.evidence.find(kStartOverrideNote) == std::wstring::npos)
+            r.evidence = r.evidence.empty() ? std::wstring(kStartOverrideNote) : r.evidence + L"; " + kStartOverrideNote;
+        names.push_back(r.name);
+    }
+    if (names.empty()) return;
+    std::wstring n = L"StartOverride (" + Join(names, L", ") + L"): " + kStartOverrideNote + L".";
+    for (auto& x : p->notes) if (x == n) return;
+    p->notes.push_back(n);
+}
+
+void DropClosedTiReads(std::vector<UndoLog>* logs) {
+    std::vector<UndoLog> keep;
+    keep.reserve(logs->size());
+    for (auto& l : *logs) {
+        // A finished read whose TrustedInstaller was never started, or was stopped again, holds nothing anyone needs:
+        // left on disk (never deleted), left out of the page's history. An open claim stays for the banner.
+        const bool closed = l.source == L"ti-read" && l.hasE && (l.tiNotStarted || l.tiStopped || !l.tiStarting);
+        if (!closed) keep.push_back(l);
+    }
+    *logs = std::move(keep);
 }
 
 }  // namespace hx::services

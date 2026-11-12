@@ -10,6 +10,14 @@ it was designed.
   state, start type (including Auto-delayed and the trigger-start flag), type, account, image path, Company and
   Hadron's preset verdict. Every column sorts; F3 filters; the lists are keyboard-navigable. Per-user instances
   such as `CDPUserSvc_4f2a1` are folded onto their template.
+- **Every Services key is listed.** The SCM's list is cross-checked against every subkey of the current control
+  set's `Services` key. A key the SCM's list missed is read from the SCM by name; a key the SCM doesn't have is a
+  read-only "Registry only (not loaded by the SCM)" row that no plan, preset or undo can use. On the owner's PC that
+  is 744 keys: 693 from the SCM and 51 registry-only.
+- **StartOverride.** A driver whose registry Start differs from the SCM's because of a `StartOverride` subkey shows
+  e.g. "Manual (registry: Boot, StartOverride)", with a sortable Registry Start column on the Drivers tab. That is
+  why 49 inbox boot drivers on the owner's PC looked missing from Boot-start. They stay protected as Boot-start;
+  Hadron never writes StartOverride.
 - **Detail pane** for the selected item:
   - Hadron's explanation, for stock Windows items only, with its **basis** (rule 7) and, where the effect depends on
     workload, how to test it yourself;
@@ -36,8 +44,16 @@ it was designed.
     Microsoft items with a basis only; third-party and OEM items are never in a preset.
 - **Single-item changes:** start type for both tabs; Start, Stop and Restart for services. Drivers are never loaded
   or unloaded live.
-- **TrustedInstaller toggle** (rule 4): off at every launch and never saved. When on, the writes admin can't make run
-  on a thread impersonating TrustedInstaller, and TI is put back the way it was found.
+- **TrustedInstaller toggle** (rule 4): off at every launch and never saved. When on, the list is read again as
+  TrustedInstaller and the status line says how many items and configs that added (0 included); the writes admin
+  can't make run on a thread impersonating TrustedInstaller, and TI is put back the way it was found (a flushed
+  `ti-read` claim covers a start for the read pass).
+- **Protected-items override** (owner's request): "Allow changes to protected items" on Single and custom-preset
+  plans (Console F4), with the owner's warning. Off at every start, never saved, reset when the plan closes and after
+  every apply. Protected rows become tickable but start unticked and red PROTECTED, and a second confirmation lists
+  each one. Never for launch-protected, registry-only or unreadable items, never a Boot or System target, never
+  through the registry fallback; built-in presets, Default and Stock are unchanged. The apply marks those rows
+  `prot` in the undo log, and only marked rows can be undone back to their logged value.
 - **Undo** of any apply, and **Resume or Undo** of an apply that was interrupted (crash, power loss).
 - **Signer column** (Authenticode, checked offline: no revocation or network fetch; cloud placeholders, links and
   network paths are not read): "Signed: <name>", "Catalog-signed", "Unsigned", "Not trusted" or "Can't check", with why.
@@ -60,9 +76,10 @@ it was designed.
 
 ### What it never does
 - It never restarts the PC. Presets change only `Start` and `DelayedAutostart`, effective at the next restart.
-- It never touches Boot-start drivers, filters, the boot storage chain, ErrorControl-Critical drivers, the floor
-  (RPC, DCOM, LSA, event log, audio, networking, Hadron's own dependencies), or Hyper-V drivers while the hypervisor
-  runs. A System-start driver is lowered only with a curated `sysok` entry.
+- Without the protected-items override, it never touches Boot-start drivers, filters, the boot storage chain,
+  ErrorControl-Critical drivers, the floor (RPC, DCOM, LSA, event log, audio, networking, Hadron's own dependencies),
+  or Hyper-V drivers while the hypervisor runs. A System-start driver is lowered only with a curated `sysok` entry.
+  Presets never touch them, even with the override on.
 - Protected (PPL) services, the Defender/Security stack, TrustedInstaller, VSS and swprv are never in a preset.
 - It never creates or deletes a service, and never deletes a registry key (CI greps for those APIs).
 - It never shows a predicted saving. The only numbers on the Measure page are values it recorded on this PC.
@@ -93,6 +110,7 @@ The safety mechanics, file formats and every resolved ambiguity are in `docs/des
 | Path | Role |
 |---|---|
 | `modules/services/module.cpp` | The UI (`hx::Module`): both lists, the detail pane, plans, banners, both layouts |
+| `modules/services/collect.*` | The load: SCM list cross-checked with every Services key, StartOverride, the TrustedInstaller read pass, `--dump-list-live` |
 | `modules/services/model.*` | Pure data: `SvcItem`, `StartCfg`, names, image paths, per-user folding |
 | `modules/services/kb.*` | Loads the embedded `services.db` (RCDATA `SERVICES_KB`) |
 | `modules/services/hw.*` | Hardware evidence (a pure part that reads a dump, and the live CfgMgr32 part) |
@@ -106,7 +124,7 @@ The safety mechanics, file formats and every resolved ambiguity are in `docs/des
 | `modules/services/custom.*` | Custom presets: the `HXPRESET 1` format, the preset store, export and import |
 | `modules/services/measure.*` | Before/after measurements: taking, storing and pairing records |
 | `modules/services/ti.*` | TrustedInstaller impersonation (module-local; moving it to core is a lead follow-up) |
-| `modules/services/selftest.cpp`, `cli.h`, `standalone.cpp` | `--selftest` (282 checks), `--dump-plan`, and `--live-test` (test-hooks build only) |
+| `modules/services/selftest.cpp`, `cli.h`, `standalone.cpp` | `--selftest` (484 checks, plus `selftest_visibility.cpp`), `--dump-plan`, the read-only `--dump-list-live`, and `--live-test` (test-hooks build only) |
 | `tools/services/kb.py`, `genkb.py` | KB source (289 entries) and the rule-7 gate (`tools/services/README.md`) |
 | `tests/fixtures/services/` | The fixture machine plus `delayedlinger`, `forged`, `interrupted` and `multi` regression cases |
 | `tests/golden/services/` | 11 plan goldens and the generated restore scripts |

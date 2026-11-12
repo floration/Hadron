@@ -50,6 +50,11 @@ void MarkRegFallback(Plan* p, Backend& b, bool regOn, bool tiOn, const std::vect
             continue;
         }
         if (!regOn || tiOn) continue;
+        if (r.protectedRow) {   // the protected-items override goes through the service manager only, never the registry
+            r.regRefused = L"a protected row: the override changes it through the service manager only";
+            refused++;
+            continue;
+        }
         bool denied = false;
         std::wstring e;
         if (b.CanWrite(r.name, &denied, &e) || !denied) continue;   // the SCM takes it (or refuses for another reason)

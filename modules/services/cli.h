@@ -37,6 +37,9 @@ int RunSelftest(const std::vector<std::wstring>& args, const UiChecks& ui = {});
 int RunDumpPlan(const std::vector<std::wstring>& args);
 // --dump-stock-live [--out <file>]: the live WinSxS reader's values as TSV (read only; Release and test builds).
 int RunDumpStockLive(const std::vector<std::wstring>& args);
+// --dump-list-live [--ti on] --out <file>: every row the page would list (SCM, read by name, registry only), as TSV with
+// counts (collect.h). Read only; TrustedInstaller only when already running (Release and test builds).
+int RunDumpListLive(const std::vector<std::wstring>& args);
 // --live-test <HadronTest*> [--ti] [--data-dir <dir>]: plan, apply, verify, undo, verify on one dummy
 // service that the CI script created. Refuses any other name. Only in a -DHADRON_SERVICES_TEST_HOOKS=ON build (R25):
 // a release build prints that it is not in this build and returns 2.

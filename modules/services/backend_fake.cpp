@@ -5,6 +5,37 @@
 
 namespace hx::services {
 
+// regkeys.txt: "HXSVC 1 regkeys", then K <name> <type hex|-> <start|-> <image> <display> <group> <link 0|1>.
+bool ParseRegKeys(const std::string& utf8, std::vector<RegSvcKey>* out, std::wstring* err) {
+    out->clear();
+    std::wstring all = FromUtf8(utf8);
+    auto lines = Split(all, L'\n');
+    for (auto& l : lines) if (!l.empty() && l.back() == L'\r') l.pop_back();
+    if (lines.empty() || lines[0] != L"HXSVC\t1\tregkeys") { *err = L"not a Hadron regkeys file (header)"; return false; }
+    for (size_t n = 1; n < lines.size(); n++) {
+        if (lines[n].empty()) continue;
+        auto f = Split(lines[n], L'\t');
+        if (f[0] != L"K" || f.size() < 8 || f[1].empty()) { *err = L"line " + std::to_wstring(n + 1) + L": not a K line of 8 fields"; return false; }
+        RegSvcKey k;
+        k.name = Unesc(f[1]);
+        k.type = f[2] == L"-" ? -1 : (long long)wcstoul(f[2].c_str(), nullptr, 16);
+        k.start = f[3] == L"-" ? -1 : _wtoi(f[3].c_str());
+        k.image = Unesc(f[4]);
+        k.display = Unesc(f[5]);
+        k.group = Unesc(f[6]);
+        k.link = f[7] == L"1";
+        // Optional 9th field: StartOverride values, "0=3;1=3;2=3".
+        if (f.size() >= 9 && !f[8].empty() && f[8] != L"-")
+            for (auto& kv : Split(f[8], L';')) {
+                size_t eq = kv.find(L'=');
+                if (eq == std::wstring::npos || eq == 0) { *err = L"line " + std::to_wstring(n + 1) + L": StartOverride is not name=value"; return false; }
+                k.startOverride.push_back({kv.substr(0, eq), (DWORD)wcstoul(kv.c_str() + eq + 1, nullptr, 10)});
+            }
+        out->push_back(std::move(k));
+    }
+    return true;
+}
+
 bool FakeBackend::Load(const std::wstring& dir, std::wstring* err) {
     Store s(dir);
     std::string text;
@@ -39,6 +70,13 @@ bool FakeBackend::Load(const std::wstring& dir, std::wstring* err) {
     if (s.Exists(L"events7040.txt")) {
         if (!s.Read(L"events7040.txt", &ev, &eerr) || !ParseEventsFixture(ev, &events_, &eerr)) { *err = L"events7040.txt: " + eerr; return false; }
     }
+    // Registry-only keys (optional, fix/svcdrv-visibility): Services keys the fake SCM does not have.
+    extraKeys_.clear();
+    if (s.Exists(L"regkeys.txt")) {
+        std::string rk;
+        std::wstring rerr;
+        if (!s.Read(L"regkeys.txt", &rk, &rerr) || !ParseRegKeys(rk, &extraKeys_, &rerr)) { *err = L"regkeys.txt: " + rerr; return false; }
+    }
     DWORD a = GetFileAttributesW((dir + L"\\sxs").c_str());
     sxsDir_ = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) ? dir + L"\\sxs" : L"";
     return true;
@@ -49,16 +87,74 @@ SvcItem* FakeBackend::Find(const std::wstring& name) {
     return nullptr;
 }
 
+namespace {
+// What the administrator gets for an item whose configuration only TrustedInstaller may read (fixture cfg=ti), the way
+// the live backend keeps an item ReadOne could not read.
+SvcItem AdminUnreadable(const SvcItem& i) {
+    SvcItem u;
+    u.name = i.name;
+    u.state = i.state;
+    u.type = i.type;
+    u.kind = KindOf(i.type);
+    u.readError = std::wstring(kCfgUnreadable) + L": QueryServiceConfig: Access is denied.";
+    u.cfgUnknown = true;
+    return u;
+}
+}  // namespace
+
 bool FakeBackend::Enumerate(std::vector<SvcItem>* out, std::wstring* err) {
     (void)err;
     out->clear();
-    for (auto& i : items_) if (!faults.vanish.count(Lower(i.name))) out->push_back(i);
+    lastEnum = EnumStats{};
+    lastEnum.mask = 0x3FF;
+    lastEnum.masksTried = L"fake";
+    for (auto& i : items_) {
+        if (faults.vanish.count(Lower(i.name)) || i.fxEnumMiss) continue;
+        if (i.fxTiOnly && !asTi) continue;   // the administrator's enumeration doesn't return it
+        out->push_back(i.fxCfgTi && !asTi ? AdminUnreadable(i) : i);
+        if (out->back().cfgUnknown) lastEnum.unreadable++;
+        lastEnum.raw++;
+        if (IsDriverType(i.type)) lastEnum.rawDrivers++;
+    }
+    lastEnum.pages = lastEnum.raw ? 1 : 0;
+    return true;
+}
+
+bool FakeBackend::ListServiceKeys(std::vector<RegSvcKey>* out, bool* partial, std::wstring* err) {
+    out->clear();
+    *partial = false;
+    for (auto& i : items_) {
+        if (faults.vanish.count(Lower(i.name))) continue;
+        RegSvcKey k;
+        k.name = i.name;
+        k.type = i.type;
+        k.start = i.regStart >= 0 ? i.regStart : i.cfg.start;
+        k.image = i.image;
+        k.display = i.display;
+        k.group = i.group;
+        out->push_back(std::move(k));
+    }
+    // regkeys.txt: a K line naming an item adds to that item's key (its raw Start and StartOverride); others are keys
+    // the SCM does not have.
+    for (auto& k : extraKeys_) {
+        RegSvcKey* have = nullptr;
+        for (auto& o : *out) if (IEq(o.name, k.name)) have = &o;
+        if (!have) { out->push_back(k); continue; }
+        if (k.start >= 0) have->start = k.start;
+        have->startOverride = k.startOverride;
+    }
+    if (keysStopAt >= 0 && (int)out->size() > keysStopAt) {
+        out->resize(keysStopAt);
+        *partial = true;
+        *err = L"RegEnumKeyEx: The system cannot find the file specified.";
+    }
     return true;
 }
 
 bool FakeBackend::Query(const std::wstring& name, SvcItem* out, std::wstring* err) {
     SvcItem* i = Find(name);
     if (!i || faults.vanish.count(Lower(name))) { *err = L"The specified service does not exist as an installed service."; return false; }
+    if ((i->fxTiOnly || i->fxCfgTi) && !asTi) { *err = L"Access is denied."; return false; }
     if (auto sp = faults.stopPendingQueries.find(Lower(name)); sp != faults.stopPendingQueries.end() && i->state == SERVICE_STOP_PENDING) {
         if (sp->second-- <= 0) { i->state = SERVICE_STOPPED; faults.stopPendingQueries.erase(sp); }
     }

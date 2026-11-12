@@ -18,11 +18,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     for (int i = 1; argv && i < argc; i++) args.push_back(argv[i]);
     if (argv) LocalFree(argv);
     for (auto& a : args) {
-        if (a == L"--dump-plan" || a == L"--live-test" || a == L"--dump-stock-live") {
+        if (a == L"--dump-plan" || a == L"--live-test" || a == L"--dump-stock-live" || a == L"--dump-list-live") {
             AttachConsole(ATTACH_PARENT_PROCESS);
-            int rc = a == L"--dump-plan" ? hx::services::RunDumpPlan(args)
-                     : a == L"--live-test" ? hx::services::RunLiveTest(args)
-                                           : hx::services::RunDumpStockLive(args);
+            int rc = a == L"--dump-plan"         ? hx::services::RunDumpPlan(args)
+                     : a == L"--live-test"       ? hx::services::RunLiveTest(args)
+                     : a == L"--dump-list-live"  ? hx::services::RunDumpListLive(args)
+                                                 : hx::services::RunDumpStockLive(args);
             fflush(stdout);
             return rc;
         }

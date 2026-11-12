@@ -46,6 +46,7 @@ struct UndoRow {
     int seq = 0;
     std::wstring name, identity;
     StartCfg before, after;
+    bool prot = false;   // P record's "prot": the protected-items override freed this row (review R1)
     bool hasI = false, hasD = false;
     StartCfg observed, afterObs;
     std::wstring result, text, iIdentity;

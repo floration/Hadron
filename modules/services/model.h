@@ -48,6 +48,28 @@ struct SvcItem {
     bool cfgUnknown = false;
     uint64_t pstart = 0;               // creation time (FILETIME) of process pid, 0 when unknown (TrustedInstaller claim)
     bool aclTi = false;                // fixture only: an admin write is refused (needs TrustedInstaller)
+    // Fixture only (X lines): the fake's enumeration leaves it out but a read by name finds it (enum=miss); the
+    // administrator can't see it at all, TrustedInstaller can (scm=ti); its configuration is readable only as
+    // TrustedInstaller (cfg=ti).
+    bool fxEnumMiss = false, fxTiOnly = false, fxCfgTi = false;
+    // Where the row came from (fix/svcdrv-visibility). Scm: the SCM's enumeration. ScmDirect: a Services key the
+    // enumeration did not return, read from the SCM by name. Registry: a Services key the SCM does not have (or would
+    // not open): read-only, never planned, written, recorded or restored (cfgUnknown is set too); regWhy says why.
+    enum class Source { Scm, ScmDirect, Registry } src = Source::Scm;
+    std::wstring regWhy;               // Registry: why it is registry-only (shown in the detail pane)
+    bool regLink = false;              // Registry: the key is a registry link (a leaf: never followed or read)
+    bool regNoType = false;            // Registry: the key has no Type value (shown on the Services tab, labelled)
+    bool viaTi = false;                // the row, or its configuration, was read only as TrustedInstaller
+    bool RegOnly() const { return src == Source::Registry; }
+    // The driver key's StartOverride subkey (values named 0, 1, 2..., REG_DWORD), read on the load worker, read only.
+    // Windows uses it to demote unused inbox boot drivers (reasoning): the SCM reports the overridden value, so a
+    // registry Start that differs from cfg.start is not a pending change then. Hadron never writes StartOverride.
+    std::vector<std::pair<std::wstring, DWORD>> startOverride;
+    bool StartOverridden() const {
+        return !RegOnly() && !cfgUnknown && !startOverride.empty() && regStart >= 0 && regStart != cfg.start;
+    }
+    // The registry Start differs from what the SCM reports and no StartOverride explains it: a change waits for a restart.
+    bool PendingRestart() const { return regStart >= 0 && regStart != cfg.start && !StartOverridden(); }
     // Derived after load (FoldInstances).
     Kind kind = Kind::Service;
     std::vector<std::wstring> instances;   // "Name_1a2b3 (Running)" for per-user templates
@@ -61,6 +83,9 @@ std::wstring TypeName(DWORD type);                                   // "Own pro
 std::wstring ErrCtlName(int e);
 std::wstring ProtectName(int p);
 Kind KindOf(DWORD type);
+// "scm", "scm-direct" or "registry": the --dump-list-live source column.
+const wchar_t* SourceName(const SvcItem& s);
+extern const wchar_t kRegOnlyKind[];   // "Registry only (not loaded by the SCM)"
 bool IsDriverType(DWORD type);
 bool OnTab(const SvcItem& s, Tab t);
 // The template name for a per-user instance ("CDPUserSvc_4f2a1" -> "CDPUserSvc"). Only when the type has
