@@ -58,8 +58,8 @@ public:
 
     void SetColumns(std::vector<Column> cols) { cols_ = std::move(cols); }
     void SetRows(std::vector<std::vector<std::wstring>> rows);
-    // Optional, parallel to the rows of the last SetRows; missing entries are Normal. SetRows keeps the
-    // ink vector as it is, so set both together whenever the rows change (re-sort included).
+    // Optional, parallel to the rows of the last SetRows; missing entries are Normal. SetRows clears it,
+    // so call SetRowInk after every SetRows (re-sort included).
     void SetRowInk(std::vector<Ink> ink) { ink_ = std::move(ink); }
     int  RowCount() const { return (int)rows_.size(); }
 

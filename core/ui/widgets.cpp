@@ -116,6 +116,7 @@ int ListView::BodyRows(const RECT& rc, const PaintCtx& c) const {
 
 void ListView::SetRows(std::vector<std::vector<std::wstring>> rows) {
     rows_ = std::move(rows);
+    ink_.clear();   // stale ink would colour the wrong rows after a re-sort; callers set it again
     if (sel_ >= (int)rows_.size()) sel_ = rows_.empty() ? -1 : (int)rows_.size() - 1;
 }
 

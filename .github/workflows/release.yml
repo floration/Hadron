@@ -18,6 +18,10 @@ permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -32,14 +36,19 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::run the release workflow on main"; exit 1; }
             TAG="v${INPUT_VERSION#v}"
-            git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null && { echo "::error::$TAG already exists"; exit 1; }
           else
             TAG="$GITHUB_REF_NAME"
+          fi
+          # Validate before anything reaches GITHUB_ENV (a newline in the input would define extra variables).
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$ ]] || { echo "::error::tag must be vX.Y.Z"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # fetch-depth: 0 fetched every tag; a local check can't fail open on a network error.
+            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then echo "::error::$TAG already exists"; exit 1; fi
           fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
       - name: Tag must be vX.Y.Z on main
         run: |
-          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "::error::tag must be vX.Y.Z"; exit 1; }
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$ ]] || { echo "::error::tag must be vX.Y.Z"; exit 1; }
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::tagged commit is not on main"; exit 1; }
           IFS=. read -r a b c <<< "${TAG#v}"
           for n in $a $b $c; do (( n <= 65535 )) || { echo "::error::version fields must be <= 65535"; exit 1; }; done
@@ -79,3 +88,10 @@ jobs:
         run: |
           # --target only matters when the tag doesn't exist yet (manual run): it is created on this commit.
           gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Hadron ${TAG#v}" --generate-notes
+          # A tag pushed meanwhile on another commit would make GitHub ignore --target: never ship that.
+          got=$(git ls-remote origin "refs/tags/$TAG" | cut -f1)
+          if [ "$got" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG points at ${got:-nothing}, not $GITHUB_SHA; deleting the release"
+            gh release delete "$TAG" --yes || true
+            exit 1
+          fi
