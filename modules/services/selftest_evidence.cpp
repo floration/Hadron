@@ -51,6 +51,9 @@ const SvcItem* Item(const std::vector<SvcItem>& v, const wchar_t* name) {
     for (auto& i : v) if (IEq(i.name, name)) return &i;
     return nullptr;
 }
+// They point into their argument: a temporary would dangle (see ItemOf in selftest.cpp), so it doesn't compile.
+const PlanRow* Row(const Plan&&, const wchar_t*) = delete;
+const SvcItem* Item(const std::vector<SvcItem>&&, const wchar_t*) = delete;
 
 // The Stripped services plan with both markings, as the page builds it (MarkRegFallback, then MarkTi).
 Plan StrippedPlan(EvWorld& w, bool regOn, bool tiOn) {
@@ -88,6 +91,7 @@ const UndoLog* Newest(const std::vector<UndoLog>& logs, const std::wstring& stam
     for (auto& l : logs) if (l.stamp == stamp) return &l;
     return nullptr;
 }
+const UndoLog* Newest(const std::vector<UndoLog>&&, const std::wstring&) = delete;
 
 }  // namespace
 
