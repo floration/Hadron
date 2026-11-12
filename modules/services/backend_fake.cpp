@@ -24,6 +24,13 @@ bool ParseRegKeys(const std::string& utf8, std::vector<RegSvcKey>* out, std::wst
         k.display = Unesc(f[5]);
         k.group = Unesc(f[6]);
         k.link = f[7] == L"1";
+        // Optional 9th field: StartOverride values, "0=3;1=3;2=3".
+        if (f.size() >= 9 && !f[8].empty() && f[8] != L"-")
+            for (auto& kv : Split(f[8], L';')) {
+                size_t eq = kv.find(L'=');
+                if (eq == std::wstring::npos || eq == 0) { *err = L"line " + std::to_wstring(n + 1) + L": StartOverride is not name=value"; return false; }
+                k.startOverride.push_back({kv.substr(0, eq), (DWORD)wcstoul(kv.c_str() + eq + 1, nullptr, 10)});
+            }
         out->push_back(std::move(k));
     }
     return true;
@@ -113,9 +120,9 @@ bool FakeBackend::Enumerate(std::vector<SvcItem>* out, std::wstring* err) {
     return true;
 }
 
-bool FakeBackend::ListServiceKeys(std::vector<RegSvcKey>* out, std::wstring* err) {
-    (void)err;
+bool FakeBackend::ListServiceKeys(std::vector<RegSvcKey>* out, bool* partial, std::wstring* err) {
     out->clear();
+    *partial = false;
     for (auto& i : items_) {
         if (faults.vanish.count(Lower(i.name))) continue;
         RegSvcKey k;
@@ -127,7 +134,20 @@ bool FakeBackend::ListServiceKeys(std::vector<RegSvcKey>* out, std::wstring* err
         k.group = i.group;
         out->push_back(std::move(k));
     }
-    for (auto& k : extraKeys_) out->push_back(k);
+    // regkeys.txt: a K line naming an item adds to that item's key (its raw Start and StartOverride); others are keys
+    // the SCM does not have.
+    for (auto& k : extraKeys_) {
+        RegSvcKey* have = nullptr;
+        for (auto& o : *out) if (IEq(o.name, k.name)) have = &o;
+        if (!have) { out->push_back(k); continue; }
+        if (k.start >= 0) have->start = k.start;
+        have->startOverride = k.startOverride;
+    }
+    if (keysStopAt >= 0 && (int)out->size() > keysStopAt) {
+        out->resize(keysStopAt);
+        *partial = true;
+        *err = L"RegEnumKeyEx: The system cannot find the file specified.";
+    }
     return true;
 }
 

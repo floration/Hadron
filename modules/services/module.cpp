@@ -53,6 +53,7 @@ using namespace hx::services;
 namespace {
 
 namespace { std::wstring StartCellText(const SvcItem& s, bool drift, bool console, bool shortTrig = false); }   // the list's Start type cell (below)
+namespace { std::wstring RegStartCell(const SvcItem& s, bool console); }   // the Registry Start column (below)
 
 constexpr UINT WM_SVC_LOADED = WM_MODULE_BASE + 1;    // load worker -> view
 constexpr UINT WM_SVC_APPLIED = WM_MODULE_BASE + 2;   // apply worker -> view
@@ -904,7 +905,10 @@ void ServicesModule::StartLoad() {
         auto cancelled = [&]() { if (w->Cancelled()) { out->err = L"Loading was cancelled."; return true; } return false; };
         {
             std::unique_ptr<TiProvider> ti = tiRead ? MakeLiveTi(b) : nullptr;
-            if (!CollectItems(*b, ti.get(), true, w->CancelFlag(), &out->items, &out->stats, &err)) {
+            // Review R2: TrustedInstaller is started for the read only after a flushed claim in the data folder, so the
+            // left-running banner covers it; without a writable data folder a stopped TrustedInstaller is left alone.
+            std::unique_ptr<TiClaimLog> claim = tiRead && mayWrite ? MakeTiReadClaim(st, b->MachineGuid(), b->Build()) : nullptr;
+            if (!CollectItems(*b, ti.get(), claim.get(), w->CancelFlag(), &out->items, &out->stats, &err)) {
                 out->err = L"Could not read the services: " + err;
                 return;
             }
@@ -1219,7 +1223,7 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
     for (auto& p : fx.problems) notices_.push_back(p);
     std::vector<SvcItem> items;
     CollectStats cst;
-    CollectItems(*fake_, nullptr, false, nullptr, &items, &cst, &err);   // the fixture's registry-only keys too (regkeys.txt)
+    CollectItems(*fake_, nullptr, nullptr, nullptr, &items, &cst, &err);   // the fixture's registry-only keys too (regkeys.txt)
     FoldInstances(&items);
     HwInfo hw;
     fake_->ReadHw(&hw);
@@ -1365,6 +1369,7 @@ void ServicesModule::Refilter() {
         if (key == L"changed") return ChangedText(s);
         if (key == L"basis") return BasisShort(s);
         if (key == L"image") return Lower(s.image);
+        if (key == L"regstart") return s.regStart >= 0 ? std::to_wstring(s.regStart) + (s.StartOverridden() ? L"1" : L"0") : std::wstring(L"9");
         return Lower(s.name);
     };
     // Keys once per row (the Hadron column runs CheckGuard), not once per comparison.
@@ -1404,6 +1409,7 @@ void ServicesModule::Refilter() {
             else if (k == L"type") r.push_back(s.RegOnly() ? L"Registry only" : s.kind == Kind::FsDriver ? L"File system" : TypeName(s.type));
             else if (k == L"changed") r.push_back(ChangedText(s));
             else if (k == L"basis") r.push_back(BasisShort(s));
+            else if (k == L"regstart") r.push_back(RegStartCell(s, false));
             else if (k == L"image") {
                 ImageInfo im = NormalizeImage(s.image, WindowsDir(), s.name, IsDriverType(s.type));
                 r.push_back(im.path + (im.args.empty() ? L"" : L" " + im.args));
@@ -1689,6 +1695,9 @@ void ServicesModule::ApplyUserTicks() {
         PlanRow& r = plan_.rows[k];
         auto it = userTicks_.find(Lower(r.name));
         if (it == userTicks_.end() || !r.canToggle || !r.blocked.empty()) continue;
+        // Review R3: a protected row always comes back unticked after a rebuild (the override toggled, the TI toggle,
+        // a reload): the user ticks it again on the plan they are looking at.
+        if (r.protectedRow) continue;
         kept++;
         if (r.include == it->second) continue;
         r.include = it->second;
@@ -1802,7 +1811,7 @@ void ServicesModule::OnClickId(int id) {
     if (id == ID_TI) {
         if (applyW_.Running()) { Status(L"Services: the TrustedInstaller toggle can't change during an apply."); return; }
         tiOn_ = !tiOn_;
-        Status(tiOn_ ? L"Services: TrustedInstaller toggle on for this session (never remembered). Reading the list again as TrustedInstaller…"
+        Status(tiOn_ ? L"Services: TrustedInstaller toggle on for this session (never remembered). Reading the list again as TrustedInstaller (starting it if it is stopped, and stopping it again after)…"
                      : L"Services: TrustedInstaller toggle off. Reading the list again as administrator…");
         if (mode_ == Mode::Plan) OpenPlan(planReq_, true);   // same plan, TI rows re-marked; the user's ticks stay
         // fix/svcdrv-visibility: the list itself is read again under the new identity (the load rebuilds an open plan).
@@ -2196,9 +2205,10 @@ std::vector<Banner> ServicesModule::Banners() const {
     else if (!fixture_ && readOnly_)
         v.push_back({L"Read-only mode (--readonly): nothing is written and nothing can be applied.", 0, {}});
     if (tiOn_)   // a SYSTEM-plus identity is in play: say so on every screen while it is on
-        v.push_back({L"TrustedInstaller toggle is on for this session: writes Windows refuses to administrators are made as "
-                     L"TrustedInstaller. It is not expected to reach Defender, PPL or Tamper Protection (reasoning, not "
-                     L"tested). Turn it off when you are done.",
+        v.push_back({L"TrustedInstaller toggle is on for this session: every load also reads the list as TrustedInstaller, "
+                     L"starting TrustedInstaller if it is stopped (and stopping it again if Hadron started it), and writes "
+                     L"Windows refuses to administrators are made as TrustedInstaller. It is not expected to reach Defender, PPL "
+                     L"or Tamper Protection (reasoning, not tested). Turn it off when you are done.",
                      1, applyW_.Running() ? std::vector<std::pair<int, std::wstring>>{} : std::vector<std::pair<int, std::wstring>>{{ID_TI, L"Turn off"}}});
     if (regOn_ && mode_ == Mode::Plan)
         v.push_back({L"Registry fallback is on for this apply: rows the service manager refuses to administrators are written "
@@ -2519,9 +2529,22 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
         if (!ln.empty()) t += L"Event 7040: " + ln + L".";
         if (!t.empty()) d.push_back({P_TEXT, L"", t, p.mute});
     }
-    if (s.regStart >= 0 && s.regStart != s.cfg.start)
+    if (s.PendingRestart())
         d.push_back({P_TEXT, L"", L"The registry Start value (" + StartName(s.regStart) +
                                       L") differs from what the service manager reports: a change is pending a restart.", p.warnT});
+    if (!s.startOverride.empty()) {   // StartOverride: listed as read, never written
+        kv(L"Registry Start", s.regStart >= 0 ? StartName(s.regStart) + L" (" + std::to_wstring(s.regStart) + L")" : std::wstring(L"none"));
+        for (auto& o : s.startOverride)
+            kv(L"StartOverride\\" + o.first, (o.second <= 4 ? StartName((int)o.second) + L" (" : L"(") + std::to_wstring(o.second) + L")");
+        d.push_back({P_TEXT, L"",
+                     std::wstring(s.StartOverridden() ? L"The SCM reports " + StartName(s.cfg.start) + L", not the registry's " +
+                                                            StartName(s.regStart) + L": "
+                                                      : L"") +
+                         L"Windows uses StartOverride to demote unused inbox boot drivers; the SCM reports the overridden value "
+                         L"(reasoning, from how Windows handles these keys, not checked on this PC). Hadron plans and writes the "
+                         L"start type the SCM reports and never writes StartOverride.",
+                     p.mute});
+    }
     if (!s.readError.empty()) d.push_back({P_TEXT, L"", L"Could not read everything: " + s.readError, p.warnT});
     if (s.cfgUnknown)   // R2: say what an unreadable start type means for every plan
         d.push_back({P_TEXT, L"", L"Its start type could not be read, so Hadron leaves it out of every preset, both Defaults, the "
@@ -2694,7 +2717,8 @@ bool ServicesModule::SetListColumns(HDC dc, int widthPx) {
     static const C kDrv[] = {{L"name", L"Name", 124, 0}, {L"display", L"Display name", 0, 6}, {L"state", L"State", 72, 0},
                              {L"start", L"Start type", 96, 0}, {L"kb", L"Preset", 84, 0}, {L"basis", L"Basis", 76, 3},
                              {L"changed", L"vs first", 70, 4}, {L"company", L"Company", 100, 8}, {L"signer", L"Signer", 130, 7},
-                             {L"group", L"Load group", 116, 5}, {L"type", L"Type", 96, 1}, {L"image", L"Image path", 160, 2}};
+                             {L"group", L"Load group", 116, 5}, {L"type", L"Type", 96, 1}, {L"image", L"Image path", 160, 2},
+                             {L"regstart", L"Registry Start", 150, 1}};
     const int kFlexMin = 100;
     const bool svc = tab_ == TAB_SERVICES;
     const C* all = svc ? kSvc : kDrv;
@@ -2869,9 +2893,10 @@ void ServicesModule::PaintPage(HDC dc, const RECT& rc) {
 
 // The TrustedInstaller toggle's scope note, longest first; PaintListMode and Console draw the first that fits whole.
 const wchar_t* const kTiCaps[] = {
-    L"Only for writes Windows refuses to administrators. Not expected to reach Defender, PPL or Tamper Protection.",
-    L"Not expected to reach Defender, PPL or Tamper Protection.",
-    L"Not for Defender, PPL, Tamper Protection."};
+    L"Reads the list as TrustedInstaller on every load (may start it; stops it again if Hadron did) and makes writes Windows "
+    L"refuses to administrators. Not expected to reach Defender, PPL or Tamper Protection.",
+    L"Reads the list as TrustedInstaller on every load (may start it). Not for Defender, PPL, Tamper Protection.",
+    L"Also reads the list as TrustedInstaller (may start it)."};
 
 int ServicesModule::StockKnown() const {
     int n = 0;
@@ -3278,7 +3303,7 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     right -= Button(dc, right, y, L"Cancel", ID_CANCEL_PLAN, false, !applyW_.Running()) + Sc(10);
     // The TrustedInstaller switch here too (Console has F6): flipping it rebuilds this plan and keeps the ticks.
     if (!ctl) right -= TiToggle(dc, right, y + Sc(2), Sc(26)) + Sc(12);
-    if (RegRelevant()) right -= RegToggle(dc, right, y + Sc(2), Sc(26)) + Sc(8);   // Console has F7
+    if (RegRelevant()) right -= RegToggle(dc, right, y + Sc(2), Sc(26)) + Sc(8);   // Console has F9
     RECT tr{pad, y, right - Sc(10), y + Sc(30)};
     TextLeft(dc, L"Plan: " + plan_.title, tr, f.semi, p.text);
     y += Sc(34);
@@ -3390,8 +3415,8 @@ enum ConAct {
     // custom presets and measurements
     CA_PRESETS, CA_MEASURE, CA_SAVEPRESET, CA_MEAS_BEFORE, CA_MEAS_AFTER, CA_PRE_PLAN, CA_EXPORT, CA_IMPORT, CA_REMOVE, CA_SAVE,
 };
-constexpr int CA_REG = 60;
-constexpr int CA_PROT = 61;  // the plan's protected-items override checkbox (F4)   // the plan's registry fallback switch (F7), numbered apart from the enum
+constexpr int CA_REG = 60;   // the plan's registry fallback switch (F9), numbered apart from the enum
+constexpr int CA_PROT = 61;  // the plan's protected-items override checkbox (F4)
 
 // A filled block with text on it (the selection, tags): the ink is core's text-on-fill rule (ui::OnFill: white
 // while it reaches 4.5:1, as Windows draws on its accent, else black). Console then makes it strict: if the ink is
@@ -3452,10 +3477,23 @@ std::wstring ShortStart(const StartCfg& c) {
 std::wstring StartCellText(const SvcItem& s, bool drift, bool console, bool shortTrig) {
     if (s.RegOnly()) return s.regStart >= 0 ? (console ? ShortStart(StartCfg{s.regStart, -1}) : StartName(s.regStart)) + L" (reg)" : L"-";
     if (s.cfgUnknown) return L"unknown";
-    bool pending = s.regStart >= 0 && s.regStart != s.cfg.start;   // a change waits for a restart
-    if (console) return ShortStart(s.cfg) + (s.trigger ? L"+t" : L"") + (pending ? L"!" : L"") + (drift ? L" *" : L"");
+    bool pending = s.PendingRestart();   // a change waits for a restart (a StartOverride is not one)
+    // The SCM's start type is what Hadron plans and writes; a raw registry Start a StartOverride value replaces is
+    // shown beside it, e.g. "Manual (registry: Boot, StartOverride)".
+    const bool ovr = s.StartOverridden();
+    if (console)
+        return ShortStart(s.cfg) + (s.trigger ? L"+t" : L"") + (pending ? L"!" : L"") +
+               (ovr ? L" (reg " + ShortStart(StartCfg{s.regStart, -1}) + L")" : L"") + (drift ? L" *" : L"");
     return StartLabel(s.cfg, s.trigger && !shortTrig) + (s.trigger && shortTrig ? L" +t" : L"") + (pending ? L" (pending)" : L"") +
-           (drift ? L"  *" : L"");
+           (ovr ? L" (registry: " + StartName(s.regStart) + L", StartOverride)" : L"") + (drift ? L"  *" : L"");
+}
+// The Registry Start column: the key's raw Start, "+override" when a StartOverride value replaces it.
+std::wstring RegStartCell(const SvcItem& s, bool console) {
+    if (s.regStart < 0) return L"";
+    std::wstring t = console ? ShortStart(StartCfg{s.regStart, -1}) : StartName(s.regStart);
+    if (s.StartOverridden()) t += console ? L" +ovr" : L" (StartOverride)";
+    else if (!s.startOverride.empty()) t += console ? L" (ovr)" : L" (has StartOverride)";
+    return t;
 }
 std::wstring ShortState(DWORD st) {
     switch (st) {
@@ -3783,6 +3821,7 @@ std::vector<ServicesModule::ConCol> ServicesModule::ConsoleListColumns(HDC dc, i
                              {L"changed", L"vs 1st", 8, 3, false}, {L"kb", L"Preset", 10, 0, false}, {L"basis", L"Basis", 10, 2, false},
                              {L"signer", L"Signer", 18, 3, false},
                              {L"type", L"Type", 7, 1, false}, {L"group", L"Load group", 15, 1, false},
+                             {L"regstart", L"Reg start", 12, 1, false},
                              {L"display", L"Display name", 0, 0, false}, {L"image", L"Image path", 0, 4, true}};
     const D* all = tab_ == TAB_SERVICES ? kSvc : kDrv;
     const size_t n = tab_ == TAB_SERVICES ? sizeof(kSvc) / sizeof(kSvc[0]) : sizeof(kDrv) / sizeof(kDrv[0]);
@@ -3826,7 +3865,7 @@ void ServicesModule::ConsoleListCells(int row, std::vector<ConCell>& out) {
             out.push_back({ShortState(s.state), s.state == SERVICE_RUNNING ? p.goodInk : s.state == SERVICE_STOPPED ? p.mute : p.warnInk});
         else if (k == L"start") {
             bool drift = drift_.count(Lower(s.name)) != 0;
-            bool pending = s.regStart >= 0 && s.regStart != s.cfg.start;   // a change waits for a restart
+            bool pending = s.PendingRestart();   // a change waits for a restart
             out.push_back({StartCellText(s, drift, true), drift || pending || s.cfgUnknown ? p.warnInk : p.text});
         } else if (k == L"changed") {
             std::wstring c = ChangedText(s);
@@ -3845,6 +3884,7 @@ void ServicesModule::ConsoleListCells(int row, std::vector<ConCell>& out) {
             out.push_back({SignerCell(s), bad ? p.warnInk : p.mute});
         } else if (k == L"account") out.push_back({ShortAccount(s.account), p.mute});
         else if (k == L"group") out.push_back({s.group, p.mute});
+        else if (k == L"regstart") out.push_back({RegStartCell(s, true), s.StartOverridden() ? p.warnInk : p.mute});
         else if (k == L"type") out.push_back({s.kind == Kind::FsDriver ? L"fs" : s.kind == Kind::KernelDriver ? L"kernel" : L"other", p.mute});
         else if (k == L"image") out.push_back({ConsoleImage(s, conWindir_), p.mute}); else out.push_back({L"", p.mute});
     }
@@ -4163,7 +4203,8 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
     static const KV kList[] = {
         {L"F2", L"Services / Drivers tab"}, {L"F3", L"Filter (or just type); Esc clears it"}, {L"Ctrl+F", L"Filter"},
         {L"F4", L"Item keys for the selected row: start type, start/stop"}, {L"F5", L"Refresh (live data only)"},
-        {L"F6", L"TrustedInstaller toggle, this session only"}, {L"F7", L"Plan: Default, as first seen (1st snapshot)"},
+        {L"F6", L"TrustedInstaller toggle, this session only: reads the list as TI on every load (may start TI)"},
+        {L"F7", L"Plan: Default, as first seen (1st snapshot)"},
         {L"F8", L"Plan: Default, Windows stock (no data for this build yet)"}, {L"F9", L"Plan: Pure bloat removal"},
         {L"F10", L"Plan: Stripped"}, {L"F11", L"Plan: Minimum"}, {L"Ctrl+Z", L"Plan: undo the last apply"},
         {L"F12", L"Custom presets: save, open, export, import"}, {L"Ctrl+M", L"Measure: before/after, owner-measured"},
@@ -4177,9 +4218,10 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
         {L"F2", L"Measure before: RAM, commit, process counts now"}, {L"F3", L"Measure after: once the PC has restarted"},
         {L"Esc", L"Back"}, {L"Up Down", L"Move in the recorded list"}, {L"Tab", L"Every control in reading order; Shift+Tab back"}};
     static const KV kPlan[] = {
-        {L"Space", L"Tick or untick the row (or click [x])"}, {L"F6", L"TrustedInstaller toggle; rebuilds the plan, keeps your ticks"},
+        {L"Space", L"Tick or untick the row (or click [x])"}, {L"F6", L"TrustedInstaller toggle; reads the list as TI (may start TI), rebuilds the plan, keeps your ticks"},
         {L"F7", L"Save the ticked rows as a custom preset"}, {L"F8", L"Measure before (to compare after a restart)"},
         {L"F9", L"Registry fallback for rows Windows refuses (when shown); this apply only"},
+        {L"F4", L"Allow changes to protected items (when shown): off at every start, this plan only; Apply asks twice"},
         {L"Esc", L"Cancel the plan"}, {L"Enter", L"Nothing: no key applies"}, {L"Up Down", L"Move; PgUp PgDn Home End"},
         {L"Tab", L"Every control in reading order; Shift+Tab back"}};
     static const KV kCols[] = {
@@ -5632,6 +5674,17 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
               L"ui override: the second confirmation names each protected row and the risk, and only a click passes it (no tab stop)");
         m->TogglePlanRow(0);
         check(!m->protAsk_, L"ui override: changing a tick withdraws the second confirmation");
+        m->TogglePlanRow(0);                 // ticked again by the user...
+        m->OpenPlan(m->planReq_, true);      // ...then rebuilt (a reload, the TI toggle)
+        check(m->plan_.rows.size() == 1 && m->plan_.rows[0].protectedRow && !m->plan_.rows[0].include,
+              L"ui override (review R3): a rebuild brings a protected row back unticked, never with the user's earlier tick");
+        {   // StartOverride (fixture hyperkbd: registry Start=0, StartOverride 0/1/2 = 3)
+            const SvcItem* hk = nullptr;
+            for (auto& s : m->items_) if (IEq(s.name, L"hyperkbd")) hk = &s;
+            check(hk && StartCellText(*hk, false, false) == L"Manual (registry: Boot, StartOverride)" && !hk->PendingRestart() &&
+                      RegStartCell(*hk, false) == L"Boot (StartOverride)",
+                  L"ui StartOverride: the Start type cell shows the SCM's value with the registry's beside it, never as pending");
+        }
         h.Use(ui::Layout::Console, 96);
         bool f4 = false;
         for (auto& k : m->ConsoleKeys()) if (k.cap == L"F4") f4 = k.act == CA_PROT && k.on;

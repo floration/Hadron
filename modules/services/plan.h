@@ -14,6 +14,7 @@
 #include "modules/services/store.h"
 #include <atomic>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -117,6 +118,7 @@ struct Plan {
     // user must see (R20: no Windows-stock data for this build). Also in notes.
     std::wstring emptyText;
     bool overrideOn = false;           // built with Ctx::overrideProtected (the plan screen shows it)
+    int protMarked = 0;                // Undo/Resume: rows an override apply marked that the override may put back (R1)
     int Protected() const;             // ticked, unblocked protected rows (the second confirmation lists them)
     int Included() const;
     int Optional() const;
@@ -140,8 +142,9 @@ CustomPreset PresetFromPlan(const Plan& p, const std::wstring& name, const std::
 // "10.0.19045.5737" and "19045" -> "19045": the build number alone, for comparing builds.
 std::wstring BuildNumber(const std::wstring& build);
 Plan BuildSingle(const SvcItem& item, StartCfg target, const std::vector<SvcItem>& items, const Ctx& c);
-// The plans the protected-items override applies to: Single, a custom preset, Undo and Resume (never a built-in
-// preset, Default or Stock, never a control plan).
+// The plans the protected-items override applies to: Single and a custom preset (never a built-in preset, Default or
+// Stock, never a control plan). Undo and Resume only when they hold a row an override apply marked "prot" in its log,
+// and then they lift only those rows, only back to the logged before value (review R1).
 bool OverrideOffered(const Plan& p);
 // Why the override can never free this item ("" when it may): launch-protected (Windows itself refuses), registry
 // only, an unreadable configuration, a per-user instance.
@@ -189,6 +192,22 @@ public:
     virtual void Revert() = 0;
     virtual bool Release(std::wstring* note) = 0;       // stop TI only if Acquire started it; resets StartedService
 };
+
+// The flushed claim a load's TrustedInstaller read writes when it may start TrustedInstaller (review R2), the same
+// T records an apply writes (R22, R4), in a log with source "ti-read" and no rows, so the TrustedInstaller-left-running
+// banner, its Stop it plan and the stale-claim resolution cover a read too. Begin takes the apply lock and writes B and
+// "T starting", flushed; nothing may start TrustedInstaller unless it succeeded. End writes E and drops the lock.
+class TiClaimLog {
+public:
+    virtual ~TiClaimLog() = default;
+    virtual bool Begin(std::wstring* err) = 0;
+    virtual bool Started(DWORD pid, uint64_t pstart, std::wstring* err) = 0;
+    virtual bool NotStarted(std::wstring* err) = 0;
+    virtual void Stopped(bool ok, const std::wstring& note) = 0;   // best effort: cleanup
+    virtual void End() = 0;
+};
+std::unique_ptr<TiClaimLog> MakeTiReadClaim(const Store& st, const std::wstring& machine, const std::wstring& build,
+                                            const std::wstring& lockName = L"Global\\Hadron.services.apply");
 
 // ---- apply ---------------------------------------------------------------------------------------------
 struct ApplyEnv {

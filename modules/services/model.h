@@ -61,6 +61,15 @@ struct SvcItem {
     bool regNoType = false;            // Registry: the key has no Type value (shown on the Services tab, labelled)
     bool viaTi = false;                // the row, or its configuration, was read only as TrustedInstaller
     bool RegOnly() const { return src == Source::Registry; }
+    // The driver key's StartOverride subkey (values named 0, 1, 2..., REG_DWORD), read on the load worker, read only.
+    // Windows uses it to demote unused inbox boot drivers (reasoning): the SCM reports the overridden value, so a
+    // registry Start that differs from cfg.start is not a pending change then. Hadron never writes StartOverride.
+    std::vector<std::pair<std::wstring, DWORD>> startOverride;
+    bool StartOverridden() const {
+        return !RegOnly() && !cfgUnknown && !startOverride.empty() && regStart >= 0 && regStart != cfg.start;
+    }
+    // The registry Start differs from what the SCM reports and no StartOverride explains it: a change waits for a restart.
+    bool PendingRestart() const { return regStart >= 0 && regStart != cfg.start && !StartOverridden(); }
     // Derived after load (FoldInstances).
     Kind kind = Kind::Service;
     std::vector<std::wstring> instances;   // "Name_1a2b3 (Running)" for per-user templates

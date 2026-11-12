@@ -1,4 +1,5 @@
 HXSVC	1	regkeys
-K	Fs_Rec	8	1	System32\\drivers\\Fs_Rec.sys	File System Recognizer Driver	Boot file system	0
-K	Winsock2	-	-				0
-K	ExampleLinkKey	-	-				1
+K	Fs_Rec	8	0	System32\\drivers\\Fs_Rec.sys	File System Recognizer Driver	Boot file system	0	-
+K	Winsock2	-	-				0	-
+K	ExampleLinkKey	-	-				1	-
+K	hyperkbd	1	0				0	0=3;1=3;2=3

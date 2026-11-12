@@ -15,6 +15,7 @@ struct Pass {
     EnumStats scm;
     int regKeys = -1, links = 0, direct = 0, regOnly = 0;
     std::wstring regErr;
+    bool regPartial = false;
 };
 
 SvcItem FromKey(const RegSvcKey& k, const std::wstring& why) {
@@ -27,6 +28,7 @@ SvcItem FromKey(const RegSvcKey& k, const std::wstring& why) {
     i.type = k.type < 0 ? 0 : (DWORD)k.type;
     i.kind = KindOf(i.type);
     i.regStart = k.start;
+    i.startOverride = k.startOverride;
     i.cfg.start = k.start >= 0 && k.start <= 4 ? k.start : 3;   // a placeholder: cfgUnknown keeps it out of every plan
     i.cfgUnknown = true;
     i.state = 0;   // StateName(0): "Registry only"
@@ -48,15 +50,24 @@ bool RunPass(Backend& b, const std::atomic<bool>* cancel, Pass* p, std::wstring*
     p->scm = b.lastEnum;
     std::vector<RegSvcKey> keys;
     std::wstring rerr;
-    if (!b.ListServiceKeys(&keys, &rerr)) { p->regErr = rerr; return true; }
+    bool partial = false;
+    if (!b.ListServiceKeys(&keys, &partial, &rerr)) { p->regErr = rerr; return true; }
     p->regKeys = (int)keys.size();
-    std::set<std::wstring> have;
-    for (auto& i : p->items) have.insert(Lower(i.name));
+    if (partial) { p->regPartial = true; p->regErr = rerr; }
+    std::map<std::wstring, size_t> have;
+    for (size_t n = 0; n < p->items.size(); n++) have[Lower(p->items[n].name)] = n;
     for (auto& k : keys) {
         if (cancel && cancel->load()) break;
         if (k.link) p->links++;
-        if (have.count(Lower(k.name))) continue;
-        have.insert(Lower(k.name));
+        if (auto it = have.find(Lower(k.name)); it != have.end()) {
+            // The key's StartOverride, read with the key (read only), and with it the key's raw Start (the same value
+            // the item's own read takes on a live PC).
+            SvcItem& i = p->items[it->second];
+            i.startOverride = k.startOverride;
+            if (!k.startOverride.empty() && k.start >= 0) i.regStart = k.start;
+            continue;
+        }
+        have[Lower(k.name)] = p->items.size();
         if (k.link) {
             p->items.push_back(FromKey(k, std::wstring(L"This Services key is a registry link: Hadron treats a link as a leaf "
                                                        L"and never follows it or reads its values, and the SCM did not list it.") +
@@ -90,10 +101,32 @@ struct TiScope {
     }
 };
 
+// Review R5: one guard puts everything back on every path out of the TrustedInstaller pass: Release (stops
+// TrustedInstaller only if this pass started it), the control permission, and the claim's stop and end records.
+struct TiRelease {
+    Backend& b;
+    TiProvider* ti;
+    TiClaimLog* claim = nullptr;   // set once Begin succeeded
+    std::wstring* note;
+    ~TiRelease() {
+        const bool mine = ti->StartedService();
+        std::wstring n;
+        const bool stopped = ti->Release(&n);
+        b.AllowTiControl(false);
+        // The provider's sentence names an apply; this was the list read.
+        if (size_t at = n.find(L"for this apply"); at != std::wstring::npos) n.replace(at, 14, L"for the TrustedInstaller read");
+        *note = n;
+        if (claim) {
+            if (mine) claim->Stopped(stopped, n);
+            claim->End();
+        }
+    }
+};
+
 }  // namespace
 
-bool CollectItems(Backend& b, TiProvider* ti, bool allowTiStart, const std::atomic<bool>* cancel, std::vector<SvcItem>* out, CollectStats* st,
-                  std::wstring* err) {
+bool CollectItems(Backend& b, TiProvider* ti, TiClaimLog* claim, const std::atomic<bool>* cancel, std::vector<SvcItem>* out,
+                  CollectStats* st, std::wstring* err) {
     ULONGLONG t0 = GetTickCount64();
     *st = CollectStats{};
     Pass admin;
@@ -101,6 +134,7 @@ bool CollectItems(Backend& b, TiProvider* ti, bool allowTiStart, const std::atom
     st->scm = admin.scm;
     st->regKeys = admin.regKeys;
     st->regErr = admin.regErr;
+    st->regPartial = admin.regPartial;
     st->regLinks = admin.links;
     st->direct = admin.direct;
     st->regOnly = admin.regOnly;
@@ -108,70 +142,98 @@ bool CollectItems(Backend& b, TiProvider* ti, bool allowTiStart, const std::atom
 
     if (ti && !(cancel && cancel->load())) {
         st->tiAsked = true;
-        if (allowTiStart) b.AllowTiControl(true);   // TrustedInstaller itself, started (and stopped again) only if it was stopped
-        std::wstring e, qe;
+        std::wstring qe;
         SvcItem tis;
-        if (!allowTiStart && (!b.Query(L"TrustedInstaller", &tis, &qe) || tis.state != SERVICE_RUNNING)) {
+        const bool running = b.Query(L"TrustedInstaller", &tis, &qe) && tis.state == SERVICE_RUNNING;
+        std::wstring ce;
+        if (!running && !claim) {
             st->tiErr = L"TrustedInstaller is not running, and this read never starts a service (start it first with: sc start "
                         L"TrustedInstaller)";
-        } else if (!ti->Acquire(cancel, &e)) {
-            st->tiErr = e;
+        } else if (!running && !claim->Begin(&ce)) {
+            st->tiErr = L"TrustedInstaller is not running, and its start could not be recorded first, so it was not started: " + ce;
         } else {
-            Pass tp;
-            std::wstring te, ident;
-            bool ran = false, ok = false;
-            {
-                TiScope scope{ti};
-                ImpersonationFlag::Active() = true;   // every Hadron file write refuses until the scope ends
-                if (ti->Impersonate(&ident, &te)) {
-                    scope.on = true;
-                    ran = true;
-                    ok = RunPass(b, cancel, &tp, &te);
+            TiRelease rel{b, ti, running ? nullptr : claim, &st->tiNote};
+            // Only a start the claim covers: with TrustedInstaller running, control stays refused.
+            if (!running) b.AllowTiControl(true);
+            std::wstring e;
+            bool acquired = ti->Acquire(cancel, &e);
+            if (!running) {   // R4: the process Hadron started, by pid and creation time, flushed before the read
+                std::wstring we;
+                bool recorded = true;
+                if (ti->StartedService()) {
+                    SvcItem now;
+                    std::wstring qe2;
+                    DWORD pid = 0;
+                    uint64_t ps = 0;
+                    if (b.Query(L"TrustedInstaller", &now, &qe2)) { pid = now.pid; ps = now.pstart; }
+                    recorded = claim->Started(pid, ps, &we);
+                } else {
+                    recorded = claim->NotStarted(&we);
                 }
+                if (!recorded && acquired) { acquired = false; e = L"the TrustedInstaller start could not be recorded: " + we; }
             }
-            if (!ran) st->tiErr = te;
-            else if (!ok) st->tiErr = L"the TrustedInstaller read failed: " + te;
-            else {
-                st->tiUsed = true;
-                std::map<std::wstring, size_t> at;
-                for (size_t k = 0; k < out->size(); k++) at[Lower((*out)[k].name)] = k;
-                for (auto& t : tp.items) {
-                    auto it = at.find(Lower(t.name));
-                    if (it == at.end()) {
-                        if (t.RegOnly()) {   // the administrator's pass would have listed the key too: keep it as is
+            if (!acquired) {
+                st->tiErr = e;
+            } else {
+                Pass tp;
+                std::wstring te, ident;
+                bool ran = false, ok = false;
+                {
+                    TiScope scope{ti};
+                    ImpersonationFlag::Active() = true;   // every Hadron file write refuses until the scope ends
+                    if (ti->Impersonate(&ident, &te)) {
+                        scope.on = true;
+                        ran = true;
+                        ok = RunPass(b, cancel, &tp, &te);
+                    }
+                }
+                if (!ran) st->tiErr = te;
+                else if (!ok) st->tiErr = L"the TrustedInstaller read failed: " + te;
+                else {
+                    st->tiUsed = true;
+                    std::map<std::wstring, size_t> at;
+                    for (size_t k = 0; k < out->size(); k++) at[Lower((*out)[k].name)] = k;
+                    for (auto& t : tp.items) {
+                        auto it = at.find(Lower(t.name));
+                        if (it == at.end()) {
+                            if (t.RegOnly()) {   // the administrator's pass would have listed the key too: keep it as is
+                                at[Lower(t.name)] = out->size();
+                                out->push_back(t);
+                                continue;
+                            }
+                            t.viaTi = true;
+                            st->tiItems++;
+                            st->tiNames.push_back(t.name);
                             at[Lower(t.name)] = out->size();
                             out->push_back(t);
                             continue;
                         }
-                        t.viaTi = true;
-                        st->tiItems++;
-                        st->tiNames.push_back(t.name);
-                        at[Lower(t.name)] = out->size();
-                        out->push_back(t);
-                        continue;
-                    }
-                    SvcItem& a = (*out)[it->second];
-                    if (t.RegOnly()) continue;
-                    if (a.RegOnly()) {   // the SCM opened it only for TrustedInstaller
-                        t.viaTi = true;
-                        st->tiItems++;
-                        st->tiNames.push_back(t.name);
-                        a = t;
-                    } else if ((a.cfgUnknown && !t.cfgUnknown) || (!a.readError.empty() && t.readError.empty())) {
-                        t.viaTi = true;
-                        if (a.src == SvcItem::Source::ScmDirect) t.src = a.src;
-                        st->tiConfigs++;
-                        st->tiNames.push_back(t.name);
-                        a = t;
+                        SvcItem& a = (*out)[it->second];
+                        if (t.RegOnly()) continue;
+                        if (a.RegOnly()) {   // the SCM opened it only for TrustedInstaller
+                            t.viaTi = true;
+                            st->tiItems++;
+                            st->tiNames.push_back(t.name);
+                            a = t;
+                        } else if ((a.cfgUnknown && !t.cfgUnknown) || (!a.readError.empty() && t.readError.empty())) {
+                            t.viaTi = true;
+                            if (a.src == SvcItem::Source::ScmDirect) t.src = a.src;
+                            st->tiConfigs++;
+                            st->tiNames.push_back(t.name);
+                            a = t;
+                        }
                     }
                 }
             }
-        }
-        std::wstring note;
-        ti->Release(&note);
-        st->tiNote = note;
-        b.AllowTiControl(false);
+        }   // TiRelease: Release, control off, the claim's stop and end records
+        // TrustedInstaller's own row as it is now (stopped again, or the process left running for the banner).
+        SvcItem now;
+        std::wstring qe3;
+        if (b.Query(L"TrustedInstaller", &now, &qe3))
+            for (auto& i : *out)
+                if (IEq(i.name, L"TrustedInstaller") && !i.RegOnly()) { now.src = i.src; now.viaTi = i.viaTi; now.startOverride = i.startOverride; i = now; }
     }
+    for (auto& i : *out) if (i.StartOverridden()) st->overridden++;
     st->ms = GetTickCount64() - t0;
     return true;
 }
@@ -183,7 +245,7 @@ std::wstring TiCollectText(const CollectStats& st) {
     std::wstring t = L"TrustedInstaller showed " + std::to_wstring(st.tiItems) + L" more item" + (st.tiItems == 1 ? L"" : L"s") +
                      L" and " + std::to_wstring(st.tiConfigs) + L" more config" + (st.tiConfigs == 1 ? L"" : L"s") +
                      L" than administrator";
-    if (st.tiItems + st.tiConfigs == 0) t += L" (administrators already see every service and driver here)";
+    if (st.tiItems + st.tiConfigs == 0) t += L" (TrustedInstaller saw nothing an administrator didn't)";
     t += L".";
     if (!st.tiNote.empty()) t += L" " + st.tiNote;
     return t;
@@ -194,6 +256,8 @@ std::wstring VisibilityText(const CollectStats& st) {
     if (st.regOnly) t += std::to_wstring(st.regOnly) + L" from the registry only (not loaded by the SCM). ";
     if (st.direct) t += std::to_wstring(st.direct) + L" missing from the SCM's list, read from it by name. ";
     if (st.regKeys < 0) t += L"The Services key could not be listed (" + st.regErr + L"), so registry-only keys are not shown. ";
+    else if (st.regPartial)
+        t += L"The Services key list stopped at " + std::to_wstring(st.regKeys) + L": " + st.regErr + L"; keys after that are not cross-checked. ";
     if (std::wstring ti = TiCollectText(st); !ti.empty()) t += ti + L" ";
     return t;
 }
@@ -206,6 +270,11 @@ std::wstring StartText(const SvcItem& s) {
 }
 std::wstring KindText(const SvcItem& s) { return s.RegOnly() ? std::wstring(kRegOnlyKind) : TypeName(s.type); }
 std::wstring Tsv(const std::wstring& s) { return Esc(s); }
+std::wstring OverrideText(const SvcItem& s) {   // "0=3;1=3;2=3", "-" without a StartOverride subkey
+    std::wstring t;
+    for (auto& kv : s.startOverride) t += (t.empty() ? L"" : L";") + Esc(kv.first) + L"=" + std::to_wstring(kv.second);
+    return t.empty() ? L"-" : t;
+}
 }  // namespace
 
 std::string DumpListTsv(const std::vector<SvcItem>& items, const CollectStats& st, const std::wstring& build) {
@@ -231,10 +300,16 @@ std::string DumpListTsv(const std::vector<SvcItem>& items, const CollectStats& s
     o += L"#scm_raw\t" + std::to_wstring(st.scm.raw) + L" (drivers " + std::to_wstring(st.scm.rawDrivers) + L", pages " +
          std::to_wstring(st.scm.pages) + L", duplicates dropped " + std::to_wstring(st.scm.duplicates) + L", config unreadable " +
          std::to_wstring(st.scm.unreadable) + L")\n";
-    o += L"#registry_keys\t" + (st.regKeys < 0 ? L"not listed: " + Tsv(st.regErr) : std::to_wstring(st.regKeys)) + L" (links " +
-         std::to_wstring(st.regLinks) + L")\n";
+    o += L"#registry_keys\t" +
+         (st.regKeys < 0 ? L"not listed: " + Tsv(st.regErr)
+                         : std::to_wstring(st.regKeys) + (st.regPartial ? L" (the Services key list stopped at " + std::to_wstring(st.regKeys) +
+                                                                              L": " + Tsv(st.regErr) + L")"
+                                                                        : L"")) +
+         L" (links " + std::to_wstring(st.regLinks) + L")\n";
     o += L"#enum_missed_read_by_name\t" + std::to_wstring(st.direct) + L"\n";
     o += L"#registry_only\t" + std::to_wstring(st.regOnly) + L"\n";
+    o += L"#start_overridden\t" + std::to_wstring(st.overridden) +
+         L" (registry Start differs from the SCM's start type and a StartOverride value is present)\n";
     o += L"#per_user_instances_folded\t" + std::to_wstring(st.folded) + L"\n";
     o += L"#ti\t" + (!st.tiAsked ? std::wstring(L"off") : !st.tiUsed ? L"failed: " + Tsv(st.tiErr)
                                                                      : L"items+" + std::to_wstring(st.tiItems) + L" configs+" +
@@ -246,7 +321,7 @@ std::string DumpListTsv(const std::vector<SvcItem>& items, const CollectStats& s
     o += L"#by_kind\t" + counts(byKind) + L"\n";
     o += L"#by_start\t" + counts(byStart) + L"\n";
     o += L"#by_source\t" + counts(bySrc) + L"\n";
-    o += L"name\ttab\tkind\ttype\tstart\tstate\tsource\treadError\n";
+    o += L"name\ttab\tkind\ttype\tstart\tstate\tsource\treadError\traw_start\tstart_override\n";
     for (auto& s : items) {
         wchar_t ty[16];
         swprintf(ty, 16, L"0x%X", (unsigned)s.type);
@@ -254,7 +329,7 @@ std::string DumpListTsv(const std::vector<SvcItem>& items, const CollectStats& s
         if (s.RegOnly()) re = (re.empty() ? L"" : re + L"; ") + s.regWhy;
         o += Tsv(s.name) + L"\t" + (OnTab(s, TAB_DRIVERS) ? L"drivers" : L"services") + L"\t" + Tsv(KindText(s)) + L"\t" + ty +
              L"\t" + StartText(s) + L"\t" + Tsv(StateName(s.state)) + L"\t" + SourceName(s) + (s.viaTi ? L"+ti" : L"") + L"\t" +
-             Tsv(re) + L"\n";
+             Tsv(re) + L"\t" + (s.regStart >= 0 ? std::to_wstring(s.regStart) : std::wstring(L"-")) + L"\t" + OverrideText(s) + L"\n";
     }
     return ToUtf8(o);
 }

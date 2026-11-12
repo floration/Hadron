@@ -56,6 +56,9 @@ struct RegSvcKey {
     long long type = -1;   // REG_DWORD Type; -1 when the key has none
     int start = -1;        // REG_DWORD Start; -1 when the key has none
     bool link = false;     // the key is a registry link (SymbolicLinkValue of type REG_LINK)
+    // Its StartOverride subkey's REG_DWORD values, by name ("0", "1", ...); empty when it has none. A StartOverride
+    // subkey that is a link is a leaf (not read).
+    std::vector<std::pair<std::wstring, DWORD>> startOverride;
     std::wstring err;      // the key could not be opened (its name is still listed)
 };
 
@@ -100,8 +103,11 @@ public:
     virtual void AllowTiControl(bool on) { (void)on; }
     // Every subkey of the current control set's Services key (read only). False only when the Services key itself
     // could not be enumerated.
-    virtual bool ListServiceKeys(std::vector<RegSvcKey>* out, std::wstring* err) {
+    // *partial: the listing stopped part way (RegEnumKeyEx failed after N keys); out holds the N, *err says why, and the
+    // call still returns true (review R10).
+    virtual bool ListServiceKeys(std::vector<RegSvcKey>* out, bool* partial, std::wstring* err) {
         out->clear();
+        *partial = false;
         *err = L"this backend has no registry access";
         return false;
     }
@@ -202,7 +208,8 @@ public:
     std::unique_ptr<SxsReader> MakeSxs() override { return sxsDir_.empty() ? nullptr : MakeFakeSxsReader(sxsDir_); }
     void SetSxsDir(std::wstring d) { sxsDir_ = std::move(d); }
     // The fake registry's Services keys: one per item, plus the fixture's regkeys.txt (keys the SCM doesn't have).
-    bool ListServiceKeys(std::vector<RegSvcKey>* out, std::wstring* err) override;
+    bool ListServiceKeys(std::vector<RegSvcKey>* out, bool* partial, std::wstring* err) override;
+    int keysStopAt = -1;   // fault: the key listing stops after this many keys (partial, review R10)
     void SetExtraKeys(std::vector<RegSvcKey> k) { extraKeys_ = std::move(k); }
     // Identity of the calling "thread" for the fixture's scm=ti and cfg=ti items: set by the selftest's TI provider
     // while it impersonates.

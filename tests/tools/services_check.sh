@@ -94,6 +94,7 @@ shot services-console-regfallback-plan "$S" --fixture "$FIX" --layout console --
 # and --plan single: are fixture-only.
 for L in baseline console; do
     shot services-regonly-$L "$S" --fixture "$FIX" --layout $L --tab drivers --select Fs_Rec
+    shot services-startoverride-$L "$S" --fixture "$FIX" --layout $L --tab drivers --select hyperkbd
     shot services-protected-on-$L "$S" --fixture "$FIX" --layout $L --plan single:BrokerInfrastructure:4 --protected on
     shot services-protected-ask-$L "$S" --fixture "$FIX" --layout $L --plan single:ACPI:4 --protected ask
 done

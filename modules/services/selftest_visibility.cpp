@@ -67,7 +67,7 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
     // 1. The registry cross-check on the fixture's regkeys.txt.
     std::vector<SvcItem> items;
     CollectStats st;
-    bool ok = CollectItems(b, nullptr, false, nullptr, &items, &st, &err);
+    bool ok = CollectItems(b, nullptr, nullptr, nullptr, &items, &st, &err);
     const SvcItem* fsrec = FindIn(items, L"Fs_Rec");
     const SvcItem* ws2 = FindIn(items, L"Winsock2");
     const SvcItem* lnk = FindIn(items, L"ExampleLinkKey");
@@ -75,7 +75,7 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
               ws2->regNoType && OnTab(*ws2, TAB_SERVICES) && lnk && lnk->RegOnly() && lnk->regLink && lnk->regStart < 0,
           L"visibility: Services keys the SCM doesn't have list as Registry only: by Type on the Drivers tab (Fs_Rec), no Type "
           L"on the Services tab (Winsock2), a link as a leaf with no values read");
-    check(fsrec && fsrec->regStart == 1 && fsrec->cfgUnknown && fsrec->regWhy.find(L"never planned") != std::wstring::npos &&
+    check(fsrec && fsrec->regStart == 0 && fsrec->cfgUnknown && fsrec->regWhy.find(L"never planned") != std::wstring::npos &&
               StateName(fsrec->state) == L"Registry only",
           L"visibility: a registry-only row shows its key's Start, says why, and carries cfgUnknown (no plan can use it)");
 
@@ -94,7 +94,7 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
     int bootPlain = CountIf(plain, [](const SvcItem& s) { return IsDriverType(s.type) && s.cfg.start == 0; });
     std::vector<SvcItem> fixed;
     CollectStats st2;
-    CollectItems(lossy, nullptr, false, nullptr, &fixed, &st2, &err);
+    CollectItems(lossy, nullptr, nullptr, nullptr, &fixed, &st2, &err);
     int bootFixed = CountIf(fixed, [](const SvcItem& s) {
         return IsDriverType(s.type) && !s.RegOnly() && !s.cfgUnknown && s.cfg.start == 0 && s.src == SvcItem::Source::ScmDirect;
     });
@@ -145,7 +145,7 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
     }
     std::vector<SvcItem> adminOnly;
     CollectStats sa;
-    CollectItems(tib, nullptr, false, nullptr, &adminOnly, &sa, &err);
+    CollectItems(tib, nullptr, nullptr, nullptr, &adminOnly, &sa, &err);
     const SvcItem* wsA = FindIn(adminOnly, L"WSearch");
     const SvcItem* dtA = FindIn(adminOnly, L"DiagTrack");
     check(wsA && wsA->RegOnly() && dtA && dtA->cfgUnknown && !sa.tiAsked && TiCollectText(sa).empty(),
@@ -154,22 +154,22 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
     ti.b = &tib;
     std::vector<SvcItem> withTi;
     CollectStats stt;
-    CollectItems(tib, &ti, true, nullptr, &withTi, &stt, &err);
+    CollectItems(tib, &ti, nullptr, nullptr, &withTi, &stt, &err);
     const SvcItem* wsT = FindIn(withTi, L"WSearch");
     const SvcItem* dtT = FindIn(withTi, L"DiagTrack");
     check(stt.tiUsed && stt.tiItems == 1 && stt.tiConfigs == 1 && wsT && !wsT->RegOnly() && wsT->viaTi && dtT && !dtT->cfgUnknown && dtT->viaTi &&
               withTi.size() == adminOnly.size(),
           L"visibility: the TrustedInstaller pass adds what only it can see or read, marks those rows, and counts them (1 item, 1 config)");
     check(ti.impersonated == 1 && ti.reverted == 1 && ti.released == 1 && !tib.asTi && !ImpersonationFlag::Active() && ti.flagDuring &&
-              ti.controlDuring && !tib.tiControlAllowed,
-          L"visibility: the TI pass reverts its token, clears the file-write refusal and the TrustedInstaller control permission on the way out");
+              !ti.controlDuring && !tib.tiControlAllowed,
+          L"visibility: the TI pass reverts its token and clears the file-write refusal; with TrustedInstaller running it never gets the control permission");
     check(TiCollectText(stt) == L"TrustedInstaller showed 1 more item and 1 more config than administrator.",
           L"visibility: the status line says what TrustedInstaller added: \"" + TiCollectText(stt) + L"\"");
     FakeTiRead none;
     none.b = &b;
     std::vector<SvcItem> same;
     CollectStats s0;
-    CollectItems(b, &none, true, nullptr, &same, &s0, &err);
+    CollectItems(b, &none, nullptr, nullptr, &same, &s0, &err);
     check(s0.tiUsed && s0.tiItems == 0 && s0.tiConfigs == 0 &&
               TiCollectText(s0).find(L"showed 0 more items and 0 more configs") != std::wstring::npos,
           L"visibility: when TrustedInstaller sees nothing more, the status line says 0, honestly");
@@ -178,7 +178,7 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
     bad.failImpersonate = true;
     std::vector<SvcItem> afterFail;
     CollectStats sf;
-    CollectItems(tib, &bad, true, nullptr, &afterFail, &sf, &err);
+    CollectItems(tib, &bad, nullptr, nullptr, &afterFail, &sf, &err);
     check(!sf.tiUsed && !sf.tiErr.empty() && afterFail.size() == adminOnly.size() && bad.released == 1 && !tib.asTi && !ImpersonationFlag::Active() &&
               TiCollectText(sf).find(L"did not run") != std::wstring::npos,
           L"visibility: a refused impersonation keeps the administrator's list, releases TrustedInstaller and says why");
@@ -187,13 +187,13 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
     std::vector<SvcItem> ns;
     CollectStats sn;
     tib.SetState(L"TrustedInstaller", SERVICE_STOPPED);
-    CollectItems(tib, &noStart, false, nullptr, &ns, &sn, &err);
+    CollectItems(tib, &noStart, nullptr, nullptr, &ns, &sn, &err);
     tib.SetState(L"TrustedInstaller", SERVICE_RUNNING);
     FakeTiRead running;
     running.b = &tib;
     std::vector<SvcItem> rn;
     CollectStats sr;
-    CollectItems(tib, &running, false, nullptr, &rn, &sr, &err);
+    CollectItems(tib, &running, nullptr, nullptr, &rn, &sr, &err);
     check(!sn.tiUsed && noStart.acquired == 0 && sn.tiErr.find(L"never starts a service") != std::wstring::npos && !tib.tiControlAllowed,
           L"visibility: --dump-list-live's TI read never starts TrustedInstaller: stopped means skipped, with the reason");
     check(sr.tiUsed && sr.tiItems == 1 && !tib.tiControlAllowed && running.controlDuring == false,
@@ -206,10 +206,128 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
     check(tsv.find("#enum_mask\t0x3FF\n") != std::string::npos && tsv.find("#registry_only\t3\n") != std::string::npos &&
               tsv.find("#scm_raw\t") != std::string::npos && tsv.find("#elapsed_ms\t") != std::string::npos &&
               tsv.find("#by_start\t") != std::string::npos &&
-              tsv.find("name\ttab\tkind\ttype\tstart\tstate\tsource\treadError\n") != std::string::npos &&
-              tsv.find("\nFs_Rec\tdrivers\tRegistry only (not loaded by the SCM)\t0x8\tSystem\tRegistry only\tregistry\t") != std::string::npos &&
+              tsv.find("name\ttab\tkind\ttype\tstart\tstate\tsource\treadError\traw_start\tstart_override\n") != std::string::npos &&
+              tsv.find("\nFs_Rec\tdrivers\tRegistry only (not loaded by the SCM)\t0x8\tBoot\tRegistry only\tregistry\t") != std::string::npos &&
               tsv.find("\nWinsock2\tservices\t") != std::string::npos,
           L"visibility: --dump-list-live TSV has the mask, raw count, per-tab/kind/start counts and one line per row with its source");
+
+    // 6. StartOverride (the owner's PC: 49 inbox boot drivers with registry Start=0 and StartOverride 0/1/2 = 3, which the
+    //    SCM reports as Manual). The fixture's hyperkbd has that shape.
+    const SvcItem* hk = FindIn(items, L"hyperkbd");
+    check(hk && hk->startOverride.size() == 3 && hk->startOverride[0].first == L"0" && hk->startOverride[0].second == 3 &&
+              hk->regStart == 0 && hk->cfg.start == 3 && hk->StartOverridden() && !hk->PendingRestart() && st.overridden == 1,
+          L"visibility: a driver's StartOverride values are read with its key; registry Boot under SCM Manual is an override, not a pending change");
+    Plan hkP = hk ? BuildSingle(*hk, StartCfg{4, -1}, folded, c) : Plan{};
+    check(hkP.rows.size() == 1 && hkP.rows[0].before.start == 3 && hkP.rows[0].op.start == 4,
+          L"visibility: plans start from the SCM's (effective) start type of an overridden driver, never its raw registry Start");
+    check(tsv.find("\nhyperkbd\tdrivers\t") != std::string::npos && tsv.find("\tManual\t") != std::string::npos &&
+              tsv.find("\t0\t0=3;1=3;2=3\n") != std::string::npos && tsv.find("#start_overridden\t1 ") != std::string::npos,
+          L"visibility: --dump-list-live has raw_start and start_override columns and counts the overridden drivers");
+
+    // 7. Review R10: a Services key listing that stops part way says so, with the count and the error.
+    {
+        FakeBackend pb = b;
+        pb.keysStopAt = 5;
+        std::vector<SvcItem> pi;
+        CollectStats ps;
+        CollectItems(pb, nullptr, nullptr, nullptr, &pi, &ps, &err);
+        std::string pt = DumpListTsv(pi, ps, L"19045");
+        check(ps.regPartial && ps.regKeys == 5 && VisibilityText(ps).find(L"The Services key list stopped at 5: RegEnumKeyEx") != std::wstring::npos &&
+                  pt.find("the Services key list stopped at 5: RegEnumKeyEx") != std::string::npos,
+              L"visibility: a partial Services key list is reported in the status text and the dump header, never silent");
+    }
+
+    // 8. Review R2: a load may start TrustedInstaller for the read only after a flushed claim, the same T records an apply
+    //    writes, so the left-running banner and its Stop it plan cover the read too.
+    {
+        struct FakeTiStart : FakeTiRead {
+            bool started = false, failStop = false;
+            bool Acquire(const std::atomic<bool>* cc, std::wstring* e) override {
+                SvcItem t;
+                std::wstring qe;
+                if (b->Query(L"TrustedInstaller", &t, &qe) && t.state != SERVICE_RUNNING) {
+                    if (!b->tiControlAllowed) { *e = L"fake: not armed"; return false; }
+                    b->SetState(L"TrustedInstaller", SERVICE_RUNNING);
+                    started = true;
+                }
+                return FakeTiRead::Acquire(cc, e);
+            }
+            bool StartedService() const override { return started; }
+            bool Release(std::wstring* note) override {
+                released++;
+                if (!started) { *note = L""; return true; }
+                started = false;
+                if (failStop) { *note = L"Hadron started TrustedInstaller and could not stop it again: fake"; return false; }
+                b->SetState(L"TrustedInstaller", SERVICE_STOPPED);
+                *note = L"Hadron started TrustedInstaller for this apply and stopped it again.";
+                return true;
+            }
+        };
+        const std::wstring lock = L"Local\\Hadron.services.selftest.tiread." + std::to_wstring(GetCurrentProcessId());
+        FakeBackend cb = tib;
+        cb.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        Store cs(newTempDir(L"ti-read"));
+        FakeTiStart t1;
+        t1.b = &cb;
+        auto claim = MakeTiReadClaim(cs, cb.MachineGuid(), cb.Build(), lock);
+        std::vector<SvcItem> ci;
+        CollectStats cst1;
+        CollectItems(cb, &t1, claim.get(), nullptr, &ci, &cst1, &err);
+        claim.reset();
+        auto l1 = LoadLogs(cs, nullptr);
+        SvcItem tiNow;
+        cb.Query(L"TrustedInstaller", &tiNow, &err);
+        check(cst1.tiUsed && t1.controlDuring && !cb.tiControlAllowed && l1.size() == 1 && l1[0].source == L"ti-read" && l1[0].tiStarting &&
+                  l1[0].tiStarted && l1[0].tiStopped && l1[0].hasE && l1[0].rows.empty() && FindInterrupted(l1) < 0 && FindUndoable(l1) < 0 &&
+                  tiNow.state == SERVICE_STOPPED && cst1.tiNote.find(L"for the TrustedInstaller read") != std::wstring::npos,
+              L"visibility (R2): a TI read that starts TrustedInstaller writes T starting/started/stopped in a flushed ti-read log first, "
+              L"stops it again, and the log is never offered as an apply to undo or resume");
+        // A failed stop persists as the banner.
+        Store fs(newTempDir(L"ti-read-stopfail"));
+        cb.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        FakeTiStart t2;
+        t2.b = &cb;
+        t2.failStop = true;
+        auto claim2 = MakeTiReadClaim(fs, cb.MachineGuid(), cb.Build(), lock);
+        std::vector<SvcItem> ci2;
+        CollectStats cst2;
+        CollectItems(cb, &t2, claim2.get(), nullptr, &ci2, &cst2, &err);
+        claim2.reset();
+        auto l2 = LoadLogs(fs, nullptr);
+        std::vector<SvcItem> live2;
+        cb.Enumerate(&live2, &err);
+        std::wstring banner = TiLeftText(l2, live2);
+        check(l2.size() == 1 && l2[0].tiStopFailed && TiLeftRunning(l2, live2) && banner.find(L"for the TrustedInstaller read") != std::wstring::npos,
+              L"visibility (R2): a stop that failed after a TI read persists as the TrustedInstaller-left-running banner: \"" + banner + L"\"");
+        // Running already: nothing to record, and no control permission.
+        Store rs(newTempDir(L"ti-read-running"));
+        FakeTiStart t3;
+        t3.b = &cb;   // still running from the failed stop
+        auto claim3 = MakeTiReadClaim(rs, cb.MachineGuid(), cb.Build(), lock);
+        std::vector<SvcItem> ci3;
+        CollectStats cst3;
+        CollectItems(cb, &t3, claim3.get(), nullptr, &ci3, &cst3, &err);
+        claim3.reset();
+        check(cst3.tiUsed && !t3.controlDuring && LoadLogs(rs, nullptr).empty(),
+              L"visibility (R2): with TrustedInstaller running the read records nothing and never gets the control permission");
+        // The claim can't be written (another window holds the apply lock): TrustedInstaller is not started.
+        cb.SetState(L"TrustedInstaller", SERVICE_STOPPED);
+        ApplyLock held;
+        std::wstring le;
+        held.Acquire(lock, &le);
+        Store ls(newTempDir(L"ti-read-locked"));
+        FakeTiStart t4;
+        t4.b = &cb;
+        auto claim4 = MakeTiReadClaim(ls, cb.MachineGuid(), cb.Build(), lock);
+        std::vector<SvcItem> ci4;
+        CollectStats cst4;
+        CollectItems(cb, &t4, claim4.get(), nullptr, &ci4, &cst4, &err);
+        claim4.reset();
+        held.Release();
+        cb.Query(L"TrustedInstaller", &tiNow, &err);
+        check(!cst4.tiUsed && t4.acquired == 0 && tiNow.state == SERVICE_STOPPED && cst4.tiErr.find(L"could not be recorded first") != std::wstring::npos,
+              L"visibility (R2): when the claim can't be written first, TrustedInstaller is not started and the status says why");
+    }
 }
 
 // ============================================================================================
@@ -233,7 +351,7 @@ void RunOverrideSelftest(const std::wstring& fixture, const Kb& kb, const std::f
     on.overrideProtected = true;
     std::vector<SvcItem> items;
     CollectStats cst;
-    CollectItems(b, nullptr, false, nullptr, &items, &cst, &err);
+    CollectItems(b, nullptr, nullptr, nullptr, &items, &cst, &err);
     FoldInstances(&items);
 
     // A never-touch service (the floor) and a Boot-start driver, both readable and not launch-protected.
@@ -336,9 +454,30 @@ void RunOverrideSelftest(const std::wstring& fixture, const Kb& kb, const std::f
     int k = FindUndoable(logs);
     Plan u0 = k >= 0 ? BuildUndo(logs[(size_t)k], ab, afterItems, off) : Plan{};
     Plan u1 = k >= 0 ? BuildUndo(logs[(size_t)k], ab, afterItems, on) : Plan{};
-    check(u0.rows.size() == 1 && !u0.rows[0].blocked.empty() && u1.rows.size() == 1 && u1.rows[0].protectedRow && u1.rows[0].blocked.empty() &&
-              u1.rows[0].after.start == 0 && OverrideOffered(u1),
-          L"override: its undo is refused with the override off and offered (a PROTECTED row back to Boot) with it on");
+    check(k >= 0 && logs[(size_t)k].rows.size() == 1 && logs[(size_t)k].rows[0].prot,
+          L"override (R1): an override apply marks its protected row \"prot\" in the undo log's P record");
+    check(u0.rows.size() == 1 && !u0.rows[0].blocked.empty() && OverrideOffered(u0) && u1.rows.size() == 1 && u1.rows[0].protectedRow &&
+              u1.rows[0].blocked.empty() && u1.rows[0].after.start == 0 && OverrideOffered(u1),
+          L"override: its undo offers the box for the marked row, refuses it with the box off, and offers a PROTECTED row back to Boot with it on");
+    if (k >= 0) {   // R1: a log row without the mark (forged, or from an ordinary apply) is never lifted, whatever the box says
+        UndoLog forged = logs[(size_t)k];
+        for (auto& rr : forged.rows) rr.prot = false;
+        Plan fu = BuildUndo(forged, ab, afterItems, on);
+        // A forward protected change is never resumed, even marked: only an undo's restore is.
+        UndoLog half = logs[(size_t)k];
+        half.hasE = false;
+        for (auto& rr : half.rows) { rr.hasD = false; rr.hasI = false; rr.before = StartCfg{4, -1}; rr.after = StartCfg{3, -1}; }
+        Plan fr = BuildResume(half, ab, afterItems, on);
+        check(fu.rows.size() == 1 && !fu.rows[0].blocked.empty() && !fu.rows[0].protectedRow && fu.protMarked == 0 && !OverrideOffered(fu) &&
+                  fr.rows.size() == 1 && !fr.rows[0].blocked.empty() && !fr.rows[0].protectedRow && !OverrideOffered(fr),
+              L"override (R1): Undo and Resume lift only rows an override apply marked, only back to the logged before value; "
+              L"an unmarked Boot restore and a protected forward resume stay refused with the box on");
+    }
+    {   // R1: Boot/System targets are checked before never-touch, so a never-touch item can't hide them.
+        Plan sysT = BuildSingle(*bootDrv, StartCfg{1, -1}, items, on);
+        check(sysT.rows.size() == 1 && !sysT.rows[0].blocked.empty() && !sysT.rows[0].protectedRow,
+              L"override (R1): a System target on a never-touch Boot driver is refused, not offered, with the box on");
+    }
     bool undone = false;
     if (u1.rows.size() == 1) {
         u1.rows[0].include = true;

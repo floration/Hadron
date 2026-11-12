@@ -3165,7 +3165,7 @@ int RunDumpListLive(const std::vector<std::wstring>& args) {
     std::vector<SvcItem> items;
     CollectStats st;
     std::wstring err;
-    if (!CollectItems(*b, ti.get(), false, nullptr, &items, &st, &err)) { fwprintf(stderr, L"dump-list-live: %ls\n", err.c_str()); return 1; }
+    if (!CollectItems(*b, ti.get(), nullptr, nullptr, &items, &st, &err)) { fwprintf(stderr, L"dump-list-live: %ls\n", err.c_str()); return 1; }
     size_t before = items.size();
     FoldInstances(&items);
     st.folded = (int)(before - items.size());

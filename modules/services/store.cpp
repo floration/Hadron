@@ -157,6 +157,7 @@ bool ParseUndoLog(const std::string& utf8, UndoLog* out, std::wstring* err) {
             r.name = Unesc(f[2]);
             if (!ParseCfg(f[4], &r.before) || !ParseCfg(f[5], &r.after)) { out->badRecords++; continue; }
             r.identity = f[6];
+            r.prot = f.size() >= 8 && f[7] == L"prot";
             out->rows.push_back(r);
         } else if (k == L"I" && f.size() >= 3) {
             UndoRow* r = out->Row(_wtoi(f[1].c_str()));

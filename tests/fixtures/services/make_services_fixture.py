@@ -486,14 +486,17 @@ REGKEYS_HDR = 'HXSVC\t1\tregkeys'
 
 
 def regkeys():
-    """Services keys the fake SCM does not have (fix/svcdrv-visibility): they list as "Registry only (not loaded by the
-    SCM)", read-only. Fs_Rec stands for the one Start=1 key the owner's SCM did not list; Winsock2 has no Type value (a
-    parameters-only key, on the Services tab); ExampleLinkKey is a registry link (a leaf, no values read). Made up for
-    the renders and tests, not read from a real PC."""
+    """Services keys as the fake's registry has them (fix/svcdrv-visibility). Keys the fake SCM does not have list as
+    "Registry only (not loaded by the SCM)", read-only: Fs_Rec stands for the one Start=0 Type=8 key the owner's SCM did
+    not list (sc qc gives 1060 there); Winsock2 has no Type value (a parameters-only key, on the Services tab);
+    ExampleLinkKey is a registry link (a leaf, no values read). A K line naming an item the SCM has adds to its key:
+    hyperkbd has registry Start=0 and a StartOverride subkey (values 0, 1, 2 = 3), the shape of the 49 inbox boot
+    drivers on the owner's PC that the SCM reports as Manual. Made up for the renders and tests, not read from a real PC."""
     rows = [
-        ['Fs_Rec', '8', '1', 'System32\\drivers\\Fs_Rec.sys', 'File System Recognizer Driver', 'Boot file system', '0'],
-        ['Winsock2', '-', '-', '', '', '', '0'],
-        ['ExampleLinkKey', '-', '-', '', '', '', '1'],
+        ['Fs_Rec', '8', '0', 'System32\\drivers\\Fs_Rec.sys', 'File System Recognizer Driver', 'Boot file system', '0', '-'],
+        ['Winsock2', '-', '-', '', '', '', '0', '-'],
+        ['ExampleLinkKey', '-', '-', '', '', '', '1', '-'],
+        ['hyperkbd', '1', '0', '', '', '', '0', '0=3;1=3;2=3'],
     ]
     return REGKEYS_HDR + '\n' + ''.join('K\t' + '\t'.join(esc(f) for f in r) + '\n' for r in rows)
 

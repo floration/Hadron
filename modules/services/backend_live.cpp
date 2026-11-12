@@ -528,8 +528,9 @@ public:
     // Every subkey of Services in the current control set (Select\Current), each opened with REG_OPTION_OPEN_LINK and
     // KEY_QUERY_VALUE only. A key that is a link (SymbolicLinkValue of type REG_LINK) is a leaf: its values are never
     // read. Values are read from the opened handle, never by a path that could follow a link.
-    bool ListServiceKeys(std::vector<RegSvcKey>* out, std::wstring* err) override {
+    bool ListServiceKeys(std::vector<RegSvcKey>* out, bool* partial, std::wstring* err) override {
         out->clear();
+        *partial = false;
         std::wstring root = KeyPath(L"");
         if (root.empty()) { *err = L"HKLM\\SYSTEM\\Select\\Current could not be read"; return false; }
         root.pop_back();   // the trailing backslash
@@ -544,7 +545,12 @@ public:
             DWORD cch = 256;
             e = RegEnumKeyExW(svc, idx, name, &cch, nullptr, nullptr, nullptr, nullptr);
             if (e == ERROR_NO_MORE_ITEMS) break;
-            if (e != ERROR_SUCCESS) { *err = L"RegEnumKeyEx: " + sys::ErrorText((DWORD)e); ok = !out->empty(); break; }
+            if (e != ERROR_SUCCESS) {   // review R10: the keys so far are kept and the stop is reported, never silent
+                *err = L"RegEnumKeyEx: " + sys::ErrorText((DWORD)e);
+                ok = !out->empty();
+                *partial = ok;
+                break;
+            }
             RegSvcKey k;
             k.name.assign(name, cch);
             HKEY h = nullptr;
@@ -581,6 +587,21 @@ public:
                 k.image = str(L"ImagePath");
                 k.display = str(L"DisplayName");
                 k.group = str(L"Group");
+                // StartOverride (values 0, 1, 2..., REG_DWORD): opened the same way, read only; a link is a leaf.
+                HKEY so = nullptr;
+                if (RegOpenKeyExW(h, L"StartOverride", REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE, &so) == ERROR_SUCCESS) {
+                    DWORD st2 = 0, scb = 0;
+                    bool soLink = RegQueryValueExW(so, L"SymbolicLinkValue", nullptr, &st2, nullptr, &scb) == ERROR_SUCCESS && st2 == REG_LINK;
+                    for (DWORD vi = 0; !soLink && vi < 64; vi++) {
+                        wchar_t vn[64];
+                        DWORD vcch = 64, vt = 0, vd = 0, vcb = sizeof(vd);
+                        LSTATUS ve = RegEnumValueW(so, vi, vn, &vcch, nullptr, &vt, reinterpret_cast<BYTE*>(&vd), &vcb);
+                        if (ve == ERROR_NO_MORE_ITEMS) break;
+                        if (ve != ERROR_SUCCESS || vt != REG_DWORD || vcb != sizeof(vd)) continue;
+                        k.startOverride.push_back({std::wstring(vn, vcch), vd});
+                    }
+                    RegCloseKey(so);
+                }
             }
             RegCloseKey(h);
             out->push_back(std::move(k));
