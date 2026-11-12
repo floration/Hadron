@@ -217,9 +217,27 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
     check(hk && hk->startOverride.size() == 3 && hk->startOverride[0].first == L"0" && hk->startOverride[0].second == 3 &&
               hk->regStart == 0 && hk->cfg.start == 3 && hk->StartOverridden() && !hk->PendingRestart() && st.overridden == 1,
           L"visibility: a driver's StartOverride values are read with its key; registry Boot under SCM Manual is an override, not a pending change");
+    // Review A3: registry Start=0 under a StartOverride is still a Boot-start driver to the guard.
     Plan hkP = hk ? BuildSingle(*hk, StartCfg{4, -1}, folded, c) : Plan{};
-    check(hkP.rows.size() == 1 && hkP.rows[0].before.start == 3 && hkP.rows[0].op.start == 4,
-          L"visibility: plans start from the SCM's (effective) start type of an overridden driver, never its raw registry Start");
+    Guard hkG = hk ? CheckGuard(*hk, c) : Guard{};
+    check(hkG.neverTouch && hkG.reason.find(L"Boot-start driver in its registry Start") != std::wstring::npos && hkP.rows.size() == 1 &&
+              !hkP.rows[0].blocked.empty() && hkP.Included() == 0,
+          L"visibility (A3): a driver whose registry Start is Boot under a StartOverride is kept like any Boot-start driver");
+    {   // Plans start from the SCM's start type, and every row for an item with a StartOverride says it may not take effect.
+        SvcItem ov = hk ? *hk : SvcItem{};
+        ov.regStart = 3;   // registry Manual, StartOverride present: not a Boot-start driver
+        std::vector<SvcItem> withOv = folded;
+        for (auto& i : withOv) if (IEq(i.name, ov.name)) i = ov;
+        Plan op = BuildSingle(ov, StartCfg{4, -1}, withOv, c);
+        AddStartOverrideNotes(&op, withOv);
+        AddStartOverrideNotes(&op, withOv);   // idempotent
+        int notes = 0;
+        for (auto& n : op.notes) if (n.find(kStartOverrideNote) != std::wstring::npos) notes++;
+        check(hk && op.rows.size() == 1 && op.rows[0].blocked.empty() && op.rows[0].before.start == 3 && op.rows[0].op.start == 4 &&
+                  op.rows[0].evidence == kStartOverrideNote && notes == 1,
+              L"visibility (A3): a plan row for an item with a StartOverride starts from the SCM's value and notes that Windows "
+              L"applies StartOverride over Start");
+    }
     check(tsv.find("\nhyperkbd\tdrivers\t") != std::string::npos && tsv.find("\tManual\t") != std::string::npos &&
               tsv.find("\t0\t0=3;1=3;2=3\n") != std::string::npos && tsv.find("#start_overridden\t1 ") != std::string::npos,
           L"visibility: --dump-list-live has raw_start and start_override columns and counts the overridden drivers");
@@ -299,6 +317,13 @@ void RunVisibilitySelftest(const std::wstring& fixture, const Kb& kb, const std:
         std::wstring banner = TiLeftText(l2, live2);
         check(l2.size() == 1 && l2[0].tiStopFailed && TiLeftRunning(l2, live2) && banner.find(L"for the TrustedInstaller read") != std::wstring::npos,
               L"visibility (R2): a stop that failed after a TI read persists as the TrustedInstaller-left-running banner: \"" + banner + L"\"");
+        {   // Review A2: finished reads that stopped TrustedInstaller again stay on disk and out of the history; an open claim stays.
+            std::vector<UndoLog> both = l1;
+            both.insert(both.end(), l2.begin(), l2.end());
+            DropClosedTiReads(&both);
+            check(both.size() == 1 && both[0].tiStopFailed && LoadLogs(cs, nullptr).size() == 1,
+                  L"visibility (A2): closed TrustedInstaller read logs leave the history (files kept); a failed stop's claim stays");
+        }
         // Running already: nothing to record, and no control permission.
         Store rs(newTempDir(L"ti-read-running"));
         FakeTiStart t3;
@@ -472,6 +497,16 @@ void RunOverrideSelftest(const std::wstring& fixture, const Kb& kb, const std::f
                   fr.rows.size() == 1 && !fr.rows[0].blocked.empty() && !fr.rows[0].protectedRow && !OverrideOffered(fr),
               L"override (R1): Undo and Resume lift only rows an override apply marked, only back to the logged before value; "
               L"an unmarked Boot restore and a protected forward resume stay refused with the box on");
+    }
+    if (k >= 0) {   // A1: a marked row is lifted only when its apply finished it (D ok) and its target was not Boot or System
+        UndoLog notDone = logs[(size_t)k];
+        for (auto& rr : notDone.rows) { rr.hasD = false; rr.result.clear(); }
+        UndoLog lowTarget = logs[(size_t)k];
+        for (auto& rr : lowTarget.rows) rr.after = StartCfg{1, -1};
+        Plan a1 = BuildUndo(notDone, ab, afterItems, on), a2 = BuildUndo(lowTarget, ab, afterItems, on);
+        check(a1.rows.size() == 1 && !a1.rows[0].blocked.empty() && a1.protMarked == 0 && a2.rows.size() == 1 &&
+                  !a2.rows[0].blocked.empty() && a2.protMarked == 0,
+              L"override (A1): a marked row without D ok, or with a Boot/System override target, is not lifted by Undo");
     }
     {   // R1: Boot/System targets are checked before never-touch, so a never-touch item can't hide them.
         Plan sysT = BuildSingle(*bootDrv, StartCfg{1, -1}, items, on);

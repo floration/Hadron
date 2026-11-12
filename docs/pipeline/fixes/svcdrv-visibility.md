@@ -24,9 +24,15 @@ Confirmed on the owner's PC with this branch's `--dump-list-live` (8136334, read
   the Boot-start list looked short. Windows uses StartOverride to demote unused inbox boot drivers (reasoning, from how
   Windows handles these keys; not checked beyond this PC's values). Before this branch the page also marked such a
   row "(pending)", because its registry Start differed from the SCM's.
-- **51 registry-only keys** (744 keys, 693 SCM entries) were never shown at all; they are now, read-only.
-- **TrustedInstaller added nothing** (items +0, configs +0): administrators already see every service and driver
-  there, and the status line now says that with the number.
+- **51 registry-only keys** (744 keys, 693 SCM entries) were never shown at all; they are now, read-only. Fs_Rec, the
+  one Start=0 key `sc query` didn't list, is one of them.
+- **694 vs 744 Services keys.** The two counts come from different methods: 694 is the earlier count of
+  `HKLM\SYSTEM\CurrentControlSet\Services` subkeys made with `reg query` before this branch; 744 is
+  `ListServiceKeys`' count in the dump (every subkey of `ControlSet<Select\Current>\Services`, links included). This
+  write-up has no data on which keys make the 50 between them or whether keys were added between the two runs; the
+  dump's 744 is the count the page now uses, and all 744 are on the page (693 from the SCM, 51 registry-only).
+- **TrustedInstaller added nothing** (items +0, configs +0): TrustedInstaller saw nothing an administrator didn't, and
+  the status line now says that with the number.
 - Two weak spots in `LiveBackend::Enumerate` were hardened anyway: a page that returned no entry while asking for no
   more than the buffer would have looped without progress until the guard (now it grows, then fails), and a name
   returned twice across pages would have been listed twice (now dropped and counted).
@@ -65,6 +71,13 @@ Confirmed on the owner's PC with this branch's `--dump-list-live` (8136334, read
   logged before value. A forward resume of a protected change is refused (apply it again, or undo it).
 - *StartOverride display.* "Optional/hidden by default" read as: the Registry Start column is on the Drivers tab only
   and is the first column dropped when the list is narrow; the Start type cell carries the registry value anyway.
+- *Review A1-A3.* Undo lifts a marked row only when its apply finished it (D ok) and its target was 2 or more. Finished
+  `ti-read` logs whose TrustedInstaller was not started or was stopped again stay on disk but leave the page's history
+  (`DropClosedTiReads`; an open claim stays for the banner; nothing is deleted). A driver whose registry Start is 0 is
+  kept as Boot-start even when a StartOverride makes the SCM report Manual, and every plan row for an item with a
+  StartOverride says "Windows applies StartOverride over Start, so this change may not take effect (reasoning, not
+  tested)". On the owner's PC that keeps the 49 overridden inbox boot drivers out of every plan unless the
+  protected-items override offers them, like any Boot-start driver.
 - *A TrustedInstaller read with no data folder.* No claim can be written, so a stopped TrustedInstaller is not started
   (the status says why); a running one is used without the control permission.
 - *Launch-protected single changes.* Off, the single-change plan is as before (offered; Windows refuses at apply).
@@ -78,7 +91,7 @@ Confirmed on the owner's PC with this branch's `--dump-list-live` (8136334, read
 - *Registry-only items without a Type.* Shown on the Services tab with type "No Type value", per the spec.
 
 ## Tests
-- `--selftest`: 481 checks (was 439), standalone and in the suite, under Wine. New (`selftest_visibility.cpp`, and
+- `--selftest`: 484 checks (was 439), standalone and in the suite, under Wine. New (`selftest_visibility.cpp`, and
   five UI checks in `module.cpp`):
   - the fixture's `regkeys.txt`: a typed key on the Drivers tab, a key without Type on Services, a link as a leaf;
   - the reported shape reproduced on the fake (every Boot-start driver left out of the enumeration): the bare
@@ -88,14 +101,16 @@ Confirmed on the owner's PC with this branch's `--dump-list-live` (8136334, read
     as 0, a refused impersonation keeps the admin list, the dump never starts TrustedInstaller;
   - the dump's header and rows;
   - StartOverride: the fixture's hyperkbd (registry Start=0, StartOverride 0/1/2 = 3, SCM Manual) is overridden, not
-    pending; plans start from Manual; the dump's raw_start/start_override columns and count; the list cell text;
+    pending, and kept as a Boot-start driver (A3); a synthetic registry-Manual override row plans from the SCM's value
+    with the may-not-take-effect note; the dump's raw_start/start_override columns and count; the list cell text;
   - a partial Services key list in the status text and the dump header;
   - the TI read claim: started, recorded and stopped; a failed stop persists as the banner; nothing recorded when
-    TrustedInstaller already runs; not started when the claim can't be written;
+    TrustedInstaller already runs; not started when the claim can't be written; closed reads leave the history (A2);
   - the override: off by default, rows freed and unticked when on, built-in presets/Default/Stock identical,
     launch-protected / registry-only / unreadable / Boot-System targets still refused, custom presets, no registry
     fallback, a Boot-start driver applied to Disabled and undone back to Boot on the fake with snapshot, log and zip,
-    the `prot` mark, an unmarked undo row and a protected forward resume refused, a System target refused;
+    the `prot` mark, an unmarked undo row and a protected forward resume refused, a System target refused, a marked
+    row without D ok or with a Boot/System target not lifted (A1);
     UI: off at start, F4, the second confirmation (click only, withdrawn by a tick change), a rebuild brings a
     protected row back unticked, reset on close and on the next plan, never in the settings.
 - `tests/tools/services_check.sh`: goldens unchanged (10 plans and delayedlinger); new screens

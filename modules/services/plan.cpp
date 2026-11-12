@@ -235,6 +235,11 @@ Guard CheckGuard(const SvcItem& s, const Ctx& c) {
     if (s.RegOnly()) return never(L"registry only: the SCM has not loaded it, so Hadron has no service to change and never writes its key");
     if (s.cfgUnknown) return never(L"its configuration could not be read, and Hadron never changes what it can't read");
     if (drv && s.cfg.start == 0) return never(L"Boot-start driver: loaded by the boot loader before Windows can read the disk");
+    // A Boot-start driver that a StartOverride value demotes in the SCM's view (registry Start=0) is still one in the
+    // registry: kept the same way (review A3).
+    if (drv && !s.startOverride.empty() && s.regStart == 0)
+        return never(L"Boot-start driver in its registry Start (StartOverride makes the SCM report " + StartName(s.cfg.start) +
+                     L"): loaded by the boot loader before Windows can read the disk");
     if (!drv && s.cfg.start < 2 && s.kind != Kind::UserInstance)
         return never(L"a service whose registry Start is " + StartName(s.cfg.start) + L": not a start type Windows uses for services, so Hadron leaves it");
     // Fail closed: without the device list or the boot disk the filter and boot-path checks can't run.
@@ -951,7 +956,8 @@ Plan BuildUndo(const UndoLog& log, Backend& b, const std::vector<SvcItem>& items
         }
         bool lift = false;
         // Review R1: only a row an override apply marked is lifted, only back to its logged before value.
-        const bool marked = u0.prot;
+        // Review A1: and only a row the apply finished (D ok) whose override target was not Boot or System.
+        const bool marked = u0.prot && u0.after.start >= 2 && u0.hasD && u0.result == L"ok";
         if (std::wstring g = TargetGuard(live, u0.before, c, &lift, marked); !g.empty()) {
             ProtectedOrBlocked(&r, &p, g, lift && marked, viaReg, c);
         } else if (viaReg) {
@@ -2205,6 +2211,38 @@ private:
 std::unique_ptr<TiClaimLog> MakeTiReadClaim(const Store& st, const std::wstring& machine, const std::wstring& build,
                                             const std::wstring& lockName) {
     return std::make_unique<TiReadClaim>(st, machine, build, lockName);
+}
+
+// ---- StartOverride notes and the TrustedInstaller read's history (review A2, A3) ------------------------------
+const wchar_t kStartOverrideNote[] =
+    L"Windows applies StartOverride over Start, so this change may not take effect (reasoning, not tested)";
+
+void AddStartOverrideNotes(Plan* p, const std::vector<SvcItem>& items) {
+    std::vector<std::wstring> names;
+    for (auto& r : p->rows) {
+        const SvcItem* s = nullptr;
+        for (auto& i : items) if (IEq(i.name, r.name)) { s = &i; break; }
+        if (!s || s->startOverride.empty()) continue;
+        if (r.evidence.find(kStartOverrideNote) == std::wstring::npos)
+            r.evidence = r.evidence.empty() ? std::wstring(kStartOverrideNote) : r.evidence + L"; " + kStartOverrideNote;
+        names.push_back(r.name);
+    }
+    if (names.empty()) return;
+    std::wstring n = L"StartOverride (" + Join(names, L", ") + L"): " + kStartOverrideNote + L".";
+    for (auto& x : p->notes) if (x == n) return;
+    p->notes.push_back(n);
+}
+
+void DropClosedTiReads(std::vector<UndoLog>* logs) {
+    std::vector<UndoLog> keep;
+    keep.reserve(logs->size());
+    for (auto& l : *logs) {
+        // A finished read whose TrustedInstaller was never started, or was stopped again, holds nothing anyone needs:
+        // left on disk (never deleted), left out of the page's history. An open claim stays for the banner.
+        const bool closed = l.source == L"ti-read" && l.hasE && (l.tiNotStarted || l.tiStopped || !l.tiStarting);
+        if (!closed) keep.push_back(l);
+    }
+    *logs = std::move(keep);
 }
 
 }  // namespace hx::services

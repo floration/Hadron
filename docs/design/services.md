@@ -375,8 +375,10 @@ values named 0, 1, 2..., `REG_DWORD`). When the registry Start differs from the 
 value is present, the Start type cell says e.g. "Manual (registry: Boot, StartOverride)" (Console: the short form with "(reg ...)"),
 never "pending"; the Drivers tab has a "Registry Start" column (dropped first when the list is narrow; it sorts), and
 the detail pane lists the raw Start, each StartOverride value and "Windows uses StartOverride to demote unused inbox
-boot drivers; the SCM reports the overridden value" labelled reasoning. Plans, guards and writes use the SCM's value;
-nothing writes StartOverride. On the owner's PC 49 inbox boot drivers have this shape (registry Start=0, StartOverride
+boot drivers; the SCM reports the overridden value" labelled reasoning. Plans and writes use the SCM's value;
+nothing writes StartOverride. `CheckGuard` keeps a driver whose registry Start is 0 under a StartOverride as a
+Boot-start driver (never-touch), and every plan row for an item with a StartOverride carries "Windows applies
+StartOverride over Start, so this change may not take effect (reasoning, not tested)", with one plan note naming them. On the owner's PC 49 inbox boot drivers have this shape (registry Start=0, StartOverride
 0/1/2 = 3), which is why the Boot-start drivers looked missing.
 
 **TrustedInstaller read pass.** With the TrustedInstaller toggle on (session only, never persisted), the load runs the
@@ -384,7 +386,8 @@ same pass again under TrustedInstaller's impersonation token (`LiveTi`: Acquire,
 checks, Revert in a scope guard on every path, Release), with Hadron's own file writes refused meanwhile
 (`ImpersonationFlag`). Acquire may start TrustedInstaller if it is stopped, and only after a flushed claim: a log with
 source `ti-read` and no rows (B, then `T starting`, under the apply lock) written before the start, `T started <pid>
-<creation time>` after it, `T stopped` or `T stopfailed` and E at the end, the records an apply writes, so the
+<creation time>` after it, `T stopped` or `T stopfailed` and E at the end, the records an apply writes (a finished read that stopped it again
+stays on disk and leaves the page's history; nothing is deleted), so the
 TrustedInstaller-left-running banner and its Stop it plan cover a read too ("for the TrustedInstaller read"); a
 `ti-read` log is never offered as an interrupted apply. Without a writable data folder, or when the claim can't be
 written, a stopped TrustedInstaller is left alone and the status says why. `Backend::AllowTiControl` lets `Control`
@@ -405,7 +408,8 @@ in red, because core's ListView has no per-row colour). Still refused with it on
 itself refuses this"), registry-only and unreadable items, per-user instances, a Boot or System target on a service
 or from a single change, and any registry-fallback write (`MarkRegFallback` refuses a protected row and `RunApply`
 refuses one marked for the registry anyway). The apply writes `prot` on each protected row's P record. Undo (and
-Resume of an interrupted undo) show the box only when they hold a marked row, and lift only those rows, only back to
+Resume of an interrupted undo) show the box only when they hold a marked row (finished, D ok, with a target of Manual
+or higher), and lift only those rows, only back to
 the value the log recorded before that apply (for a Boot-start driver, back to Boot through the SCM), with the box
 ticked on that undo plan; an unmarked row, a forward resume of a protected change and any other Boot or System target
 stay refused (DECISIONS 2026-11-12, proxy). `TargetGuard` checks Boot/System targets before never-touch. A rebuild

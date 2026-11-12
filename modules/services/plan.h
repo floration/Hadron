@@ -209,6 +209,14 @@ public:
 std::unique_ptr<TiClaimLog> MakeTiReadClaim(const Store& st, const std::wstring& machine, const std::wstring& build,
                                             const std::wstring& lockName = L"Global\\Hadron.services.apply");
 
+// Review A3: every row for an item with a StartOverride subkey gets kStartOverrideNote in its evidence, and the plan
+// one note naming them. Idempotent.
+extern const wchar_t kStartOverrideNote[];
+void AddStartOverrideNotes(Plan* p, const std::vector<SvcItem>& items);
+// Review A2: the page's history leaves out finished "ti-read" logs whose TrustedInstaller was not started or was stopped
+// again (the files stay; NextOrder reads them unfiltered). An open claim stays, for the left-running banner.
+void DropClosedTiReads(std::vector<UndoLog>* logs);
+
 // ---- apply ---------------------------------------------------------------------------------------------
 struct ApplyEnv {
     Backend* backend = nullptr;

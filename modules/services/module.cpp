@@ -992,6 +992,7 @@ void ServicesModule::OnLoaded() {
     hasFirst_ = o.hasFirst;
     first_ = std::move(o.first);
     logs_ = std::move(o.logs);
+    DropClosedTiReads(&logs_);   // review A2: finished TrustedInstaller reads stay on disk, out of the history
     resultFresh_ = true;   // undoable_ is recomputed from these logs below: a result banner's Undo now means this apply
     writeAccess_ = std::move(o.access);
     if (o.storeRefused) {
@@ -1214,6 +1215,7 @@ void ServicesModule::LoadFixture(const wchar_t* dir) {
     first_ = std::move(fx.first);
     store_.SetRoot(fixtureDir_);
     logs_ = LoadLogs(store_, nullptr);
+    DropClosedTiReads(&logs_);   // review A2
     presets_ = LoadCustomPresets(store_, &fx.problems);
     measures_ = LoadMeasurements(store_, &fx.problems);
     store_.SetRoot(L"");   // read once; fixture mode never writes
@@ -1567,6 +1569,7 @@ Plan ServicesModule::BuildFrom(PlanJob& j, Backend* b, const Kb* kb) {
     if (b && p.kind != PlanKind::Control) MarkTi(&p, *b, j.tiOn, j.items);   // re-runs the dependency check
     if (r.tiStop) MarkTiStop(&p, j.logs, j.items);   // R4: the claimed process, and the reason from data
     p.overrideOn = j.protOn && OverrideOffered(p);
+    if (p.kind != PlanKind::Control) AddStartOverrideNotes(&p, j.items);   // review A3
     return p;
 }
 
