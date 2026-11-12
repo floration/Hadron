@@ -86,10 +86,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The commit the remote tag points at (peeled, so annotated tags compare as their commit; "" if none).
+          remote_commit() { git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -n1 | cut -f1; }
+          # Right before publishing: the tag must be absent (manual run) or on this commit (tag push), so a tag
+          # pushed meanwhile on another commit never gets this build attached.
+          pre=$(remote_commit) || { echo "::error::can't read the remote tag"; exit 1; }
+          if [ -n "$pre" ] && [ "$pre" != "$GITHUB_SHA" ]; then echo "::error::$TAG points at $pre, not $GITHUB_SHA"; exit 1; fi
           # --target only matters when the tag doesn't exist yet (manual run): it is created on this commit.
           gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Hadron ${TAG#v}" --generate-notes
-          # A tag pushed meanwhile on another commit would make GitHub ignore --target: never ship that.
-          got=$(git ls-remote origin "refs/tags/$TAG" | cut -f1)
+          # And after, for the remaining race. A failed release is deleted; its tag is left alone, since it may be
+          # someone else's: if this run created it, delete it by hand before re-running the same version.
+          got=$(remote_commit || true)
           if [ "$got" != "$GITHUB_SHA" ]; then
             echo "::error::$TAG points at ${got:-nothing}, not $GITHUB_SHA; deleting the release"
             gh release delete "$TAG" --yes || true
