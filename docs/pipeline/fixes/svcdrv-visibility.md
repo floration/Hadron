@@ -84,8 +84,8 @@ Confirmed on the owner's PC with this branch's `--dump-list-live` (8136334, read
   With the override on, the row is blocked with "Windows itself refuses this change", as the spec asks.
 - *Registry fallback.* The spec refuses Boot/System writes through it; this build refuses every protected row
   through it (SCM path only), which is stricter.
-- *Baseline red marker.* Core's `ListView` has no per-row colour, so the Baseline list shows "PROTECTED: <reason>" as
-  text and the detail pane in red; Console's grid draws it red. A per-row ink in `core/ui` is a lead follow-up.
+- *Baseline red marker.* Done in fix/svcdrv-protected-red: protected rows use `ListView::Ink::Bad` (core/ui, PR #13); the cell still says "PROTECTED: <reason>" as
+  well as in red, and the detail pane is red; Console's grid draws it red.
 - *TI starting the service for a read.* The existing TI rules start TrustedInstaller only for an apply. A read pass
   needs the token too, so the toggle's reload may start it, and stops it again when Hadron started it.
 - *Registry-only items without a Type.* Shown on the Services tab with type "No Type value", per the spec.

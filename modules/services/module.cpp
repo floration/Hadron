@@ -1666,6 +1666,7 @@ void ServicesModule::OnPlanned() {
 
 void ServicesModule::RefreshPlanList() {
     std::vector<std::vector<std::wstring>> rows;
+    std::vector<ListView::Ink> ink;
     const bool ctl = plan_.kind == PlanKind::Control;
     std::vector<std::wstring> keys = planColKeys_;
     if (keys.empty()) keys = ctl ? std::vector<std::wstring>{L"box", L"name", L"op", L"why"}
@@ -1684,8 +1685,12 @@ void ServicesModule::RefreshPlanList() {
                                  : r.viaReg ? r.regNote : r.reason);
         }
         rows.push_back(std::move(cells));
+        // Protected rows offered by the override are drawn in the theme's bad colour; the cell text still says
+        // PROTECTED, since ink is skipped on the selected row and in high contrast.
+        ink.push_back(r.protectedRow && r.blocked.empty() ? ListView::Ink::Bad : ListView::Ink::Normal);
     }
     plist_.SetRows(std::move(rows));
+    plist_.SetRowInk(std::move(ink));   // after SetRows, which clears it
 }
 
 // R10: a rebuilt plan (TI toggle, reload) comes back with the builder's defaults; the user's own ticks and unticks
@@ -2994,9 +2999,17 @@ int ServicesModule::ProtCheckbox(HDC dc, int x, int y, int right, bool console) 
     COLORREF edge = !en ? p.dis : protOn_ ? p.bad : p.badT;
     FillSolid(dc, bx, protOn_ ? (p.hc ? p.text : p.bad) : p.bg);
     FrameRectC(dc, bx, edge);
-    if (protOn_) {   // a check mark the high-contrast palette keeps visible
-        RECT in{bx.left + Sc(3), bx.top + Sc(3), bx.right - Sc(3), bx.bottom - Sc(3)};
-        FillSolid(dc, in, p.hc ? p.bg : p.onAcc);
+    if (protOn_) {   // a drawn check mark (no font glyph needed): a filled inner square read as an empty box
+        HPEN pen = CreatePen(PS_SOLID, std::max(2, Sc(2)), p.hc ? p.bg : p.onAcc);
+        if (pen) {
+            HGDIOBJ old = SelectObject(dc, pen);
+            const int w = bx.right - bx.left, h = bx.bottom - bx.top;
+            MoveToEx(dc, bx.left + w * 22 / 100, bx.top + h * 52 / 100, nullptr);
+            LineTo(dc, bx.left + w * 42 / 100, bx.top + h * 72 / 100);
+            LineTo(dc, bx.left + w * 78 / 100, bx.top + h * 30 / 100);
+            SelectObject(dc, old);
+            DeleteObject(pen);
+        }
     }
     for (auto& ln : lines) {
         RECT lr{x + box + Sc(8), y, right, y + lh};
