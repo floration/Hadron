@@ -408,15 +408,15 @@ void Host::PaintFKeys(HDC dc, const RECT& cl) {
         SIZE ks{}, ls{};
         GetTextExtentPoint32W(dc, k.key.c_str(), (int)k.key.size(), &ks);
         GetTextExtentPoint32W(dc, k.label.c_str(), (int)k.label.size(), &ls);
-        int w = ks.cx + S(4, dpi_) + ls.cx;
+        int w = ks.cx + S(5, dpi_) + ls.cx + S(2, dpi_);   // +2: GDI extents run short of the drawn glyphs under some fonts
         if (x + w > bar.right - S(8, dpi_)) break;
-        RECT kr{x, bar.top, x + ks.cx, bar.bottom}, lr{x + ks.cx + S(4, dpi_), bar.top, x + w, bar.bottom};
+        RECT kr{x, bar.top, x + ks.cx, bar.bottom}, lr{x + ks.cx + S(5, dpi_), bar.top, x + w, bar.bottom};
         SetTextColor(dc, t.highContrast ? GetSysColor(COLOR_HIGHLIGHT) : t.accent);
         DrawTextW(dc, k.key.c_str(), -1, &kr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
         SetTextColor(dc, t.highContrast ? GetSysColor(COLOR_WINDOWTEXT) : t.text2);
         DrawTextW(dc, k.label.c_str(), -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
         fkeyRects_[i] = RECT{x, bar.top, x + w, bar.bottom};
-        x += w + S(14, dpi_);
+        x += w + S(16, dpi_);
     }
     SelectObject(dc, o);
 }
