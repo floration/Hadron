@@ -64,6 +64,14 @@ constexpr UINT WM_SVC_SIGNER = WM_MODULE_BASE + 20;   // signer worker -> view
 constexpr UINT WM_SVC_EVENTS = WM_MODULE_BASE + 21;   // event 7040 worker -> view
 constexpr UINT WM_SVC_SXS = WM_MODULE_BASE + 5;       // WinSxS manifest worker -> view
 constexpr UINT WM_SVC_FILE = WM_MODULE_BASE + 6;      // preset/measurement file worker -> view
+constexpr UINT WM_SVC_CHROME = WM_MODULE_BASE + 7;    // view -> view: the host's chrome (tree, F-keys, header) changed
+// Keys a click on the host's F-key bar sends for commands that are not a plain key: Ctrl+Z / Ctrl+M (a click has no
+// Ctrl held), Space and Enter (they would activate a focused control instead). Unassigned virtual-key codes, so no
+// real key press produces them.
+constexpr UINT kVkUndo = 0x88, kVkMeasure = 0x89, kVkTick = 0x8A, kVkSave = 0x8B;
+// Three-Pane tree ids (NavNodes).
+enum NavId { NAV_SVC = 1, NAV_DRV = 2, NAV_PRESET = 10, NAV_PRESETS = 20, NAV_MEASURE = 21 };
+const wchar_t* const kShowNames[] = {L"all", L"running", L"stopped", L"changed", L"drift"};
 constexpr UINT_PTR kProgressTimer = 1;
 const wchar_t* const kViewClass = L"Hadron.services.View";
 const wchar_t* const kAppTitle = L"Services and drivers";
@@ -77,7 +85,8 @@ enum ClickId {
     ID_PRESET = 100,   // + 0 first snapshot, 1 Windows stock, 2 bloat, 3 stripped, 4 minimum
     ID_SET = 200,      // + start type 2..4, + 5 for Auto (delayed)
     ID_CTL = 300,      // + 0 start, 1 stop, 2 restart
-    ID_FOCUS_LIST = 900, ID_FOCUS_DETAIL, ID_FOCUS_DETAIL_L,   // tab stops that are not click targets (L: Console's left column)
+    ID_FOCUS_LIST = 900, ID_FOCUS_DETAIL, ID_FOCUS_DETAIL_L, ID_FOCUS_DETAIL_M,   // tab stops, not click targets (L, M: Console's left and middle columns)
+    ID_SHOW = 940,     // + Console's show: filter (0 all .. 4 drift)
     ID_CONKEY = 400,   // + a Console action (CA_*), the F-key bar's click targets
 };
 constexpr int ID_PROT = 961;       // the protected-items override checkbox (plan screen only; DECISIONS 2026-11-11, owner)
@@ -86,7 +95,7 @@ constexpr int ID_PROT_BACK = 963;  // the second confirmation: back to the plan
 constexpr int ID_REG = 960;   // the registry fallback's per-apply switch (regfallback.h), on the plan screen only
 // Keyboard focus. Control = a chip or button (focusId_), reached with Tab/Shift+Tab in reading order and
 // activated with Enter or Space. Apply is never a tab stop: a plan is applied by a mouse click only.
-enum class Focus { List, Search, Detail, DetailLeft, Control, Name };   // Name: the custom preset name field
+enum class Focus { List, Search, Detail, DetailLeft, DetailMid, Control, Name };   // Name: the custom preset name field
 // Presets: the custom preset manager (save, open, export, import, remove). Measure: measured before/after.
 enum class Mode { List, Plan, Presets, Measure };
 
@@ -181,7 +190,7 @@ struct Pal {
 enum ParaKind { P_TITLE, P_SUB, P_HEAD, P_TEXT, P_KV, P_GAP };
 // side: where Console's two-column detail puts this paragraph and the ones after it (0 = as the one before; the
 // document starts on the left). Set on headings where they are pushed, so a KB title never moves a block.
-enum ParaSide { SIDE_SAME = 0, SIDE_LEFT = 1, SIDE_RIGHT = 2 };
+enum ParaSide { SIDE_SAME = 0, SIDE_LEFT = 1, SIDE_RIGHT = 2, SIDE_THIRD = 3 };   // THIRD: Console's basis column
 struct Para { ParaKind kind; std::wstring label, text; COLORREF color; int side = SIDE_SAME; };
 
 // The request a plan was built from, so it can be rebuilt (TI toggle, refresh) with the same intent.
@@ -349,6 +358,12 @@ public:
     void LoadFixture(const wchar_t* dir) override;
     void Paint(HDC dc, const RECT& rc) override;
     void PaintPage(HDC dc, const RECT& rc);
+    // Layout chrome (core/host/module.h): the Three-Pane tree's sections, the Console F-key bar and header line.
+    std::vector<NavNode> NavNodes() override;
+    int NavSelected() override;
+    void OnNavSelect(int id) override;
+    std::vector<hx::FKey> FKeys() override;
+    std::wstring ConsoleHeader() override;
 
 private:
     static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM w, LPARAM l);
@@ -356,6 +371,17 @@ private:
     PaintCtx PCtx() const { return PaintCtx{host_->Theme(), host_->Fonts(), host_->Dpi(), host_->Layout()}; }
     int Sc(int px) const { return S(px, host_ ? host_->Dpi() : 96); }
     bool Console() const { return host_ && host_->Layout() == Layout::Console; }
+    bool ThreePane() const { return host_ && host_->Layout() == Layout::ThreePane; }
+    // core's ListView header and row heights per layout (widgets.cpp; private there), for scrolling and hit tests.
+    int LvHead() const { return Sc(Console() ? 24 : ThreePane() ? 26 : 32); }
+    int LvRow() const { return Sc(Console() ? 22 : ThreePane() ? 24 : 30); }
+    // Corner radius: Baseline's own, Console's small one, and Three-Pane's square corners (2 px at most).
+    int Rad(int baseline, int console) const { return ThreePane() ? Sc(2) : Console() ? Sc(console) : Sc(baseline); }
+    // After a paint: when the tree sections, the F-keys or the header line changed, tell the host (posted, never
+    // from inside WM_PAINT).
+    void SyncChrome();
+    std::wstring chromeSig_;
+    Layout lastLayout_ = Layout::Baseline;
     void Invalidate() { if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
     bool HasFocus() const { return shotFocus_ || (hwnd_ && GetFocus() == hwnd_); }
     int FocusTarget() const;              // focus_ as a tab-stop id
@@ -487,7 +513,8 @@ private:
             else if (top + rowH > sb.Offset() + view) sb.SetOffset(top + rowH - view);
         }
     };
-    struct FKey { std::wstring cap, label, shortLabel; int act; bool enabled, on; };
+    // One Console command: its key caption, labels, action, and the virtual key the host's F-key bar sends for it.
+    struct ConKey { std::wstring cap, label, shortLabel; int act; bool enabled, on; };
     void PaintConsole(HDC dc, const RECT& rc);
     int PaintConsoleBanners(HDC dc, const RECT& rc, int y);
     void PaintConsoleList(HDC dc, const RECT& rc, int y, int bottom);
@@ -497,19 +524,38 @@ private:
     void PaintConsoleDetail(HDC dc, const RECT& r, const std::wstring& name, const std::wstring& info,
                             const std::vector<Para>& doc, bool actions);
     void PaintConsoleHelp(HDC dc, const RECT& r);
-    void PaintFKeyBar(HDC dc, const RECT& r);
     int ConButton(HDC dc, int x, int y, const std::wstring& label, int id, bool on, bool enabled, bool primary = false);
     std::vector<ConCol> ConsoleListColumns(HDC dc, int widthPx);
     std::vector<ConCol> ConsolePlanColumns(HDC dc, int widthPx);
     void ConsoleListCells(int row, std::vector<ConCell>& out);
     void ConsolePlanCells(int row, std::vector<ConCell>& out);
-    std::vector<FKey> ConsoleKeys() const;
+    std::vector<ConKey> ConsoleKeys() const;
     bool OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled);
     bool OnConsoleKey(UINT vk);
     void OnConsoleAction(int act);
     void ConsoleSortPlan(int col);
     void ConsoleStatus();
     void ReplayKeys(const std::wstring& keys);
+
+    void PaintConsoleFilter(HDC dc, const RECT& rc, int y, int lineH);
+    // Splits the documents into Console's three bottom columns: identity and configuration | what it does | basis.
+    void SplitDoc3(const std::vector<Para>& d, std::vector<Para>* c1, std::vector<Para>* c2, std::vector<Para>* c3) const;
+    int conShow_ = 0;   // Console's "show:" filter (0 all, 1 running, 2 stopped, 3 changed vs first, 4 drift); Console only
+    bool ShowMatch(const SvcItem& s) const;
+    ScrollBar conMidSb_;               // the detail pane's middle column (Console: three columns)
+    RECT conMidRc_{}, conMidTrack_{};
+
+    // Three-Pane (board 7): a slim toolbar with the filter at its right end, a breadcrumb, then list | splitter |
+    // detail. detW_ is the detail pane's width in 96-dpi units, saved in Prefs ("detail_w").
+    int detW_ = 360;
+    bool splitDrag_ = false;
+    int splitGrab_ = 0;
+    RECT rcSplit_{};
+    int PaintToolbar(HDC dc, const RECT& rc, int y);
+    int PaintCrumb(HDC dc, const RECT& rc, int y);
+    int ToolButton(HDC dc, int x, int y, const std::wstring& label, int id, bool enabled, bool on = false, bool warn = false);
+    // The body under the breadcrumb: list on the left, a 5 px splitter, the detail pane on the right.
+    void SplitBody(int left, int right, int top, int bottom, RECT* list, RECT* det);
 
     ConGrid conList_, conPlan_;
     ScrollBar conLeftSb_;              // the detail pane's left column; detSb_ scrolls the right one
@@ -703,6 +749,11 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SETFOCUS: case WM_KILLFOCUS: Invalidate(); return 0;
     case WM_SETCURSOR:
         if (LOWORD(l) == HTCLIENT) {
+            POINT cp{};
+            if (ThreePane() && GetCursorPos(&cp) && ScreenToClient(h, &cp) && (splitDrag_ || PtInRect(&rcSplit_, cp))) {
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+                return TRUE;
+            }
             SetCursor(LoadCursorW(nullptr, hoverId_ == ID_SEARCH ? IDC_IBEAM : (hoverId_ > 0 ? IDC_HAND : IDC_ARROW)));
             return TRUE;
         }
@@ -713,6 +764,7 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_CAPTURECHANGED:
         if (detSb_.Dragging()) detSb_.OnMouse(WM_LBUTTONUP, 0, 0, rcDetSb_);
+        if (splitDrag_) { splitDrag_ = false; if (host_ && !fixture_) host_->Prefs().SetInt(L"detail_w", detW_); }
         search_.CancelDrag();
         nameField_.CancelDrag();
         Invalidate();
@@ -728,6 +780,7 @@ LRESULT ServicesModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SVC_EVENTS: if (ev_.OnEvents()) Invalidate(); return 0;
     case WM_SVC_SXS: OnSxs(); return 0;
     case WM_SVC_FILE: OnFileDone(); Invalidate(); return 0;
+    case WM_SVC_CHROME: if (host_) host_->ChromeChanged(); return 0;
     case WM_RBUTTONDOWN: SetFocus(h); return 0;
     case WM_SYSKEYDOWN:   // F10 arrives as a system key; in Console it is an F-key, not the menu key
         if (w == VK_F10 && Console()) { if (OnInput(WM_KEYDOWN, w, l)) Invalidate(); return 0; }
@@ -846,6 +899,7 @@ HWND ServicesModule::Create(IHost& host, HWND parent, const RECT& rc) {
     sortKey_ = host.Prefs().GetStr(L"sortKey", L"");
     sortAsc_ = host.Prefs().GetBool(L"sortAsc", true);
     search_.SetText(host.Prefs().GetStr(L"filter", L""));
+    detW_ = std::clamp(host.Prefs().GetInt(L"detail_w", detW_), 240, 1200);   // Three-Pane detail width (96-dpi px)
     backend_ = MakeLiveBackend();
     // The full path without a \\?\ prefix: the README shows it, and Store adds the prefix for each call.
     if (!dataDir.empty()) store_.SetRoot(Store::Plain(sys::ToExtended(dataDir)));
@@ -1349,7 +1403,7 @@ void ServicesModule::Refilter() {
     const std::wstring q = Lower(search_.Text());
     for (int i = 0; i < (int)items_.size(); i++) {
         const SvcItem& s = items_[i];
-        if (!OnTab(s, (Tab)tab_)) continue;
+        if (!OnTab(s, (Tab)tab_) || !ShowMatch(s)) continue;
         if (!q.empty() && !IContains(s.name, q) && !IContains(s.display, q) && !IContains(s.company, q) &&
             !IContains(s.group, q) && !IContains(s.account, q))
             continue;
@@ -1453,7 +1507,7 @@ void ServicesModule::RevealSelection(bool centre) {
     };
     if (centre) {
         // Rows below and above first, so the selection lands mid-list with context, not on the last line.
-        int rows = (rcList_.bottom - rcList_.top - Sc(Console() ? 24 : 32)) / std::max(1, Sc(Console() ? 22 : 30));
+        int rows = (rcList_.bottom - rcList_.top - LvHead()) / std::max(1, LvRow());
         int half = std::max(0, rows / 2);
         show(k + half);
         show(k - half);
@@ -1839,6 +1893,7 @@ void ServicesModule::OnClickId(int id) {
         return;
     }
     if (id == ID_SEARCH) { focus_ = Focus::Search; return; }
+    if (id >= ID_SHOW && id < ID_SHOW + 5) { conShow_ = id - ID_SHOW; conList_.lastSel = -2; Refilter(); return; }   // Console's show:
     if (id >= ID_PRESET && id < ID_PRESET + 5) {
         PlanReq r;
         r.tab = tab_;
@@ -1964,6 +2019,32 @@ void ServicesModule::OnClickId(int id) {
 bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (!host_) return false;
     if (Console()) { bool handled = false; bool r = OnConsoleInput(msg, w, l, &handled); if (handled) return r; }
+    if (ThreePane() && (msg == WM_LBUTTONDOWN || msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP)) {
+        // The splitter between the list and the detail pane: drag to resize; the width is saved when it is let go.
+        int mx = GET_X_LPARAM(l), my = GET_Y_LPARAM(l);
+        POINT mp{mx, my};
+        if (msg == WM_LBUTTONDOWN && PtInRect(&rcSplit_, mp)) {
+            splitDrag_ = true;
+            splitGrab_ = mx - rcSplit_.left;
+            SetCapture(hwnd_);
+            return true;
+        }
+        if (splitDrag_ && msg == WM_MOUSEMOVE) {
+            RECT cr{};
+            GetClientRect(hwnd_, &cr);
+            int detLeft = mx - splitGrab_ + Sc(5);
+            int w96 = std::clamp(MulDiv(std::max(0, (int)(cr.right - Sc(12) - detLeft)), 96, (int)std::max<UINT>(1, host_->Dpi())), 240, 1200);
+            if (w96 == detW_) return false;
+            detW_ = w96;
+            return true;
+        }
+        if (splitDrag_ && msg == WM_LBUTTONUP) {
+            splitDrag_ = false;
+            if (!fixture_) host_->Prefs().SetInt(L"detail_w", detW_);
+            if (GetCapture() == hwnd_) ReleaseCapture();
+            return true;
+        }
+    }
     const bool dbl = msg == WM_LBUTTONDBLCLK;   // the second click of a double-click: selects, never toggles again
     PaintCtx c = PCtx();
     ListView& lv = ActiveList();
@@ -2032,9 +2113,9 @@ bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
             if (focus_ != Focus::List) { focus_ = Focus::List; return true; }
             return false;
         }
-        if (focus_ == Focus::Detail || focus_ == Focus::DetailLeft) {   // DetailLeft: Console's left column
-            ScrollBar& sb = focus_ == Focus::Detail ? detSb_ : conLeftSb_;
-            const RECT& area = focus_ == Focus::Detail ? rcDetail_ : conLeftRc_;
+        if (focus_ == Focus::Detail || focus_ == Focus::DetailLeft || focus_ == Focus::DetailMid) {   // Left, Mid: Console's columns
+            ScrollBar& sb = focus_ == Focus::Detail ? detSb_ : focus_ == Focus::DetailMid ? conMidSb_ : conLeftSb_;
+            const RECT& area = focus_ == Focus::Detail ? rcDetail_ : focus_ == Focus::DetailMid ? conMidRc_ : conLeftRc_;
             int before = sb.Offset();
             int view = area.bottom - area.top;
             switch (w) {
@@ -2127,7 +2208,7 @@ bool ServicesModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
             // A click on a row's [x] box toggles that row: only when the click hit a row (r: the list selected it;
             // below the last row it hits none), and once per double-click, as in Console.
             int boxW = Sc(48);
-            if (r && !dbl && x < lrc.left + boxW && y > lrc.top + Sc(Console() ? 24 : 32)) TogglePlanRow(lv.Selected());
+            if (r && !dbl && x < lrc.left + boxW && y > lrc.top + LvHead()) TogglePlanRow(lv.Selected());
             if (lv.Selected() != before) detSb_.SetOffset(0);
         } else if (mode_ != Mode::List) {
             if (lv.Selected() != before) detSb_.SetOffset(0);
@@ -2162,7 +2243,7 @@ void ServicesModule::Chip(HDC dc, int& x, int y, const std::wstring& label, int 
     COLORREF fill = on ? p.acc : (hot ? p.chipHot : p.chip);
     COLORREF tc = on ? p.onAcc : (hot ? p.chipHotText : p.chipText);
     if (!enabled) { fill = on ? fill : p.disFill; tc = on ? tc : p.dis; }
-    RoundFill(dc, r, Console() ? Sc(4) : h, fill, !enabled && !on ? p.border : kNoColor);
+    RoundFill(dc, r, Console() ? Sc(4) : ThreePane() ? Sc(2) : h, fill, !enabled && !on ? p.border : kNoColor);
     ui::DrawText(dc, label, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
     if (enabled) AddClick(r, id);
     x += w + Sc(Console() ? 6 : 8);
@@ -2179,7 +2260,7 @@ int ServicesModule::Button(HDC dc, int right, int y, const std::wstring& label, 
     if (!enabled) { fill = p.disFill; tc = p.dis; }   // disabled Apply too: no accent left, so it can't read as live
     else if (primary) { fill = hot ? (p.hc ? p.acc : HoverAway(p.acc, p.onAcc, 0.16)) : p.acc; tc = p.onAcc; }
     else { fill = hot ? p.chipHot : p.chip; tc = hot ? p.chipHotText : p.chipText; }
-    RoundFill(dc, r, Sc(Console() ? 4 : 10), fill, enabled ? kNoColor : p.border);
+    RoundFill(dc, r, Rad(10, 4), fill, enabled ? kNoColor : p.border);
     ui::DrawText(dc, label, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
     if (enabled) AddClick(r, id);
     return w;
@@ -2196,7 +2277,7 @@ int ServicesModule::ButtonL(HDC dc, int left, int y, const std::wstring& label, 
     COLORREF fill = on ? (p.hc ? p.acc : Mix(p.panel, p.acc, 0.35)) : (hot ? p.chipHot : p.chip);
     COLORREF tc = on ? (p.hc ? p.onAcc : p.text) : (hot ? p.chipHotText : p.chipText);
     if (!enabled && !on) { fill = p.disFill; tc = p.dis; }
-    RoundFill(dc, r, Sc(Console() ? 4 : 8), fill, on ? p.acc : (!enabled ? p.border : kNoColor));
+    RoundFill(dc, r, Rad(8, 4), fill, on ? p.acc : (!enabled ? p.border : kNoColor));
     ui::DrawText(dc, label, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
     if (enabled && !on) AddClick(r, id);
     return w;
@@ -2349,7 +2430,7 @@ int ServicesModule::PaintBanners(HDC dc, const RECT& rc, int y0) {
     Pal p(host_->Theme());
     const Fonts& f = host_->Fonts();
     const bool con = Console();
-    int pad = Sc(con ? 10 : 20);
+    int pad = Sc(con ? 10 : ThreePane() ? 12 : 20);
     int y = y0;
     for (auto& b : Banners()) {
         COLORREF tone = b.tone == 2 ? p.bad : (b.tone == 1 ? p.warn : p.acc);
@@ -2366,8 +2447,8 @@ int ServicesModule::PaintBanners(HDC dc, const RECT& rc, int y0) {
         int h = std::max(Sc(con ? 24 : 30), textH + Sc(con ? 8 : 12));
         RECT r{pad, y, right, y + h};
         // High contrast: no mixed tint; the panel with a window-text outline.
-        if (p.hc) RoundFill(dc, r, Sc(con ? 3 : 8), p.panel, p.border);
-        else RoundFill(dc, r, Sc(con ? 3 : 8), Mix(p.panel, tone, 0.16));
+        if (p.hc) RoundFill(dc, r, Rad(8, 3), p.panel, p.border);
+        else RoundFill(dc, r, Rad(8, 3), Mix(p.panel, tone, 0.16));
         RECT bar{r.left, r.top, r.left + Sc(4), r.bottom};
         FillSolid(dc, bar, tone);
         int ty = y + (h - textH) / 2;
@@ -2384,7 +2465,7 @@ int ServicesModule::PaintBanners(HDC dc, const RECT& rc, int y0) {
             bool hot = hoverId_ == it->first;
             bool primary = it->first != ID_DISMISS && it->first != ID_INT_DISMISS && it->first != ID_MEAS_HIDE && it->first != ID_MEASURE;
             COLORREF fill = primary ? (hot ? (p.hc ? p.acc : HoverAway(p.acc, p.onAcc, 0.16)) : p.acc) : (hot ? p.chipHot : p.chip);
-            RoundFill(dc, ar, Sc(6), fill);
+            RoundFill(dc, ar, ThreePane() ? Sc(2) : Sc(6), fill);
             ui::DrawText(dc, it->second, ar, f.caption, primary ? p.onAcc : (hot ? p.chipHotText : p.chipText),
                          DT_SINGLELINE | DT_VCENTER | DT_CENTER);
             AddClick(ar, it->first);
@@ -2440,10 +2521,14 @@ int ServicesModule::PaintDoc(HDC dc, const RECT& r, const std::vector<Para>& doc
                 y += h + Sc(6);
                 break;
             }
-            case P_HEAD: {
-                y += Sc(8);
-                int h = measure(para.text, f.semi, W);
-                draw1(para.text, f.semi, para.color == kNoColor ? p.accT : col, r.left, W, h);
+            case P_HEAD: {   // Console and Three-Pane: small upper-case headers in text3 (boards 4 and 7)
+                const bool small = Console() || ThreePane();
+                y += Sc(Console() ? 6 : 8);
+                HFONT hf = small ? f.caption : f.semi;
+                std::wstring t = para.text;
+                if (small) for (auto& ch : t) ch = (wchar_t)towupper(ch);
+                int h = measure(t, hf, W);
+                draw1(t, hf, para.color == kNoColor ? (small ? p.faint : p.accT) : col, r.left, W, h);
                 y += h + Sc(3);
                 break;
             }
@@ -2487,8 +2572,8 @@ void ServicesModule::PaintDetailPanel(HDC dc, const RECT& r, const std::vector<P
 std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
     Pal p(host_->Theme());
     std::vector<Para> d;
-    auto kv = [&](const std::wstring& k, const std::wstring& v, COLORREF col = kNoColor) {
-        if (!v.empty()) d.push_back({P_KV, k, v, col});
+    auto kv = [&](const std::wstring& k, const std::wstring& v, COLORREF col = kNoColor, int side = SIDE_SAME) {
+        if (!v.empty()) d.push_back({P_KV, k, v, col, side});
     };
     d.push_back({P_TITLE, L"", s.display.empty() ? s.name : s.display, kNoColor});
     d.push_back({P_SUB, L"", s.name + L"   \u2022   " + (s.RegOnly() ? std::wstring(kRegOnlyKind) : TypeName(s.type)) +
@@ -2566,7 +2651,7 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
         if (!e->expl.empty()) d.push_back({P_TEXT, L"", e->expl, kNoColor});
         kv(L"If it's off", e->ifOff);
         kv(L"How to test", e->test);
-        kv(L"Basis", BasisLabel(e->basis) + (e->basisNote.empty() ? L"" : L": " + e->basisNote), p.mute);
+        kv(L"Basis", BasisLabel(e->basis) + (e->basisNote.empty() ? L"" : L": " + e->basisNote), p.mute, SIDE_THIRD);
         bool any = false;
         for (int lv = 0; lv < LV_COUNT; lv++) {
             if (e->lv[lv] < 0) continue;
@@ -2669,8 +2754,8 @@ std::vector<Para> ServicesModule::ItemDoc(const SvcItem& s) const {
 std::vector<Para> ServicesModule::PlanRowDoc(const PlanRow& r) const {
     Pal p(host_->Theme());
     std::vector<Para> d;
-    auto kv = [&](const std::wstring& k, const std::wstring& v, COLORREF col = kNoColor) {
-        if (!v.empty()) d.push_back({P_KV, k, v, col});
+    auto kv = [&](const std::wstring& k, const std::wstring& v, COLORREF col = kNoColor, int side = SIDE_SAME) {
+        if (!v.empty()) d.push_back({P_KV, k, v, col, side});
     };
     d.push_back({P_TITLE, L"", r.display.empty() ? r.name : r.display, kNoColor});
     d.push_back({P_SUB, L"", r.name, kNoColor});
@@ -2684,17 +2769,18 @@ std::vector<Para> ServicesModule::PlanRowDoc(const PlanRow& r) const {
         d.push_back({P_TEXT, L"", L"PROTECTED: " + r.protReason + L". Offered only because the protected-items override is on. " +
                                       kOverrideWarning + L" If Windows no longer starts, Undo cannot run: the apply's recovery folder and zip hold the old values for an offline restore.", p.badT});
     kv(L"Why", r.reason);
-    if (!r.basis.empty()) kv(L"Basis", BasisLabel(r.basis, r.basisCond) + (r.basisNote.empty() ? L"" : L": " + r.basisNote), p.mute);
-    kv(L"Contested", r.contested, p.warnT);
-    kv(L"Evidence", r.evidence);
-    kv(L"Warning", r.warning, p.warnT);
-    kv(L"Dependencies", r.depWarning, p.warnT);
-    if (r.needsTi) kv(L"Identity", L"needs TrustedInstaller: Windows refuses this write to administrators", p.warnT);
+    // Console puts these in its third column (basis and checks); Baseline ignores the side.
+    if (!r.basis.empty()) kv(L"Basis", BasisLabel(r.basis, r.basisCond) + (r.basisNote.empty() ? L"" : L": " + r.basisNote), p.mute, SIDE_THIRD);
+    kv(L"Contested", r.contested, p.warnT, SIDE_THIRD);
+    kv(L"Evidence", r.evidence, kNoColor, SIDE_THIRD);
+    kv(L"Warning", r.warning, p.warnT, SIDE_THIRD);
+    kv(L"Dependencies", r.depWarning, p.warnT, SIDE_THIRD);
+    if (r.needsTi) kv(L"Identity", L"needs TrustedInstaller: Windows refuses this write to administrators", p.warnT, SIDE_THIRD);
     if (r.viaReg) {
-        kv(L"Registry", r.regNote, p.warnT);
+        kv(L"Registry", r.regNote, p.warnT, SIDE_THIRD);
         kv(L"Basis", kRegRestartBasis, p.mute);
     }
-    else if (!r.regRefused.empty()) kv(L"Registry fallback", L"not allowed here: " + r.regRefused, p.mute);
+    else if (!r.regRefused.empty()) kv(L"Registry fallback", L"not allowed here: " + r.regRefused, p.mute, SIDE_THIRD);
     const KbEntry* e = kbOk_ ? kb_.Find(r.name) : nullptr;
     if (e) {
         bool sameTitle = e->title.empty() || Lower(e->title) == Lower(r.display.empty() ? r.name : r.display);
@@ -2845,14 +2931,40 @@ void ServicesModule::SetPlanColumns(int widthPx) {
 
 void ServicesModule::Paint(HDC dc, const RECT& rc) {
     if (!host_) return;
+    if (host_->Layout() != lastLayout_) {   // a layout switch: Console's own states end, and its show: filter stops applying
+        lastLayout_ = host_->Layout();
+        if (!Console()) { conHelp_ = conItemBar_ = false; if (focus_ == Focus::DetailLeft || focus_ == Focus::DetailMid) focus_ = Focus::List; }
+        if (loaded_) Refilter();
+    }
     bool pending = pendingStop_ >= 0;
     PaintPage(dc, rc);
     if (pending) PaintPage(dc, rc);   // --focus <n>: the first pass listed the tab stops and moved the focus
+    SyncChrome();
 }
 
 void ServicesModule::PaintPage(HDC dc, const RECT& rc) {
     clicks_.clear();
-    if (Console()) { PaintConsole(dc, rc); BuildTabStops(dc); return; }   // Tab reach and the focus ring in both layouts
+    if (Console()) { PaintConsole(dc, rc); BuildTabStops(dc); return; }   // Tab reach and the focus ring in all layouts
+    if (ThreePane()) {
+        // Board 7: toolbar (filter at its right end), banners, breadcrumb, then list | splitter | detail. The tabs and
+        // the preset plans are rows of the host's tree (NavNodes).
+        Pal p(host_->Theme());
+        FillSolid(dc, rc, p.bg);
+        rcSplit_ = RECT{};
+        int y = PaintToolbar(dc, rc, Sc(8));
+        y = PaintBanners(dc, rc, y);
+        y = PaintCrumb(dc, rc, y);
+        if (mode_ == Mode::Plan) PaintPlanMode(dc, rc, y);
+        else if (mode_ == Mode::Presets) PaintPresetsMode(dc, rc, y, rc.bottom - Sc(12));
+        else if (mode_ == Mode::Measure) PaintMeasureMode(dc, rc, y, rc.bottom - Sc(12));
+        else PaintListMode(dc, rc, y);
+        if (rcSplit_.right > rcSplit_.left) {   // the splitter: a 1 px rule in its middle, the accent while dragged
+            RECT ln{(rcSplit_.left + rcSplit_.right) / 2, rcSplit_.top, (rcSplit_.left + rcSplit_.right) / 2 + 1, rcSplit_.bottom};
+            FillSolid(dc, ln, splitDrag_ ? p.acc : p.border);
+        }
+        BuildTabStops(dc);
+        return;
+    }
     Pal p(host_->Theme());
     const Fonts& f = host_->Fonts();
     const bool con = Console();
@@ -2970,7 +3082,7 @@ int ServicesModule::TiToggle(HDC dc, int right, int y, int h) {
     else if (tiOn_) { fill = Mix(p.panel, p.warn, hot ? 0.40 : 0.30); edge = p.warnT; tc = p.text; }
     else { fill = hot ? p.chipHot : p.bg; edge = p.mute; tc = p.mute; }
     if (!en) { tc = p.dis; edge = p.border; }
-    RoundFill(dc, r, h, fill, edge);
+    RoundFill(dc, r, ThreePane() ? Sc(2) : h, fill, edge);
     ui::DrawText(dc, lbl, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
     if (en) AddClick(r, ID_TI);
     return w;
@@ -3044,7 +3156,7 @@ int ServicesModule::RegToggle(HDC dc, int right, int y, int h) {
     else if (regOn_) { fill = Mix(p.panel, p.warn, hot ? 0.40 : 0.30); edge = p.warnT; tc = p.text; }
     else { fill = hot ? p.chipHot : p.bg; edge = p.mute; tc = p.mute; }
     if (!en) { tc = p.dis; edge = p.border; }
-    RoundFill(dc, r, h, fill, edge);
+    RoundFill(dc, r, ThreePane() ? Sc(2) : h, fill, edge);
     ui::DrawText(dc, lbl, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
     if (en) AddClick(r, ID_REG);
     return w;
@@ -3085,6 +3197,7 @@ int ServicesModule::FocusTarget() const {
         case Focus::Search: return ID_SEARCH;
         case Focus::Detail: return ID_FOCUS_DETAIL;
         case Focus::DetailLeft: return ID_FOCUS_DETAIL_L;
+        case Focus::DetailMid: return ID_FOCUS_DETAIL_M;
         case Focus::Control: return focusId_;
         case Focus::Name: return ID_NAME;
     }
@@ -3096,6 +3209,7 @@ void ServicesModule::FocusTo(int id) {
     else if (id == ID_SEARCH) focus_ = Focus::Search;
     else if (id == ID_FOCUS_DETAIL) focus_ = Focus::Detail;
     else if (id == ID_FOCUS_DETAIL_L) focus_ = Focus::DetailLeft;
+    else if (id == ID_FOCUS_DETAIL_M) focus_ = Focus::DetailMid;
     else if (id == ID_NAME) focus_ = Focus::Name;
     else { focus_ = Focus::Control; focusId_ = id; }
 }
@@ -3123,6 +3237,7 @@ void ServicesModule::BuildTabStops(HDC dc) {
     RECT lr = ActiveListRc();
     if (lr.right > lr.left) tabStops_.push_back({lr, ID_FOCUS_LIST});
     if (Console() && conLeftRc_.right > conLeftRc_.left) tabStops_.push_back({conLeftRc_, ID_FOCUS_DETAIL_L});
+    if (Console() && conMidRc_.right > conMidRc_.left) tabStops_.push_back({conMidRc_, ID_FOCUS_DETAIL_M});
     if (rcDetail_.right > rcDetail_.left) tabStops_.push_back({rcDetail_, ID_FOCUS_DETAIL});
     std::stable_sort(tabStops_.begin(), tabStops_.end(), [](const Click& a, const Click& b) {
         return a.rc.top != b.rc.top ? a.rc.top < b.rc.top : a.rc.left < b.rc.left;
@@ -3140,7 +3255,7 @@ void ServicesModule::BuildTabStops(HDC dc) {
     const int g = Sc(2), w = std::max(2, Sc(2));
     HPEN pen = CreatePen(PS_SOLID, w, p.ring);
     HGDIOBJ op = SelectObject(dc, pen), ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    int rad = Console() ? Sc(6) : (r->bottom - r->top) + 2 * g;
+    int rad = Console() ? Sc(6) : ThreePane() ? Sc(3) : (r->bottom - r->top) + 2 * g;
     RoundRect(dc, r->left - g - 1, r->top - g - 1, r->right + g + 1, r->bottom + g + 1, rad, rad);
     SelectObject(dc, ob);
     SelectObject(dc, op);
@@ -3151,14 +3266,14 @@ void ServicesModule::PaintListMode(HDC dc, const RECT& rc, int y) {
     Pal p(host_->Theme());
     const Fonts& f = host_->Fonts();
     PaintCtx c = PCtx();
-    const bool con = Console();
-    int pad = Sc(con ? 10 : 20);
+    const bool con = Console(), tp = ThreePane();
+    int pad = Sc(con ? 10 : tp ? 12 : 20);
     int rowH = Sc(con ? 22 : 26);
-
+    int x = pad;
+    if (!tp) {   // Three-Pane: the tabs and preset plans are tree rows, and the filter is in the toolbar
     // Row 1: tabs on the left, the TrustedInstaller switch on the right.
     int nSvc = 0, nDrv = 0;
     for (auto& s : items_) (IsDriverType(s.type) ? nDrv : nSvc)++;
-    int x = pad;
     Chip(dc, x, y, L"Services (" + std::to_wstring(nSvc) + L")", ID_TAB_SVC, tab_ == TAB_SERVICES);
     Chip(dc, x, y, L"Drivers (" + std::to_wstring(nDrv) + L")", ID_TAB_DRV, tab_ == TAB_DRIVERS);
     {
@@ -3190,12 +3305,18 @@ void ServicesModule::PaintListMode(HDC dc, const RECT& rc, int y) {
     AddClick(rcSearch_, ID_SEARCH);
     y = PresetChips(dc, pad + Sc(60), y, rcSearch_.left - Sc(12), rc.right - pad, rowH, true);
     y += rowH + Sc(10);
+    }
 
-    // List (left) with its legend under it, and the detail (right).
+    // List (left) with its legend under it, and the detail (right). Three-Pane: list | 5 px splitter | detail.
     int bottom = rc.bottom - pad;
     int total = rc.right - 2 * pad;
     int listW = total * 60 / 100;
     RECT det{pad + listW + Sc(12), y, rc.right - pad, bottom};
+    if (tp) {
+        RECT l{};
+        SplitBody(pad, rc.right - pad, y, bottom, &l, &det);
+        listW = l.right - l.left;
+    }
     if (SetListColumns(dc, listW)) Refilter();
     int legendH = 0;
     bool compact = false;
@@ -3233,7 +3354,7 @@ void ServicesModule::PaintListMode(HDC dc, const RECT& rc, int y) {
     }
 
     // Detail panel: actions strip (not scrolled) + the wrapped document.
-    RoundFill(dc, det, Sc(con ? 3 : 8), p.panel, p.border);
+    RoundFill(dc, det, Rad(8, 3), p.panel, p.border);
     const SvcItem* s = Selected();
     if (!s) {
         rcDetail_ = det;
@@ -3302,8 +3423,8 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     Pal p(host_->Theme());
     const Fonts& f = host_->Fonts();
     PaintCtx c = PCtx();
-    const bool con = Console();
-    int pad = Sc(con ? 10 : 20);
+    const bool con = Console(), tp = ThreePane();
+    int pad = Sc(con ? 10 : tp ? 12 : 20);
 
     // Title line with Apply / Cancel on the right.
     std::wstring why;
@@ -3376,7 +3497,12 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
     int total = rc.right - 2 * pad;
     int listW = total * 60 / 100;
     y = std::min(y, bottom - Sc(120));   // a short window keeps a list, however many notes
+    RECT det{pad + listW + Sc(12), y, rc.right - pad, bottom};
     rcPlanList_ = RECT{pad, y, pad + listW, bottom};
+    if (tp) {   // Three-Pane: list | 5 px splitter | detail
+        SplitBody(pad, rc.right - pad, y, bottom, &rcPlanList_, &det);
+        listW = rcPlanList_.right - rcPlanList_.left;
+    }
     SetPlanColumns(listW);
     if (revealPending_ && plist_.Selected() >= 0) {   // a new plan, or a DPI change: the selected row in view
         revealPending_ = false;
@@ -3388,7 +3514,7 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
             if (i == 0) plist_.OnKey(VK_HOME, rcPlanList_, c);
             else { plist_.Select(i - 1); plist_.OnKey(VK_DOWN, rcPlanList_, c); }
         };
-        int half = std::max(0, (int)(rcPlanList_.bottom - rcPlanList_.top - Sc(32)) / std::max(1, Sc(30)) / 2);
+        int half = std::max(0, (int)(rcPlanList_.bottom - rcPlanList_.top - LvHead()) / std::max(1, LvRow()) / 2);
         show(k + half);
         show(k - half);
         show(k);
@@ -3399,8 +3525,7 @@ void ServicesModule::PaintPlanMode(HDC dc, const RECT& rc, int y) {
         ui::DrawText(dc, plan_.emptyText.empty() ? std::wstring(L"Nothing to change.") : plan_.emptyText, er, f.ui, p.mute,
                      DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);   // R20: say why it is empty
     }
-    RECT det{pad + listW + Sc(12), y, rc.right - pad, bottom};
-    RoundFill(dc, det, Sc(con ? 3 : 8), p.panel, p.border);
+    RoundFill(dc, det, Rad(8, 3), p.panel, p.border);
     int sel = plist_.Selected();
     if (sel >= 0 && sel < (int)plan_.rows.size()) PaintDetailPanel(dc, det, PlanRowDoc(plan_.rows[sel]));
     else {
@@ -3542,25 +3667,37 @@ std::wstring ConsoleImage(const SvcItem& s, const std::wstring& windir) {
 
 }  // namespace
 
-// Detail document into two columns: identity, warnings and configuration on the left; Hadron's KB text
-// (what it does, presets, basis) on the right. Title and subtitle go to the pane's header band instead.
-// The column comes from each heading's side (set where ItemDoc/PlanRowDoc push it), never from its text, so a
-// KB title can't move a block. Colours: the documents use Baseline's text forms (Pal's *T, at least 4.5:1 on
-// the panel); they are mapped to the Console inks (4.5:1 on the panel and the zebra fill).
-void SplitDoc(const std::vector<Para>& d, const CPal& c, std::vector<Para>* left, std::vector<Para>* right) {
-    std::vector<Para>* cur = left;
+// Detail document into Console's three bottom columns (board 4): identity, warnings and configuration | what it does
+// (Hadron's KB) | basis, presets and checks. Title and subtitle go to the pane's header band instead.
+// The column comes from each paragraph's side (set where ItemDoc/PlanRowDoc push it), never from its text, so a
+// KB title can't move a block. Colours: the documents use Baseline's text forms (Pal's *T, at least 4.5:1 on the
+// panel); they are mapped to the Console inks (4.5:1 on the panel and the zebra fill). Headers are upper case in
+// text3 (made readable, as Pal's faint).
+void ServicesModule::SplitDoc3(const std::vector<Para>& d, std::vector<Para>* c1, std::vector<Para>* c2, std::vector<Para>* c3) const {
+    CPal c(host_->Theme());
+    std::vector<Para>* cur = c1;
     for (Para p : d) {
         if (p.kind == P_TITLE || p.kind == P_SUB) continue;
-        if (p.side == SIDE_LEFT) cur = left;
-        else if (p.side == SIDE_RIGHT) cur = right;
-        if (p.kind == P_HEAD && p.color == kNoColor) p.color = c.accInk;
+        if (p.side == SIDE_LEFT) cur = c1;
+        else if (p.side == SIDE_RIGHT) cur = c2;
+        else if (p.side == SIDE_THIRD && cur != c3) {
+            cur = c3;
+            if (p.kind != P_HEAD) c3->push_back({P_HEAD, L"", mode_ == Mode::Plan ? L"Basis and checks" : L"Claim check", kNoColor});
+        }
         if (p.color == c.acc || p.color == c.accT) p.color = c.accInk;
         else if (p.color == c.warn || p.color == c.warnT) p.color = c.warnInk;
         else if (p.color == c.bad || p.color == c.badT) p.color = c.badInk;
         else if (p.color == c.good || p.color == c.goodT) p.color = c.goodInk;
         cur->push_back(p);
     }
-    if (left->empty()) left->swap(*right);
+    for (auto* col : {c1, c2, c3})
+        for (Para& p : *col)
+            if (p.kind == P_HEAD) {
+                for (auto& ch : p.text) ch = (wchar_t)towupper(ch);
+                p.color = c.faint;
+            }
+    if (c1->empty()) { c1->swap(*c2); c2->swap(*c3); }
+    if (c2->empty()) c2->swap(*c3);
 }
 
 int ServicesModule::ConButton(HDC dc, int x, int y, const std::wstring& label, int id, bool on, bool enabled, bool primary) {
@@ -3582,8 +3719,8 @@ int ServicesModule::ConButton(HDC dc, int x, int y, const std::wstring& label, i
     return w;
 }
 
-std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
-    std::vector<FKey> k;
+std::vector<ServicesModule::ConKey> ServicesModule::ConsoleKeys() const {
+    std::vector<ConKey> k;
     bool busy = applyW_.Running() || loadW_.Running();
     std::wstring dw;
     const bool canData = CanWriteData(&dw) && !fileW_.Running();
@@ -3677,70 +3814,6 @@ std::vector<ServicesModule::FKey> ServicesModule::ConsoleKeys() const {
     return k;
 }
 
-void ServicesModule::PaintFKeyBar(HDC dc, const RECT& r) {
-    CPal p(host_->Theme());
-    const Fonts& f = host_->Fonts();
-    FillSolid(dc, r, p.hover);
-    HLine(dc, r.left, r.right, r.top, p.rule);
-    std::vector<FKey> keys = ConsoleKeys();
-    const int gap = Sc(4), pad = Sc(8);
-    std::wstring tag = mode_ == Mode::Plan ? L"PLAN" : mode_ == Mode::Presets ? L"PRESETS" : mode_ == Mode::Measure ? L"MEASURE"
-                       : conItemBar_ ? L"ITEM" : L"LIST";
-    std::wstring hint;
-    if (mode_ == Mode::Plan) hint = plan_.rows.empty() && !planBusy_ ? L"Nothing to apply" : L"No key applies: click Apply";
-    else if (conItemBar_) {
-        std::wstring why;
-        if (!CanApply(&why)) hint = why;
-        else if (const SvcItem* s = Selected()) hint = L"opens a plan for " + s->name;
-    }
-    // Three widths: full labels, short labels, then the key captions alone (F1 lists what each does). A cell that
-    // still doesn't fit before the mode tag is not drawn, so no click target ever sits under the tag or off-screen;
-    // the key itself still works.
-    auto cellW = [&](const FKey& k, int tier) {
-        int w = TextW(dc, k.cap, f.semi) + Sc(10);
-        if (tier < 2) w += Sc(5) + TextW(dc, tier == 0 ? k.label : k.shortLabel, f.mono);
-        return w;
-    };
-    const int tagLeft = r.right - pad - TextW(dc, tag, f.semi) - Sc(12);
-    int avail = tagLeft - (r.left + pad);
-    int tier = 0;
-    for (; tier < 2; tier++) {
-        int need = 0;
-        for (auto& k : keys) need += cellW(k, tier) + gap;
-        if (need <= avail) break;
-    }
-    int x = r.left + pad;
-    for (auto& k : keys) {
-        int w = cellW(k, tier);
-        if (x + w > tagLeft) break;
-        // Inset from the bar's bottom, so the 2 px focus ring drawn around a focused cell stays inside the window.
-        RECT cell{x, r.top + 1, x + w, r.bottom - Sc(3)};
-        int id = ID_CONKEY + k.act;
-        if (k.enabled && hoverId_ == id) FillSolid(dc, cell, p.chipHot);
-        if (k.on) { RECT u{cell.left, cell.bottom - Sc(2), cell.right, cell.bottom}; FillSolid(dc, u, p.acc); }
-        RECT cr{cell.left + Sc(5), cell.top, cell.right, cell.bottom};
-        COLORREF capC = k.enabled ? (hoverId_ == id && p.hc ? p.chipHotText : p.barAccInk) : p.dim;
-        TextLeft(dc, k.cap, cr, f.semi, capC);
-        cr.left += TextW(dc, k.cap, f.semi) + Sc(5);
-        if (tier < 2)
-            TextLeft(dc, tier == 0 ? k.label : k.shortLabel, cr, f.mono,
-                     k.enabled ? (hoverId_ == id && p.hc ? p.chipHotText : p.text) : p.dim);
-        if (k.enabled) AddClick(cell, id);
-        x += w + gap;
-    }
-    // Right end: the mode, and a hint while it fits.
-    int tw = TextW(dc, tag, f.semi);
-    RECT tr{r.right - pad - tw, r.top + 1, r.right - pad, r.bottom};
-    TextLeft(dc, tag, tr, f.semi, p.mute);
-    if (!hint.empty()) {
-        int hw = TextW(dc, hint, f.caption);
-        if (x + Sc(12) + hw < tr.left - Sc(12)) {
-            RECT hr{tr.left - Sc(12) - hw, r.top + 1, tr.left - Sc(12), r.bottom};
-            TextLeft(dc, hint, hr, f.caption, p.mute);
-        }
-    }
-}
-
 int ServicesModule::PaintConsoleBanners(HDC dc, const RECT& rc, int y0) {
     CPal p(host_->Theme());
     const Fonts& f = host_->Fonts();
@@ -3789,36 +3862,16 @@ int ServicesModule::PaintConsoleBanners(HDC dc, const RECT& rc, int y0) {
 
 void ServicesModule::PaintConsole(HDC dc, const RECT& rc) {
     CPal p(host_->Theme());
-    const Fonts& f = host_->Fonts();
     FillSolid(dc, rc, p.bg);
     if (conWindir_.empty()) {
         wchar_t buf[MAX_PATH];
         UINT n = GetWindowsDirectoryW(buf, MAX_PATH);
         conWindir_ = (n && n < MAX_PATH) ? std::wstring(buf, n) : L"C:\\Windows";
     }
-    int pad = Sc(8);
-    RECT bar{rc.left, rc.bottom - Sc(22), rc.right, rc.bottom};
-    PaintFKeyBar(dc, bar);
-
-    // Header: title on the left, source facts on the right.
-    RECT hr{pad, Sc(4), rc.right - pad, Sc(24)};
-    TextLeft(dc, kAppTitle, hr, f.semi, p.text);
-    int tw = TextW(dc, kAppTitle, f.semi);
-    std::wstring sub;
-    if (!loaded_) sub = L"reading services and drivers\u2026";
-    else {
-        int nSvc = 0, nDrv = 0;
-        for (auto& s : items_) (IsDriverType(s.type) ? nDrv : nSvc)++;
-        sub = (fixture_ ? L"fixture" : L"this PC") + std::wstring(L" \u00B7 build ") + (build_.empty() ? L"?" : build_) + L" \u00B7 " +
-              std::to_wstring(nSvc) + L" svc \u00B7 " + std::to_wstring(nDrv) + L" drv";
-        if (kbOk_) sub += L" \u00B7 KB " + std::to_wstring(kb_.entries.size()) + L" (build " + kb_.build + L")";
-        if (!fixture_ && store_.Valid()) sub += L" \u00B7 data " + sys::ToShell(store_.Root());
-    }
-    RECT sr{hr.left + tw + Sc(16), hr.top, hr.right, hr.bottom};
-    ui::DrawText(dc, sub, sr, f.mono, p.mute, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_PATH_ELLIPSIS);
-    HLine(dc, pad, rc.right - pad, Sc(27), p.rule);
-    int y = PaintConsoleBanners(dc, rc, Sc(32));
-    int bottom = bar.top - Sc(6);
+    // Board 4: no title of its own. The machine line is the host's (ConsoleHeader), the F-key bar is the host's
+    // (FKeys), so the page starts with the banners and the filter line.
+    int y = PaintConsoleBanners(dc, rc, Sc(6));
+    int bottom = rc.bottom - Sc(6);
     if (mode_ == Mode::Plan) PaintConsolePlan(dc, rc, y, bottom);
     else if (mode_ == Mode::Presets) PaintPresetsMode(dc, rc, y, bottom);
     else if (mode_ == Mode::Measure) PaintMeasureMode(dc, rc, y, bottom);
@@ -4008,66 +4061,16 @@ void ServicesModule::PaintConsoleGrid(HDC dc, ConGrid& g, const RECT& rc, const 
 void ServicesModule::PaintConsoleList(HDC dc, const RECT& rc, int y, int bottom) {
     CPal p(host_->Theme());
     const Fonts& f = host_->Fonts();
-    PaintCtx c = PCtx();
     int pad = Sc(8);
     const int lineH = Sc(20);
 
-    // Tabs, the TrustedInstaller switch and its scope note, then the filter on the right.
-    int nSvc = 0, nDrv = 0;
-    for (auto& s : items_) (IsDriverType(s.type) ? nDrv : nSvc)++;
-    int x = pad;
-    auto tab = [&](const std::wstring& label, int id, bool on) {
-        int w = TextW(dc, label, f.mono) + Sc(16);
-        RECT r{x, y, x + w, y + lineH};
-        if (on) FillSolid(dc, r, p.selFill);
-        else if (hoverId_ == id) FillSolid(dc, r, p.chipHot);
-        else FrameRectC(dc, r, p.rule);
-        ui::DrawText(dc, label, r, f.mono, on ? p.selInk : p.text, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
-        if (!on) AddClick(r, id);
-        x += w + Sc(4);
-    };
-    tab(L"Services " + std::to_wstring(nSvc), ID_TAB_SVC, tab_ == TAB_SERVICES);
-    tab(L"Drivers " + std::to_wstring(nDrv), ID_TAB_DRV, tab_ == TAB_DRIVERS);
-    x += Sc(10);
-    {
-        std::wstring lbl = tiOn_ ? L"TrustedInstaller ON (writes as TI)" : L"TrustedInstaller off";
-        int w = TextW(dc, lbl, f.mono) + Sc(16);
-        RECT r{x, y, x + w, y + lineH};
-        bool en = !applyW_.Running();   // never flipped mid-apply
-        bool hot = en && hoverId_ == ID_TI;
-        if (p.hc) FillSolid(dc, r, tiOn_ || hot ? p.chipHot : p.panel);
-        else FillSolid(dc, r, tiOn_ ? Mix(p.panel, p.warn, hot ? 0.32 : 0.22) : (hot ? p.chipHot : p.panel));
-        FrameRectC(dc, r, tiOn_ ? p.warnInk : p.rule);
-        COLORREF tc = !en ? p.dim : p.hc && (tiOn_ || hot) ? p.chipHotText : tiOn_ ? p.text : p.mute;
-        ui::DrawText(dc, lbl, r, f.mono, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
-        if (en) AddClick(r, ID_TI);
-        x += w + Sc(8);
-    }
-    // The filter keeps 160 px when it can, but never starts left of the TI switch (it would cover its click target).
-    int sw = std::min(Sc(300), std::max(Sc(160), (int)(rc.right - pad - x) / 3));
-    sw = std::max(Sc(80), std::min(sw, (int)(rc.right - pad - x)));
-    rcSearch_ = RECT{rc.right - pad - sw, y, rc.right - pad, y + lineH};
-    {
-        // The note is drawn only where it fits whole: a clipped note about what TI can't do would mislead.
-        int room = rcSearch_.left - Sc(10) - x;
-        for (const wchar_t* cap : kTiCaps) {
-            int need = TextW(dc, cap, f.caption) * 105 / 100;
-            if (need <= room) {
-                RECT tr{x, y, x + need + Sc(8), y + lineH};
-                ui::DrawText(dc, cap, tr, f.caption, p.mute, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP);
-                break;
-            }
-        }
-    }
-    FitPlaceholder(dc);
-    search_.Paint(dc, rcSearch_, c, focus_ == Focus::Search && HasFocus());
-    if (focus_ == Focus::Search) FrameRectC(dc, rcSearch_, p.accInk);
-    AddClick(rcSearch_, ID_SEARCH);
+    // Board 4's filter line: / filter, tab:, show:, plan:, the TrustedInstaller switch, and row n/N on the right.
+    PaintConsoleFilter(dc, rc, y, lineH);
     y += lineH + Sc(6);
 
-    // Grid on top, the detail pane under it (about 40%: the KB text wants width more than height).
+    // Board 4: the full-width grid on top, the detail along the bottom, about 30% of the height, in three columns.
     int avail = bottom - y;
-    int detH = std::max(Sc(150), avail * 40 / 100);
+    int detH = std::max(Sc(150), avail * 30 / 100);
     if (avail - detH < Sc(120)) detH = std::max(Sc(80), avail - Sc(120));
     RECT grid{pad, y, rc.right - pad, bottom - detH - Sc(6)};
     RECT det{pad, grid.bottom + Sc(6), rc.right - pad, bottom};
@@ -4117,16 +4120,12 @@ void ServicesModule::PaintConsoleDetail(HDC dc, const RECT& det, const std::wstr
     const Fonts& f = host_->Fonts();
     PaintCtx c = PCtx();
     FillSolid(dc, det, p.panel);
-    // Band: the item's ID in bold, then what it is.
+    // Band: the item's ID in bold, what it is, and (items) the start-type and control buttons on the right; each
+    // button opens a plan, exactly as in Baseline. F4 gives keys for them.
     RECT band{det.left + 1, det.top + 1, det.right - 1, det.top + 1 + Sc(22)};
     FillSolid(dc, band, p.hover);
-    RECT nr{band.left + Sc(8), band.top, band.right - Sc(8), band.bottom};
-    TextLeft(dc, name, nr, f.semi, p.text);
-    nr.left += TextW(dc, name, f.semi) + Sc(12);
-    TextLeft(dc, info, nr, f.mono, p.mute);
-    int top = band.bottom;
-
-    // Actions: the same start-type and control buttons as Baseline (each opens a plan), with F4 for the keys.
+    int bx = band.right - Sc(6);
+    const int minLeft = band.left + Sc(8) + TextW(dc, name, f.semi) + Sc(12);
     if (actions) {
         const SvcItem* s = Selected();
         std::wstring why;
@@ -4134,42 +4133,74 @@ void ServicesModule::PaintConsoleDetail(HDC dc, const RECT& det, const std::wstr
         Guard g = CheckGuard(*s, ctx_);
         bool drv = IsDriverType(s->type);
         bool en = can && !g.neverTouch && s->kind != Kind::UserInstance && s->cfg.start >= 2;
-        int ay = top + Sc(4);
-        int ax = det.left + Sc(8);
-        RECT lr{ax, ay, ax + Sc(200), ay + Sc(18)};
-        TextLeft(dc, L"start", lr, f.mono, p.mute);
-        ax += TextW(dc, L"start ", f.mono);
         const bool known = !s->cfgUnknown;   // A8
+        int ay = band.top + (band.bottom - band.top - Sc(18)) / 2;
+        struct B { std::wstring label; int id; bool on, enabled; };
+        std::vector<B> bs;
         // mini-design 7: a driver at Boot or System shows that value as the current, read-only cell, as Baseline does.
-        if (known && drv && s->cfg.start <= 1) ax += ConButton(dc, ax, ay, s->cfg.start == 0 ? L"Boot" : L"System", 0, true, false) + Sc(3);
-        ax += ConButton(dc, ax, ay, L"Auto", ID_SET + 2, known && s->cfg.start == 2 && !s->cfg.Delayed(), en) + Sc(3);
-        if (!drv) ax += ConButton(dc, ax, ay, L"Auto (delayed)", ID_SET + 5, known && s->cfg.Delayed(), en) + Sc(3);
-        ax += ConButton(dc, ax, ay, L"Manual", ID_SET + 3, known && s->cfg.start == 3, en) + Sc(3);
-        ax += ConButton(dc, ax, ay, L"Disabled", ID_SET + 4, known && s->cfg.start == 4, en) + Sc(14);
+        if (known && drv && s->cfg.start <= 1) bs.push_back({s->cfg.start == 0 ? L"Boot" : L"System", 0, true, false});
+        bs.push_back({L"Auto", ID_SET + 2, known && s->cfg.start == 2 && !s->cfg.Delayed(), en});
+        if (!drv) bs.push_back({L"Auto (delayed)", ID_SET + 5, known && s->cfg.Delayed(), en});
+        bs.push_back({L"Manual", ID_SET + 3, known && s->cfg.start == 3, en});
+        bs.push_back({L"Disabled", ID_SET + 4, known && s->cfg.start == 4, en});
+        std::vector<B> ctl;
         if (!drv) {
             bool running = s->state == SERVICE_RUNNING;
             bool stoppable = running && (s->controls & SERVICE_ACCEPT_STOP);
             bool cen = can && s->kind != Kind::UserTemplate && !g.neverTouch;   // R5: never-touch: no start/stop either
-            lr = RECT{ax, ay, ax + Sc(100), ay + Sc(18)};
-            TextLeft(dc, L"now", lr, f.mono, p.mute);
-            ax += TextW(dc, L"now ", f.mono);
-            ax += ConButton(dc, ax, ay, L"Start", ID_CTL + 0, false, cen && !running && s->cfg.start != 4) + Sc(3);
-            ax += ConButton(dc, ax, ay, L"Stop", ID_CTL + 1, false, cen && stoppable) + Sc(3);
-            ax += ConButton(dc, ax, ay, L"Restart", ID_CTL + 2, false, cen && stoppable) + Sc(14);
+            ctl.push_back({L"Start", ID_CTL + 0, false, cen && !running && s->cfg.start != 4});
+            ctl.push_back({L"Stop", ID_CTL + 1, false, cen && stoppable});
+            ctl.push_back({L"Restart", ID_CTL + 2, false, cen && stoppable});
         }
-        RECT wr{ax, ay, det.right - Sc(8), ay + Sc(18)};
-        TextLeft(dc, can ? std::wstring(L"F4: keys for these; each opens a plan") : why, wr, f.caption, p.mute);
-        top = ay + Sc(18) + Sc(4);
+        auto width = [&](const std::vector<B>& v) {
+            int w = 0;
+            for (auto& b : v) w += TextW(dc, b.label, f.caption) + Sc(14) + Sc(3);
+            return w;
+        };
+        const int lblStart = TextW(dc, L"start ", f.mono), lblNow = TextW(dc, L"now ", f.mono);
+        int need = lblStart + width(bs) + (ctl.empty() ? 0 : Sc(10) + lblNow + width(ctl));
+        if (bx - need > minLeft) {   // drawn only where the whole strip fits; the keys (F4) work regardless
+            int ax = bx - need;
+            RECT lr{ax, band.top, ax + lblStart, band.bottom};
+            TextLeft(dc, L"start", lr, f.mono, p.mute);
+            ax += lblStart;
+            for (auto& b : bs) ax += ConButton(dc, ax, ay, b.label, b.id, b.on, b.enabled) + Sc(3);
+            if (!ctl.empty()) {
+                ax += Sc(10);
+                lr = RECT{ax, band.top, ax + lblNow, band.bottom};
+                TextLeft(dc, L"now", lr, f.mono, p.mute);
+                ax += lblNow;
+                for (auto& b : ctl) ax += ConButton(dc, ax, ay, b.label, b.id, b.on, b.enabled) + Sc(3);
+            }
+            bx -= need + Sc(10);
+        }
+        if (!can) {   // why the buttons are off ("This is fixture data."), where it fits whole
+            int ww = TextW(dc, why, f.caption);
+            if (bx - ww > minLeft + Sc(80)) {
+                RECT wr{bx - ww, band.top, bx, band.bottom};
+                TextLeft(dc, why, wr, f.caption, p.mute);
+                bx -= ww + Sc(12);
+            }
+        }
     }
+    RECT nr{band.left + Sc(8), band.top, bx, band.bottom};
+    TextLeft(dc, name, nr, f.semi, p.text);
+    nr.left = minLeft;
+    if (nr.right > nr.left) ui::DrawText(dc, info, nr, f.mono, p.mute, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+    int top = band.bottom;
     HLine(dc, det.left + 1, det.right - 1, top, p.rule);
     top += 1;
 
-    std::vector<Para> left, right;
-    SplitDoc(doc, p, &left, &right);
+    // Three columns separated by 1 px rules; an empty column gives its width to the others.
+    std::vector<Para> c1, c2, c3;
+    SplitDoc3(doc, &c1, &c2, &c3);
     const int sbW = Sc(9);
-    int mid = right.empty() ? det.right : det.left + (det.right - det.left) * 44 / 100;
+    int ncols = 1 + (c2.empty() ? 0 : 1) + (c3.empty() ? 0 : 1);
+    int W = det.right - det.left;
+    int x1 = ncols == 1 ? det.right : det.left + W * (ncols == 3 ? 36 : 50) / 100;
+    int x2 = ncols == 3 ? det.left + W * 70 / 100 : det.right;
     auto column = [&](ScrollBar& sb, const RECT& area, const std::vector<Para>& d, RECT* track) {
-        RECT body{area.left + Sc(10), area.top + Sc(4), area.right - Sc(8) - sbW, area.bottom - Sc(6)};
+        RECT body{area.left + Sc(10), area.top + Sc(2), area.right - Sc(8) - sbW, area.bottom - Sc(6)};
         int total = PaintDoc(dc, body, d, 0, false);
         sb.Configure(body.bottom - body.top, total);
         *track = RECT{area.right - sbW - 1, area.top + 1, area.right - 1, area.bottom - 1};
@@ -4179,21 +4210,30 @@ void ServicesModule::PaintConsoleDetail(HDC dc, const RECT& det, const std::wstr
         RestoreDC(dc, saved);
         if (sb.Visible()) sb.Paint(dc, *track, c);
     };
-    RECT la{det.left, top, mid, det.bottom};
-    conLeftRc_ = la;   // a tab stop of its own (Up/Down/PgUp/PgDn scroll it), with or without a right column
-    column(conLeftSb_, la, left, &conLeftTrack_);
-    if (!right.empty()) {
-        VLine(dc, mid, top + Sc(4), det.bottom - Sc(4), p.rule);
-        RECT ra{mid + 1, top, det.right, det.bottom};
-        rcDetail_ = ra;
-        column(detSb_, ra, right, &rcDetSb_);
-    } else {
-        rcDetail_ = RECT{};
-        rcDetSb_ = RECT{};
+    RECT la{det.left, top, x1, det.bottom};
+    conLeftRc_ = la;   // a tab stop of its own (Up/Down/PgUp/PgDn scroll it)
+    column(conLeftSb_, la, c1, &conLeftTrack_);
+    conMidRc_ = RECT{};
+    conMidTrack_ = RECT{};
+    rcDetail_ = RECT{};
+    rcDetSb_ = RECT{};
+    if (!c2.empty()) {
+        VLine(dc, x1, top, det.bottom - 1, p.rule);
+        RECT ma{x1 + 1, top, x2, det.bottom};
+        if (c3.empty()) { rcDetail_ = ma; column(detSb_, ma, c2, &rcDetSb_); }   // two columns: the right one is detSb_
+        else {
+            conMidRc_ = ma;
+            column(conMidSb_, ma, c2, &conMidTrack_);
+            VLine(dc, x2, top, det.bottom - 1, p.rule);
+            RECT ra{x2 + 1, top, det.right, det.bottom};
+            rcDetail_ = ra;
+            column(detSb_, ra, c3, &rcDetSb_);
+        }
     }
     FrameRectC(dc, det, p.rule);
-    if ((focus_ == Focus::Detail && !right.empty()) || focus_ == Focus::DetailLeft) {
-        RECT fr = focus_ == Focus::DetailLeft ? la : rcDetail_;
+    const RECT* fr0 = focus_ == Focus::DetailLeft ? &la : focus_ == Focus::DetailMid ? &conMidRc_ : focus_ == Focus::Detail ? &rcDetail_ : nullptr;
+    if (fr0 && fr0->right > fr0->left) {
+        RECT fr = *fr0;
         InflateRect(&fr, -Sc(2), -Sc(2));
         if (HasFocus()) FocusRectC(dc, fr, p.accInk);
         else FrameRectC(dc, fr, p.hc ? p.rule : Mix(p.panel, p.acc, 0.4));
@@ -4217,7 +4257,7 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
              tr, f.caption, p.mute);
     typedef std::pair<const wchar_t*, const wchar_t*> KV;
     static const KV kList[] = {
-        {L"F2", L"Services / Drivers tab"}, {L"F3", L"Filter (or just type); Esc clears it"}, {L"Ctrl+F", L"Filter"},
+        {L"F2", L"Services / Drivers tab"}, {L"F3", L"Filter (or just type); Esc clears it; show: narrows the rows"}, {L"Ctrl+F", L"Filter"},
         {L"F4", L"Item keys for the selected row: start type, start/stop"}, {L"F5", L"Refresh (live data only)"},
         {L"F6", L"TrustedInstaller toggle, this session only: reads the list as TI on every load (may start TI)"},
         {L"F7", L"Plan: Default, as first seen (1st snapshot)"},
@@ -4248,7 +4288,7 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
         {L"", L"kept (hw): its hardware was seen; no preset; protected: never changed; not in KB"},
         {L"Basis", L"published, measured, reasoning or folklore (folklore: no evidence)"},
         {L"", L"recorded: from Hadron's own first-run snapshot of this PC"},
-        {L"LIST", L"bottom right: the list (LIST), the item keys (ITEM) or a plan (PLAN)"}};
+        {L"view=", L"in the header line: the list (LIST), the item keys (ITEM) or a plan (PLAN)"}};
     const int nStock = StockKnown();
     std::wstring stock = nStock ? L"Plan: Default, Windows stock (only the " + std::to_wstring(nStock) + L" items with a sourced value)"
                                 : L"Plan: Default, Windows stock (" + StockNone() + L")";
@@ -4261,7 +4301,7 @@ void ServicesModule::PaintConsoleHelp(HDC dc, const RECT& det) {
     b.assign(std::begin(kCols), std::end(kCols));
     // Tab sits in the right column: the left one is full at 800 px of height
     if (mode_ == Mode::List) {
-        b.push_back({L"Tab", L"Every control in reading order: banners, tabs, filter, list, detail columns, F-key cells"});
+        b.push_back({L"Tab", L"Every control in reading order: banners, filter line, list, detail columns"});
         b.push_back({L"", L"Shift+Tab back; Enter or Space activates the focused control (never Apply)"});
     }
     b.push_back({L"Note", L"English only; no screen-reader support in v1."});
@@ -4429,7 +4469,7 @@ void ServicesModule::PaintConsolePlan(HDC dc, const RECT& rc, int y, int bottom)
     y += Sc(4);
 
     int avail = bottom - y;
-    int detH = std::max(Sc(130), avail * 34 / 100);
+    int detH = std::max(Sc(130), avail * 30 / 100);   // board 4: the bottom detail, about 30%
     if (avail - detH < Sc(120)) detH = std::max(Sc(80), avail - Sc(120));
     RECT grid{pad, y, rc.right - pad, bottom - detH - Sc(6)};
     RECT det{pad, grid.bottom + Sc(6), rc.right - pad, bottom};
@@ -4586,7 +4626,8 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
     ListView& lv = ActiveList();
     const int n = plan ? (int)plan_.rows.size() : mode_ == Mode::Presets ? (int)preV_.size() : mode_ == Mode::Measure ? (int)measV_.size()
                                                                                                   : (int)V_.size();
-    if (focus_ == Focus::Name && msg == WM_KEYDOWN && !(w >= VK_F1 && w <= VK_F12)) return false;   // the name field: shared handler
+    const bool barKey = w == kVkUndo || w == kVkMeasure || w == kVkTick || w == kVkSave;   // a click on the host's F-key bar
+    if (focus_ == Focus::Name && msg == WM_KEYDOWN && !(w >= VK_F1 && w <= VK_F12) && !barKey) return false;   // the name field: shared handler
     auto setSel = [&](int k) {
         if (n <= 0) return false;
         k = std::clamp(k, 0, n - 1);
@@ -4596,6 +4637,7 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
         lv.Select(k);
         detSb_.SetOffset(0);
         conLeftSb_.SetOffset(0);
+        conMidSb_.SetOffset(0);
         if (!plan && !page) { selName_ = items_[V_[k]].name; ConsoleStatus(); }
         return true;
     };
@@ -4605,6 +4647,13 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
         if (w >= VK_F1 && w <= VK_F12) {
             *handled = true;
             return OnConsoleKey((UINT)w);
+        }
+        // The host's F-key bar: a click on Ctrl+Z, Ctrl+M, Space (tick) or Enter (save) arrives as its own code.
+        // The same enable rules as the keys (OnConsoleAction checks them again); none of them applies a plan.
+        if (barKey) {
+            *handled = true;
+            OnConsoleAction(w == kVkUndo ? CA_UNDO : w == kVkMeasure ? CA_MEASURE : w == kVkTick ? CA_TICK : CA_SAVE);
+            return true;
         }
         if (w == VK_ESCAPE && (conItemBar_ || conHelp_)) { conItemBar_ = conHelp_ = false; *handled = true; return true; }
         if (w == VK_ESCAPE && applyW_.Running()) { *handled = true; OnConsoleAction(CA_CANCEL); return true; }
@@ -4641,21 +4690,22 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
             g.sb.SetOffset(before - delta * 3 * g.rowH / WHEEL_DELTA);
             return g.sb.Offset() != before;
         }
-        if (PtInRect(&conLeftRc_, pt)) {
+        for (auto col : {std::make_pair(&conLeftRc_, &conLeftSb_), std::make_pair(&conMidRc_, &conMidSb_)}) {
+            if (!PtInRect(col.first, pt)) continue;
             *handled = true;
-            int before = conLeftSb_.Offset();
-            conLeftSb_.SetOffset(before - delta * Sc(54) / WHEEL_DELTA);
-            return conLeftSb_.Offset() != before;
+            int before = col.second->Offset();
+            col.second->SetOffset(before - delta * Sc(54) / WHEEL_DELTA);
+            return col.second->Offset() != before;
         }
         return false;   // the right column (rcDetail_/detSb_): the shared handler
     }
     int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
     POINT pt{x, y};
     if (msg == WM_MOUSEMOVE) {
-        for (ScrollBar* sb : {&g.sb, &conLeftSb_}) {
+        for (ScrollBar* sb : {&g.sb, &conLeftSb_, &conMidSb_}) {
             if (!sb->Dragging()) continue;
             *handled = true;
-            const RECT& tr = sb == &g.sb ? g.track : conLeftTrack_;
+            const RECT& tr = sb == &g.sb ? g.track : sb == &conMidSb_ ? conMidTrack_ : conLeftTrack_;
             if (!(w & MK_LBUTTON)) { sb->OnMouse(WM_LBUTTONUP, x, y, tr); return true; }
             return sb->OnMouse(msg, x, y, tr);
         }
@@ -4665,6 +4715,7 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
         bool any = false;
         if (g.sb.Dragging()) { g.sb.OnMouse(msg, x, y, g.track); any = true; }
         if (conLeftSb_.Dragging()) { conLeftSb_.OnMouse(msg, x, y, conLeftTrack_); any = true; }
+        if (conMidSb_.Dragging()) { conMidSb_.OnMouse(msg, x, y, conMidTrack_); any = true; }
         if (!any) return false;
         if (GetCapture() == hwnd_) ReleaseCapture();
         *handled = true;
@@ -4684,6 +4735,13 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
         focus_ = Focus::DetailLeft;
         SetCapture(hwnd_);
         conLeftSb_.OnMouse(WM_LBUTTONDOWN, x, y, conLeftTrack_);
+        return true;
+    }
+    if (conMidSb_.Visible() && PtInRect(&conMidTrack_, pt)) {
+        *handled = true;
+        focus_ = Focus::DetailMid;
+        SetCapture(hwnd_);
+        conMidSb_.OnMouse(WM_LBUTTONDOWN, x, y, conMidTrack_);
         return true;
     }
     if (PtInRect(&g.rc, pt)) {
@@ -4721,6 +4779,7 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
         return true;
     }
     if (PtInRect(&conLeftRc_, pt)) { *handled = true; focus_ = Focus::DetailLeft; return true; }
+    if (PtInRect(&conMidRc_, pt)) { *handled = true; focus_ = Focus::DetailMid; return true; }
     return false;
 }
 
@@ -4744,6 +4803,329 @@ void ServicesModule::ReplayKeys(const std::wstring& keys) {
         else if (u.rfind(L"text:", 0) == 0) { for (wchar_t ch : k.substr(5)) OnInput(WM_CHAR, ch, 0); continue; }
         if (vk) OnInput(WM_KEYDOWN, vk, 0);
     }
+}
+
+// ============================================================================================
+// Layout chrome (core/host/module.h; layout spec 2026-11-13): the Three-Pane tree's sections, the Console F-key bar
+// and header line, Console's filter line, and Three-Pane's toolbar, breadcrumb and splitter. Nothing here applies a
+// plan or changes a service: tree rows and keys open plans or change the view, as the Baseline chips do.
+
+std::vector<hx::FKey> ServicesModule::FKeys() {
+    std::vector<hx::FKey> out;
+    for (const ConKey& k : ConsoleKeys()) {
+        if (!k.enabled) continue;   // the host's bar has no disabled state: a key that does nothing now isn't offered
+        hx::FKey f;
+        f.label = k.label;
+        f.key = k.cap;
+        if (k.cap.size() >= 2 && k.cap[0] == L'F' && iswdigit(k.cap[1])) f.vk = VK_F1 + (UINT)_wtoi(k.cap.c_str() + 1) - 1;
+        else if (k.cap == L"Esc") f.vk = VK_ESCAPE;
+        else if (k.cap == L"^Z") { f.vk = kVkUndo; f.key = L"Ctrl+Z"; }
+        else if (k.cap == L"^M") { f.vk = kVkMeasure; f.key = L"Ctrl+M"; }
+        else if (k.cap == L"Spc") { f.vk = kVkTick; f.key = L"Space"; }
+        else if (k.cap == L"Enter") f.vk = kVkSave;
+        else continue;
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
+std::wstring ServicesModule::ConsoleHeader() {
+    if (!loaded_) return L"reading services and drivers…";
+    int nSvc = 0, nDrv = 0, nChanged = 0;
+    for (auto& s : items_) {
+        (IsDriverType(s.type) ? nDrv : nSvc)++;
+        if (!ChangedText(s).empty()) nChanged++;
+    }
+    std::wstring view = mode_ == Mode::Plan ? L"PLAN" : mode_ == Mode::Presets ? L"PRESETS" : mode_ == Mode::Measure ? L"MEASURE"
+                        : conItemBar_ ? L"ITEM" : L"LIST";
+    std::wstring m = fixture_ ? L"FIXTURE" : !elevated_ || readOnly_ ? L"READ-ONLY" : L"ADMIN";
+    std::wstring h = L"build=" + (build_.empty() ? std::wstring(L"?") : build_) + L" src=" + (fixture_ ? L"fixture" : L"live") +
+                     L" svc=" + std::to_wstring(nSvc) + L" drv=" + std::to_wstring(nDrv);
+    if (hasFirst_) h += L" changed=" + std::to_wstring(nChanged);
+    h += L" drift=" + std::to_wstring(drift_.size());
+    h += kbOk_ ? L" kb=" + std::to_wstring(kb_.entries.size()) + L"@" + kb_.build : std::wstring(L" kb=none");
+    h += std::wstring(L" ti=") + (tiOn_ ? L"ON" : L"off") + L" mode=" + m + L" view=" + view;
+    if (!fixture_ && store_.Valid()) h += L" data=" + sys::ToShell(store_.Root());
+    return h;
+}
+
+void ServicesModule::SyncChrome() {
+    if (!host_ || !hwnd_) return;
+    std::wstring sig = std::to_wstring((int)host_->Layout()) + L"|" + std::to_wstring(NavSelected());
+    if (Console()) {
+        for (auto& k : FKeys()) sig += L"|" + k.key + L"=" + k.label;
+        sig += L"|" + ConsoleHeader();
+    } else if (ThreePane()) {
+        for (auto& n : NavNodes()) sig += L"|" + n.label + L"=" + n.note;
+    }
+    if (sig == chromeSig_) return;
+    chromeSig_ = sig;
+    PostMessageW(hwnd_, WM_SVC_CHROME, 0, 0);   // never from inside WM_PAINT: the host re-lays the content window
+}
+
+std::vector<NavNode> ServicesModule::NavNodes() {
+    std::vector<NavNode> v;
+    int nSvc = 0, nDrv = 0;
+    for (auto& s : items_) (IsDriverType(s.type) ? nDrv : nSvc)++;
+    auto add = [&](int id, const std::wstring& label, const std::wstring& note, bool header = false, bool dim = false) {
+        NavNode n;
+        n.id = id;
+        n.label = label;
+        n.note = note;
+        n.header = header;
+        n.dim = dim;
+        v.push_back(std::move(n));
+    };
+    add(NAV_SVC, L"Services", loaded_ ? std::to_wstring(nSvc) : L"");
+    add(NAV_DRV, L"Drivers", loaded_ ? std::to_wstring(nDrv) : L"");
+    // Each opens a plan for the current tab, exactly as the Baseline chips do; nothing changes until Apply.
+    add(0, L"PLANS", L"", true);
+    bool canPlan = loaded_ && !items_.empty();
+    const int nStock = StockKnown();
+    add(NAV_PRESET + 0, L"Default: as first seen", L"", false, !canPlan);
+    add(NAV_PRESET + 1, L"Default: Windows stock", nStock ? std::to_wstring(nStock) + L" sourced" : L"no data", false, !canPlan || !nStock);
+    for (int lv = LV_BLOAT; lv < LV_COUNT; lv++) add(NAV_PRESET + 2 + lv, LevelName(lv), L"", false, !canPlan || !kbOk_);
+    add(0, L"TOOLS", L"", true);
+    add(NAV_PRESETS, L"Custom presets", presets_.empty() ? L"" : std::to_wstring(presets_.size()), false, !loaded_);
+    add(NAV_MEASURE, L"Measure", measures_.empty() ? L"" : std::to_wstring(measures_.size()), false, !loaded_);
+    return v;
+}
+
+int ServicesModule::NavSelected() {
+    if (mode_ == Mode::Presets) return NAV_PRESETS;
+    if (mode_ == Mode::Measure) return NAV_MEASURE;
+    if (mode_ == Mode::Plan) {
+        switch (planReq_.type) {
+            case PlanReq::Default: return NAV_PRESET + 0;
+            case PlanReq::Stock: return NAV_PRESET + 1;
+            case PlanReq::Preset: return NAV_PRESET + 2 + planReq_.level;
+            default: return -1;   // a single item, a control, an undo or a custom preset: no tree row
+        }
+    }
+    return tab_ == TAB_SERVICES ? NAV_SVC : NAV_DRV;
+}
+
+void ServicesModule::OnNavSelect(int id) {
+    if (applyW_.Running()) { Status(L"Services: an apply is running; the view changes when it ends."); return; }
+    conHelp_ = conItemBar_ = false;
+    auto toList = [&]() { if (mode_ != Mode::List) ClosePlan(); };   // a plan is only closed, never applied
+    if (id == NAV_SVC || id == NAV_DRV) {
+        toList();
+        OnClickId(id == NAV_SVC ? ID_TAB_SVC : ID_TAB_DRV);
+    } else if (id >= NAV_PRESET && id < NAV_PRESET + 5) {
+        int k = id - NAV_PRESET;
+        if (!loaded_ || items_.empty() || (k >= 2 && !kbOk_)) return;
+        if (mode_ == Mode::Plan && NavSelected() == id) return;   // already open: keep its ticks
+        OnClickId(ID_PRESET + k);   // opens the plan (a new plan starts from its own defaults)
+    } else if (id == NAV_PRESETS || id == NAV_MEASURE) {
+        if (!loaded_) return;
+        if (NavSelected() == id) return;
+        toList();
+        OnClickId(id == NAV_PRESETS ? ID_PRESETS : ID_MEASURE);
+    }
+    Invalidate();
+    if (host_) host_->ChromeChanged();
+}
+
+// Console's show: filter. Applied only while Console is the layout, so Baseline and Three-Pane never hide rows
+// without saying so.
+bool ServicesModule::ShowMatch(const SvcItem& s) const {
+    if (!Console()) return true;
+    switch (conShow_) {
+        case 1: return s.state == SERVICE_RUNNING;
+        case 2: return s.state == SERVICE_STOPPED;
+        case 3: return !ChangedText(s).empty();
+        case 4: return drift_.count(Lower(s.name)) != 0;
+    }
+    return true;
+}
+
+// Board 4's filter line, one row: "/" and the filter, tab:, show:, plan:, the TrustedInstaller switch, and on the
+// right "row n/N". A group that doesn't fit whole is left out (its F-keys still work; F1 lists them).
+void ServicesModule::PaintConsoleFilter(HDC dc, const RECT& rc, int y, int lineH) {
+    CPal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    PaintCtx c = PCtx();
+    const int pad = Sc(8), gap = Sc(4), groupGap = Sc(14);
+    int nSvc = 0, nDrv = 0;
+    for (auto& s : items_) (IsDriverType(s.type) ? nDrv : nSvc)++;
+    int sel = list_.Selected();
+    std::wstring row = L"row " + (V_.empty() || sel < 0 ? std::wstring(L"-") : std::to_wstring(sel + 1)) + L"/" + std::to_wstring(V_.size());
+    int rowW = TextW(dc, row, f.mono);
+    RECT rr{rc.right - pad - rowW, y, rc.right - pad, y + lineH};
+    TextLeft(dc, row, rr, f.mono, p.mute);
+    const int limit = rr.left - groupGap;
+
+    int x = pad;
+    RECT sl{x, y, x + TextW(dc, L"/", f.semi) + Sc(6), y + lineH};
+    TextLeft(dc, L"/", sl, f.semi, p.accInk);
+    x = sl.right;
+    int sw = std::clamp((int)(rc.right - rc.left) / 5, Sc(150), Sc(260));
+    rcSearch_ = RECT{x, y, x + sw, y + lineH};
+    FitPlaceholder(dc);
+    search_.Paint(dc, rcSearch_, c, focus_ == Focus::Search && HasFocus());
+    if (focus_ == Focus::Search) FrameRectC(dc, rcSearch_, p.accInk);
+    AddClick(rcSearch_, ID_SEARCH);
+    x = rcSearch_.right + groupGap;
+
+    struct Chip1 { std::wstring label; int id; bool on, enabled; };
+    auto chipW = [&](const Chip1& k) { return TextW(dc, k.label, f.caption) + Sc(12); };
+    auto group = [&](const std::wstring& cap, const std::vector<Chip1>& chips) {
+        int need = TextW(dc, cap, f.mono) + Sc(6);
+        for (auto& k : chips) need += chipW(k) + gap;
+        if (x + need > limit) return;
+        RECT cr{x, y, x + TextW(dc, cap, f.mono), y + lineH};
+        TextLeft(dc, cap, cr, f.mono, p.mute);
+        x = cr.right + Sc(6);
+        for (auto& k : chips) {
+            int w = chipW(k);
+            RECT r{x, y + Sc(1), x + w, y + lineH - Sc(1)};
+            bool hot = k.enabled && hoverId_ == k.id;
+            if (k.on) FillSolid(dc, r, p.selFill);
+            else if (hot) FillSolid(dc, r, p.chipHot);
+            else FrameRectC(dc, r, k.enabled ? p.rule : Mix(p.rule, p.panel, 0.5));
+            COLORREF ink = k.on ? p.selInk : !k.enabled ? p.dim : hot && p.hc ? p.chipHotText : p.text;
+            ui::DrawText(dc, k.label, r, f.caption, ink, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+            if (k.enabled && !k.on) AddClick(r, k.id);
+            x += w + gap;
+        }
+        x += groupGap - gap;
+    };
+    group(L"tab:", {{L"services " + std::to_wstring(nSvc), ID_TAB_SVC, tab_ == TAB_SERVICES, true},
+                    {L"drivers " + std::to_wstring(nDrv), ID_TAB_DRV, tab_ == TAB_DRIVERS, true}});
+    std::vector<Chip1> show;
+    for (int i = 0; i < 5; i++) show.push_back({kShowNames[i], ID_SHOW + i, conShow_ == i, i != 3 || hasFirst_});
+    group(L"show:", show);
+    bool canPlan = loaded_ && !applyW_.Running() && !items_.empty();
+    group(L"plan:", {{L"1st", ID_PRESET + 0, false, canPlan}, {L"stock", ID_PRESET + 1, false, canPlan},
+                     {L"bloat", ID_PRESET + 2, false, canPlan && kbOk_}, {L"strip", ID_PRESET + 3, false, canPlan && kbOk_},
+                     {L"min", ID_PRESET + 4, false, canPlan && kbOk_}});
+    {   // the TrustedInstaller switch: the warn colour and "writes as TI" while on, never a plain selected chip
+        std::wstring lbl = tiOn_ ? L"TI ON (writes as TI)" : L"TI off";
+        int w = TextW(dc, lbl, f.caption) + Sc(12);
+        if (x + w <= limit) {
+            RECT r{x, y + Sc(1), x + w, y + lineH - Sc(1)};
+            bool en = !applyW_.Running();   // never flipped mid-apply
+            bool hot = en && hoverId_ == ID_TI;
+            if (p.hc) FillSolid(dc, r, tiOn_ || hot ? p.chipHot : p.panel);
+            else FillSolid(dc, r, tiOn_ ? Mix(p.panel, p.warn, hot ? 0.32 : 0.22) : (hot ? p.chipHot : p.bg));
+            FrameRectC(dc, r, tiOn_ ? p.warnInk : p.rule);
+            COLORREF tc = !en ? p.dim : p.hc && (tiOn_ || hot) ? p.chipHotText : tiOn_ ? p.text : p.mute;
+            ui::DrawText(dc, lbl, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+            if (en) AddClick(r, ID_TI);
+        }
+    }
+}
+
+// Three-Pane toolbar buttons: square (2 px), 26 px high, left to right. on: a toggle that is on; warn: drawn in the
+// warn colour while on (the TrustedInstaller switch: never a plain selected button).
+int ServicesModule::ToolButton(HDC dc, int x, int y, const std::wstring& label, int id, bool enabled, bool on, bool warn) {
+    Pal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    int h = Sc(26), w = TextW(dc, label, f.caption) + Sc(20);
+    RECT r{x, y, x + w, y + h};
+    bool hot = enabled && hoverId_ == id;
+    COLORREF fill = !enabled ? p.disFill : on ? (warn ? Mix(p.panel, p.warn, hot ? 0.40 : 0.30) : Mix(p.panel, p.acc, 0.30))
+                                         : hot ? p.chipHot : p.chip;
+    COLORREF edge = !enabled ? p.border : on ? (warn ? p.warnT : p.accT) : p.border;
+    COLORREF ink = !enabled ? p.dis : hot && p.hc ? p.chipHotText : p.chipText;
+    if (p.hc && on) { fill = p.chipHot; ink = p.chipHotText; }
+    RoundFill(dc, r, Sc(2), fill, edge);
+    ui::DrawText(dc, label, r, f.caption, ink, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+    if (enabled) AddClick(r, id);
+    return w;
+}
+
+// Board 7's slim toolbar: Refresh, Undo last apply, Custom presets, Measure and the TrustedInstaller switch; the filter
+// at its right end (list only). The tabs and the preset plans are rows of the tree. Returns the y below it.
+int ServicesModule::PaintToolbar(HDC dc, const RECT& rc, int y) {
+    PaintCtx c = PCtx();
+    const int pad = Sc(12), h = Sc(26);
+    bool busy = applyW_.Running() || loadW_.Running();
+    std::wstring dummy;
+    bool canApply = CanApply(&dummy);
+    const bool list = mode_ == Mode::List;
+    int x = pad;
+    x += ToolButton(dc, x, y, L"Refresh", ID_REFRESH, !fixture_ && !busy && list) + Sc(4);
+    x += ToolButton(dc, x, y, L"Undo last apply", ID_UNDO_LAST, undoable_ >= 0 && canApply && list) + Sc(4);
+    x += ToolButton(dc, x, y, L"Custom presets", ID_PRESETS, loaded_ && list) + Sc(4);
+    x += ToolButton(dc, x, y, L"Measure", ID_MEASURE, loaded_ && list) + Sc(12);
+    if (mode_ != Mode::Plan)   // the plan has its own switch beside Apply, which rebuilds the plan
+        x += ToolButton(dc, x, y, tiOn_ ? L"TrustedInstaller: ON (writes as TI)" : L"TrustedInstaller: off", ID_TI, !applyW_.Running(),
+                        tiOn_, true) + Sc(12);
+    int right = rc.right - pad;
+    if (list) {
+        int sw = std::clamp((int)rc.right - pad - x, Sc(120), Sc(260));
+        rcSearch_ = RECT{rc.right - pad - sw, y, rc.right - pad, y + h};
+        FitPlaceholder(dc);
+        search_.Paint(dc, rcSearch_, c, focus_ == Focus::Search && HasFocus());
+        AddClick(rcSearch_, ID_SEARCH);
+        right = rcSearch_.left - Sc(12);
+    }
+    if (mode_ != Mode::Plan) {   // the switch's scope note, only where it fits whole (a clipped one would mislead)
+        Pal p(host_->Theme());
+        const Fonts& f = host_->Fonts();
+        for (const wchar_t* cap : kTiCaps) {
+            int need = TextW(dc, cap, f.caption) * 105 / 100;
+            if (need <= right - x) {
+                RECT tr{x, y, x + need + Sc(8), y + h};
+                ui::DrawText(dc, cap, tr, f.caption, p.mute, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP);
+                break;
+            }
+        }
+    }
+    return y + h + Sc(8);
+}
+
+// The breadcrumb over the grid ("Services › Drivers", "Services › Plan › Stripped (Services)"), counts on the right.
+int ServicesModule::PaintCrumb(HDC dc, const RECT& rc, int y) {
+    Pal p(host_->Theme());
+    const Fonts& f = host_->Fonts();
+    const int pad = Sc(12), h = Sc(22);
+    const wchar_t* sep = L"  ›  ";
+    std::wstring crumb = std::wstring(L"Services") + sep;
+    std::wstring counts;
+    if (mode_ == Mode::Plan) {
+        crumb += std::wstring(L"Plan") + sep + plan_.title;
+        if (plan_.kind == PlanKind::Control) counts = std::to_wstring(plan_.rows.size()) + L" operation(s)";
+        else
+            counts = std::to_wstring(plan_.Included()) + L" ticked  ·  " + std::to_wstring(plan_.Optional()) + L" unticked  ·  " +
+                     std::to_wstring(plan_.Blocked()) + L" kept";
+    } else if (mode_ == Mode::Presets) {
+        crumb += L"Custom presets";
+        counts = std::to_wstring(presets_.size()) + L" saved";
+    } else if (mode_ == Mode::Measure) {
+        crumb += L"Measure";
+        counts = std::to_wstring(measures_.size()) + L" recorded";
+    } else {
+        crumb += tab_ == TAB_SERVICES ? L"Services" : L"Drivers";
+        if (!search_.Text().empty()) crumb += sep + (L"“" + search_.Text() + L"”");
+        int total = 0, changed = 0, drift = 0;
+        for (auto& s : items_) {
+            if (!OnTab(s, (Tab)tab_)) continue;
+            total++;
+            if (!ChangedText(s).empty()) changed++;
+            if (drift_.count(Lower(s.name))) drift++;
+        }
+        counts = std::to_wstring(V_.size()) + L" of " + std::to_wstring(total);
+        if (hasFirst_) counts += L"  ·  " + std::to_wstring(changed) + L" vs first";
+        if (drift) counts += L"  ·  " + std::to_wstring(drift) + L" changed since Hadron set them";
+    }
+    int cw = TextW(dc, counts, f.caption) + Sc(4);   // a little air: some renderers draw wider than they measure
+    RECT cr{rc.right - pad - cw, y, rc.right - pad, y + h};
+    TextLeft(dc, counts, cr, f.caption, p.mute);
+    RECT tr{pad, y, cr.left - Sc(12), y + h};
+    ui::DrawText(dc, crumb, tr, f.ui, p.text, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+    return y + h + Sc(4);
+}
+
+void ServicesModule::SplitBody(int left, int right, int top, int bottom, RECT* list, RECT* det) {
+    const int split = Sc(5);
+    // The detail keeps 240 px and the list 320 px at the least; the saved width is clamped, never rewritten here.
+    int dw = std::clamp(Sc(detW_), Sc(240), std::max(Sc(240), right - left - split - Sc(320)));
+    *det = RECT{right - dw, top, right, bottom};
+    rcSplit_ = RECT{det->left - split, top, det->left, bottom};
+    *list = RECT{left, top, rcSplit_.left, bottom};
 }
 
 // ============================================================================================
@@ -5236,7 +5618,7 @@ int ServicesModule::PaintCompare(HDC dc, const RECT& r, bool draw) {
     int y = r.top + pad;
     if (draw) {
         if (con) { FillSolid(dc, r, cp.panel); FrameRectC(dc, r, cp.rule); }
-        else RoundFill(dc, r, Sc(8), p.panel, p.border);
+        else RoundFill(dc, r, ThreePane() ? Sc(2) : Sc(8), p.panel, p.border);
     }
     const COLORREF head = con ? cp.accInk : p.accT;
     if (!b) {
@@ -5334,9 +5716,9 @@ void ServicesModule::PaintPresetsMode(HDC dc, const RECT& rc, int y, int bottom)
         if (wl.size() > 4) { wl.resize(4); wl.back() += L"…"; }
         int h = std::max(btnH + Sc(8), (int)wl.size() * lh + Sc(10));
         RECT er{pad, y, rc.right - pad, y + h};
-        if (p.hc) RoundFill(dc, er, Sc(con ? 0 : 8), p.panel, p.border);
+        if (p.hc) RoundFill(dc, er, Sc(con ? 0 : ThreePane() ? 2 : 8), p.panel, p.border);
         else if (con) FillSolid(dc, er, Mix(p.panel, p.bad, 0.12));
-        else RoundFill(dc, er, Sc(8), Mix(p.panel, p.bad, 0.16));
+        else RoundFill(dc, er, ThreePane() ? Sc(2) : Sc(8), Mix(p.panel, p.bad, 0.16));
         RECT bar{er.left, er.top, er.left + Sc(4), er.bottom};
         FillSolid(dc, bar, p.bad);
         int ty = y + (h - (int)wl.size() * lh) / 2;
@@ -5435,10 +5817,10 @@ void ServicesModule::PaintPresetsMode(HDC dc, const RECT& rc, int y, int bottom)
     if (sel) {
         if (con) PaintConsoleDetail(dc, det, sel->name, (sel->tab == TAB_DRIVERS ? L"drivers" : L"services") + std::wstring(L"  ·  ") +
                                                        std::to_wstring(sel->items.size()) + L" items", PresetDoc(*sel), false);
-        else { RoundFill(dc, det, Sc(8), p.panel, p.border); PaintDetailPanel(dc, det, PresetDoc(*sel)); }
+        else { RoundFill(dc, det, ThreePane() ? Sc(2) : Sc(8), p.panel, p.border); PaintDetailPanel(dc, det, PresetDoc(*sel)); }
     } else {
         if (con) { FillSolid(dc, det, cp.panel); FrameRectC(dc, det, cp.rule); }
-        else RoundFill(dc, det, Sc(8), p.panel, p.border);
+        else RoundFill(dc, det, ThreePane() ? Sc(2) : Sc(8), p.panel, p.border);
         rcDetail_ = det;
         conLeftRc_ = RECT{};
     }
@@ -5523,7 +5905,7 @@ void ServicesModule::PaintMeasureMode(HDC dc, const RECT& rc, int y, int bottom)
     }
     if (conHelp_ && con) { PaintConsoleHelp(dc, det); return; }
     if (con) PaintConsoleDetail(dc, det, L"Measure", L"owner-measured  ·  test it", MeasureDoc(), false);
-    else { RoundFill(dc, det, Sc(8), p.panel, p.border); PaintDetailPanel(dc, det, MeasureDoc()); }
+    else { RoundFill(dc, det, ThreePane() ? Sc(2) : Sc(8), p.panel, p.border); PaintDetailPanel(dc, det, MeasureDoc()); }
 }
 
 // ============================================================================================
@@ -5860,32 +6242,33 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
               L"ui mini-analyze A8: an item whose configuration could not be read shows Start type \"unknown\" in both layouts");
     }
 
-    {   // Console detail columns come from each heading's side, never its text (Review cat 5)
+    {   // Console detail columns come from each paragraph's side, never its text (Review cat 5); board 4: three columns
         auto m = fresh(h, fixture);
-        CPal cp(h.theme);
         const SvcItem* dt = nullptr;
         for (auto& s : m->items_) if (IEq(s.name, L"DiagTrack")) dt = &s;
-        std::vector<Para> left, right;
-        if (dt) SplitDoc(m->ItemDoc(*dt), cp, &left, &right);
+        std::vector<Para> left, mid, right;
+        if (dt) m->SplitDoc3(m->ItemDoc(*dt), &left, &mid, &right);
         auto firstHead = [](const std::vector<Para>& v) {
             for (auto& p : v) if (p.kind == P_HEAD) return p.text;
             return std::wstring();
         };
-        check(dt && firstHead(left) == L"Configuration" && firstHead(right).find(L"(Hadron's KB)") != std::wstring::npos,
-              L"ui: DiagTrack's Console detail has Configuration on the left and the KB text on the right");
+        check(dt && firstHead(left) == L"CONFIGURATION" && firstHead(mid).find(L"(HADRON'S KB)") != std::wstring::npos &&
+                  firstHead(right) == L"CLAIM CHECK",
+              L"ui: DiagTrack's Console detail has Configuration on the left, the KB text in the middle, its basis on the right");
         std::vector<Para> doc = {{P_HEAD, L"", L"Configuration Manager (Hadron's KB)", kNoColor, SIDE_RIGHT},
                                  {P_TEXT, L"", L"kb", kNoColor},
                                  {P_HEAD, L"", L"Settings", kNoColor, SIDE_LEFT},
                                  {P_TEXT, L"", L"cfg", kNoColor}};
         left.clear();
+        mid.clear();
         right.clear();
-        SplitDoc(doc, cp, &left, &right);
-        check(left.size() == 2 && right.size() == 2 && right[1].text == L"kb" && left[1].text == L"cfg",
-              L"ui: a KB title starting \"Configuration\" stays in the right column (side, not text)");
+        m->SplitDoc3(doc, &left, &mid, &right);
+        check(left.size() == 2 && mid.size() == 2 && right.empty() && mid[1].text == L"kb" && left[1].text == L"cfg",
+              L"ui: a KB title starting \"Configuration\" stays in the KB column (side, not text)");
     }
 
     // ---- Finalize round 2: mini-design items (fixture only) ----------------------------------------------------
-    for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::Console}) {   // 9: an empty stock plan offers no Apply
+    for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::ThreePane, ui::Layout::Console}) {   // 9: an empty stock plan offers no Apply
         h.Use(ly, 96);
         auto m = fresh(h, fixture);
         m->OnClickId(ID_TAB_DRV);
@@ -5896,7 +6279,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
         bool apply = false;
         for (auto& ck : m->clicks_) if (ck.id == ID_APPLY) apply = true;
         check(m->mode_ == Mode::Plan && m->plan_.rows.empty() && !m->plan_.emptyText.empty() && !apply,
-              std::wstring(L"ui mini-design 9: ") + (ly == ui::Layout::Console ? L"Console" : L"Baseline") +
+              std::wstring(L"ui mini-design 9: ") + LayoutName(ly) +
                   L": an empty Windows-stock plan has no Apply button (its reason is shown once)");
     }
     h.Use(ui::Layout::Baseline, 96);
@@ -6001,7 +6384,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
     }
 
     // R24: at the minimum content size (800x560) nothing clickable overlaps and every target is inside the page.
-    for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::Console}) {
+    for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::ThreePane, ui::Layout::Console}) {
         for (bool plan : {false, true}) {
             h.Use(ly, 96);
             auto m = fresh(h, fixture + L"\\interrupted");
@@ -6025,11 +6408,69 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
             for (int w : m->colW_) colSum += w;
             bool fits = plan || ly == ui::Layout::Console || m->Sc(colSum) <= m->rcList_.right - m->rcList_.left;
             check(bad.empty() && presetShown && fits && (plan || sel),
-                  std::wstring(L"ui R24: ") + (ly == ui::Layout::Console ? L"Console" : L"Baseline") + (plan ? L" plan" : L" list") +
+                  std::wstring(L"ui R24: ") + LayoutName(ly) + (plan ? L" plan" : L" list") +
                       L" at 800x560: click targets inside the page, none overlapping, Preset column shown, columns fit" + bad);
         }
     }
     h.Use(ui::Layout::Baseline, 96);
+
+    {   // Layout chrome (layout spec 2026-11-13): the Three-Pane tree, the Console F-keys and header, show: and the splitter
+        h.Use(ui::Layout::ThreePane, 96);
+        auto m = fresh(h, fixture);
+        std::vector<NavNode> nav = m->NavNodes();
+        bool svc = false, drv = false, stripped = false, header = false;
+        for (auto& n : nav) {
+            if (n.id == NAV_SVC && n.label == L"Services") svc = true;
+            if (n.id == NAV_DRV && n.label == L"Drivers") drv = true;
+            if (n.id == NAV_PRESET + 3 && n.label == LevelName(LV_STRIPPED)) stripped = true;
+            if (n.header) header = true;
+        }
+        int selList = m->NavSelected();
+        m->OnNavSelect(NAV_DRV);
+        bool toDrivers = m->tab_ == TAB_DRIVERS && m->NavSelected() == NAV_DRV && m->mode_ == Mode::List;
+        m->OnNavSelect(NAV_PRESET + 3);
+        bool planOpen = m->mode_ == Mode::Plan && m->NavSelected() == NAV_PRESET + 3 && !m->applyW_.Running() && !m->haveResult_;
+        m->OnNavSelect(NAV_SVC);
+        bool closed = m->mode_ == Mode::List && m->tab_ == TAB_SERVICES && m->planReq_.type == PlanReq::None;
+        Canvas cv(1011, 700);
+        RECT r3{0, 0, 1011, 700};
+        if (cv.ok()) m->Paint(cv.dc, r3);
+        bool split = cv.ok() && m->rcSplit_.right - m->rcSplit_.left == m->Sc(5) && m->rcDetail_.left >= m->rcSplit_.right &&
+                     m->rcList_.right <= m->rcSplit_.left && r3.right - m->Sc(12) - m->rcSplit_.right == m->Sc(m->detW_);
+        check(svc && drv && stripped && header && selList == NAV_SVC && toDrivers && planOpen && closed && split,
+              L"ui Three-Pane: the tree has Services, Drivers and the preset plans; a tree row switches tab, opens a plan (never "
+              L"applies) and closes it again; list | 5 px splitter | 360 px detail");
+
+        h.Use(ui::Layout::Console, 96);
+        auto c = fresh(h, fixture);
+        std::vector<hx::FKey> fk = c->FKeys();
+        bool f1 = false, f9 = false, undo = false, plain = true;
+        for (auto& k : fk) {
+            if (k.key == L"F1" && k.vk == VK_F1) f1 = true;
+            if (k.key == L"F9" && k.vk == VK_F9) f9 = true;
+            if (k.key == L"Ctrl+Z") undo = true;   // off in fixture mode: never offered
+            if (k.vk == 0 || k.key.empty() || k.label.empty()) plain = false;
+        }
+        bool clickF9 = c->OnInput(WM_KEYDOWN, VK_F9, 0) && c->mode_ == Mode::Plan;   // a bar click sends the key: opens a plan only
+        bool noApply = !c->applyW_.Running() && !c->haveResult_;
+        c->OnInput(WM_KEYDOWN, VK_ESCAPE, 0);
+        std::wstring hd = c->ConsoleHeader();
+        bool head = hd.find(L"src=fixture") != std::wstring::npos && hd.find(L"mode=FIXTURE") != std::wstring::npos &&
+                    hd.find(L"view=LIST") != std::wstring::npos;
+        Canvas cc(1280, 800);
+        if (cc.ok()) c->Paint(cc.dc, RECT{0, 0, 1280, 800});
+        size_t all = c->V_.size();
+        c->OnClickId(ID_SHOW + 1);   // show: running
+        bool running = !c->V_.empty() && c->V_.size() < all;
+        for (int i : c->V_) if (c->items_[i].state != SERVICE_RUNNING) running = false;
+        h.Use(ui::Layout::Baseline, 96);
+        Canvas cb(1280, 800);
+        if (cb.ok()) c->Paint(cb.dc, RECT{0, 0, 1280, 800});   // the layout switch: Console's filter stops applying
+        bool back = cb.ok() && c->V_.size() == all;
+        check(f1 && f9 && !undo && plain && clickF9 && noApply && head && running && back,
+              L"ui Console: FKeys() gives the host's bar the enabled keys with their virtual keys, F9 from the bar opens a plan "
+              L"and nothing is applied, the header line says fixture, show: running filters, and Baseline shows every row again");
+    }
 
     {   // R24: scroll offsets follow a DPI change
         auto m = fresh(h, fixture);
@@ -6132,7 +6573,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
     }
     // At the minimum content size (800x560), in both layouts: the manager (with the name form and an import error) and
     // the measure page keep every click target inside the page and none overlapping (as R24 for the list and plans).
-    for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::Console}) {
+    for (ui::Layout ly : {ui::Layout::Baseline, ui::Layout::ThreePane, ui::Layout::Console}) {
         for (int page = 0; page < 3; page++) {
             h.Use(ly, 96);
             auto m = fresh(h, fixture);
@@ -6153,7 +6594,7 @@ void ServicesModule::UiSelftest(const std::wstring& fixture, const std::function
             RECT lr = m->ActiveListRc();
             bool listShown = lr.bottom - lr.top >= m->Sc(60);
             static const wchar_t* const kPage[] = {L"manager with an import error", L"save form", L"measure page"};
-            check(bad.empty() && listShown, std::wstring(L"ui ") + (ly == ui::Layout::Console ? L"Console " : L"Baseline ") + kPage[page] +
+            check(bad.empty() && listShown, std::wstring(L"ui ") + LayoutName(ly) + L" " + kPage[page] +
                                                 L" at 800x560: click targets inside the page, none overlapping, the list shown" + bad);
         }
     }
