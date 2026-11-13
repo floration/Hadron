@@ -7,7 +7,6 @@
 
 namespace hx {
 
-std::unique_ptr<Module> MakeHelloModule();
 std::unique_ptr<Module> MakeDiskMapModule();
 std::unique_ptr<Module> MakeRunAsModule();
 std::unique_ptr<Module> MakeBiosModule();

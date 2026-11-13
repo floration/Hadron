@@ -33,6 +33,7 @@ public:
     int  MaxOffset() const { return content_ > viewport_ ? content_ - viewport_ : 0; }
     bool Visible() const { return content_ > viewport_; }
     bool Dragging() const { return dragging_; }
+    void CancelDrag() { dragging_ = false; }   // call on WM_CAPTURECHANGED
 
     void Paint(HDC dc, const RECT& track, const PaintCtx& c);
     // msg: WM_LBUTTONDOWN / WM_MOUSEMOVE / WM_LBUTTONUP. Returns true if the offset changed.
@@ -55,6 +56,10 @@ public:
     // row always uses the selection text colour, and high contrast always uses the system text colour,
     // so ink never costs legibility. Never the only signal: say the status in the cell text too.
     enum class Ink : unsigned char { Normal, Warn, Bad, Good };
+
+    // Row and header heights per layout, so modules that lay out around a list use the same numbers.
+    static int RowHeight(Layout l, UINT dpi);
+    static int HeaderHeight(Layout l, UINT dpi);
 
     void SetColumns(std::vector<Column> cols) { cols_ = std::move(cols); }
     void SetRows(std::vector<std::vector<std::wstring>> rows);

@@ -5,7 +5,6 @@ namespace hx {
 
 std::vector<std::unique_ptr<Module>> MakeAllModules() {
     std::vector<std::unique_ptr<Module>> v;
-    v.push_back(MakeHelloModule());
     v.push_back(MakeDiskMapModule());
     v.push_back(MakeRunAsModule());
     v.push_back(MakeBiosModule());

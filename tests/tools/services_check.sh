@@ -80,6 +80,14 @@ shot services-console-plan "$S" --fixture "$FIX" --layout console --plan strippe
 shot services-console-keys "$S" --fixture "$FIX" --layout console --keys F1
 shot services-console-f9 "$S" --fixture "$FIX" --layout console --theme light --keys F2,F9
 shot services-console-suite "$BUILD/Hadron.exe" --module services --fixture "$FIX" --layout console --select DiagTrack
+shot services-console-itemkeys "$S" --fixture "$FIX" --layout console --select DiagTrack --keys F4
+# Three-Pane (layout spec 2026-11-13, board 7): the tree holds the tabs, the preset plans and the tools; list | detail.
+for T in dark light; do
+    shot services-threepane-$T "$S" --fixture "$FIX" --layout threepane --theme $T --select DiagTrack
+done
+shot services-threepane-drivers "$S" --fixture "$FIX" --layout threepane --tab drivers --select nvlddmkm
+shot services-threepane-plan "$S" --fixture "$FIX" --layout threepane --plan stripped
+shot services-threepane-suite "$BUILD/Hadron.exe" --module services --fixture "$FIX" --layout threepane --select DiagTrack
 # Follow-ups 6-9 (docs/pipeline/fixes/svcdrv-evidence.md): the Signer column (sorted by it), the drift detail with event
 # 7040, interface evidence on the plan, and the registry fallback's plan line. --regfallback on is fixture-only.
 shot services-signer "$S" --fixture "$FIX" --sort signer --select ExampleAudioFlt --tab drivers
@@ -92,14 +100,14 @@ shot services-console-drift-7040 "$S" --fixture "$FIX" --layout console --select
 shot services-console-regfallback-plan "$S" --fixture "$FIX" --layout console --plan stripped --regfallback on --select dmwappushservice
 # fix/svcdrv-visibility: a registry-only row, and the protected-items override (on; its second confirmation). --protected
 # and --plan single: are fixture-only.
-for L in baseline console; do
+for L in baseline threepane console; do
     shot services-regonly-$L "$S" --fixture "$FIX" --layout $L --tab drivers --select Fs_Rec
     shot services-startoverride-$L "$S" --fixture "$FIX" --layout $L --tab drivers --select hyperkbd
     shot services-protected-on-$L "$S" --fixture "$FIX" --layout $L --plan single:BrokerInfrastructure:4 --protected on
     shot services-protected-ask-$L "$S" --fixture "$FIX" --layout $L --plan single:ACPI:4 --protected ask
 done
 # Custom presets and measured before/after (docs/pipeline/fixes/svcdrv-presets.md); fixture mode writes nothing.
-for L in baseline console; do
+for L in baseline threepane console; do
     shot services-presets-$L "$S" --fixture "$FIX" --layout $L --presets
     shot services-import-error-$L "$S" --fixture "$FIX" --layout $L --import "$FIX/import/bad-start.txt"
     shot services-plan-custom-$L "$S" --fixture "$FIX" --layout $L --plan "custom:Gaming rig"

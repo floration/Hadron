@@ -1,6 +1,7 @@
 // core/ui/theme.cpp — the four neutral palettes, the Windows-accent read, and the colour maths that
 // turns one base accent into the square/tetradic set. No third-party code: own HSL conversion.
 #include "core/ui/theme.h"
+#include <string>
 #include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
@@ -8,74 +9,81 @@
 namespace hx::ui {
 
 const wchar_t* ThemeName(ThemeId id) {
-    switch (id) {
-        case ThemeId::Light:  return L"Light";
-        case ThemeId::Dark:   return L"Dark";
-        case ThemeId::Fun:    return L"Fun";
-        case ThemeId::Boring: return L"Boring";
-    }
-    return L"Dark";
+    return id == ThemeId::Light ? L"Light" : L"Dark";
+}
+
+bool ParseTheme(const wchar_t* key, ThemeId* out) {
+    std::wstring k = key ? key : L"";
+    if (k == L"light") { *out = ThemeId::Light; return true; }
+    if (k == L"dark") { *out = ThemeId::Dark; return true; }
+    return false;   // the retired fun/boring values fall back to the caller's default (Dark)
 }
 
 const wchar_t* LayoutName(Layout l) {
-    return l == Layout::Console ? L"Console" : L"Baseline";
+    return l == Layout::Console ? L"Console" : l == Layout::ThreePane ? L"Three-Pane" : L"Baseline";
 }
 
-// Neutral palettes. Accents are filled with the theme's fallback so ThemeBase is usable alone;
-// Resolve() overwrites accent/accent2/3/4 from the chosen base accent.
-const Theme& ThemeBase(ThemeId id) {
-    static const Theme light{
-        ThemeId::Light,
-        RGB(246,247,249), RGB(255,255,255), RGB(238,240,243), RGB(226,229,234), RGB(214,218,224),
-        RGB(24,27,33),    RGB(90,98,110),   RGB(140,147,158),
-        RGB(0,120,215), RGB(0,120,215), RGB(0,120,215), RGB(0,120,215),
-        RGB(180,120,20),  RGB(200,60,55),   RGB(40,150,90),
+const wchar_t* LayoutKey(Layout l) {
+    return l == Layout::Console ? L"console" : l == Layout::ThreePane ? L"threepane" : L"baseline";
+}
+
+bool ParseLayout(const wchar_t* key, Layout* out) {
+    std::wstring k = key ? key : L"";
+    if (k == L"baseline") { *out = Layout::Baseline; return true; }
+    if (k == L"threepane" || k == L"three-pane") { *out = Layout::ThreePane; return true; }
+    if (k == L"console") { *out = Layout::Console; return true; }
+    return false;
+}
+
+// Palettes from the owner's UI directions canvas (owner, 2026-11-13: "only light or dark, and they take the
+// colors from the hadron ui directions page; only accent colors are taken from your windows profile").
+// Dark: each layout uses its own direction's board (1 Baseline, 7 Three-Pane, 4 Console). Light: direction 5
+// "Paper", the canvas's only light board, for every layout. The accent fields hold the board's own accent,
+// used only when the Windows accent is achromatic; Resolve() overwrites them otherwise.
+// Field order: bg, panel, panel2, panel3, border; text1, text2, text3; accent x4; warn, bad, good.
+const Theme& ThemeBase(ThemeId id, Layout layout) {
+    static const Theme paper{   // 5 · Paper
+        ThemeId::Light, Layout::Baseline,
+        RGB(244,242,238), RGB(255,255,255), RGB(235,232,225), RGB(217,213,204), RGB(217,213,204),
+        RGB(29,31,35),    RGB(58,61,68),    RGB(92,96,104),
+        RGB(31,95,191), RGB(31,95,191), RGB(31,95,191), RGB(31,95,191),
+        RGB(133,78,0),    RGB(170,34,26),   RGB(21,110,60),   // darkened for 4.5:1 on panel2 too (zebra rows)
         false,
     };
-    static const Theme dark{
-        ThemeId::Dark,
-        RGB(17,19,23),    RGB(24,27,33),    RGB(32,36,43),    RGB(42,47,56),    RGB(40,44,52),
-        RGB(232,235,240), RGB(156,163,176), RGB(108,115,128),
+    static const Theme baseline{   // 1 · Baseline
+        ThemeId::Dark, Layout::Baseline,
+        RGB(17,19,23),    RGB(24,27,33),    RGB(31,35,42),    RGB(40,44,52),    RGB(40,44,52),
+        RGB(232,235,240), RGB(200,204,212), RGB(156,163,176),
         RGB(96,160,255), RGB(96,160,255), RGB(96,160,255), RGB(96,160,255),
-        RGB(240,180,80),  RGB(240,110,100), RGB(110,200,140),
+        RGB(238,164,66),  RGB(236,98,98),   RGB(80,214,140),
         false,
     };
-    static const Theme fun{
-        ThemeId::Fun,
-        RGB(26,18,38),    RGB(38,26,56),    RGB(52,36,76),    RGB(68,48,98),    RGB(72,52,104),
-        RGB(240,235,250), RGB(190,172,214), RGB(146,128,170),
-        RGB(255,80,170), RGB(255,80,170), RGB(255,80,170), RGB(255,80,170),
-        RGB(255,190,70),  RGB(255,96,120),  RGB(90,220,170),
-        false,
-    };
-    // "Reading Room" palette from the owner's UI directions canvas (direction 9): warm charcoal, sand accent.
-    // Owner, 2026-11-11: Boring should look like that, not a bright beige.
-    static const Theme boring{
-        ThemeId::Boring,
-        RGB(28,26,23),    RGB(33,31,27),    RGB(38,35,31),    RGB(53,48,42),    RGB(58,54,47),
-        RGB(239,233,223), RGB(207,200,186), RGB(163,155,140),
-        RGB(232,216,176), RGB(232,216,176), RGB(232,216,176), RGB(232,216,176),
+    static const Theme threePane{   // 7 · Three-Pane
+        ThemeId::Dark, Layout::ThreePane,
+        RGB(30,30,30),    RGB(37,37,38),    RGB(45,45,45),    RGB(60,60,60),    RGB(60,60,60),
+        RGB(230,230,230), RGB(208,208,208), RGB(168,168,168),
+        RGB(53,197,240), RGB(53,197,240), RGB(53,197,240), RGB(53,197,240),
         RGB(240,180,80),  RGB(240,128,112), RGB(110,200,140),
         false,
     };
-    switch (id) {
-        case ThemeId::Light:  return light;
-        case ThemeId::Fun:    return fun;
-        case ThemeId::Boring: return boring;
-        case ThemeId::Dark:   break;
+    static const Theme console{   // 4 · Console
+        ThemeId::Dark, Layout::Console,
+        RGB(11,13,11),    RGB(16,19,16),    RGB(20,24,20),    RGB(42,48,42),    RGB(42,48,42),
+        RGB(214,220,210), RGB(196,204,192), RGB(148,160,148),
+        RGB(255,182,72), RGB(255,182,72), RGB(255,182,72), RGB(255,182,72),
+        RGB(255,208,138), RGB(255,123,107), RGB(111,220,140),
+        false,
+    };
+    if (id == ThemeId::Light) {
+        static Theme light[kLayoutCount];
+        static bool init = false;
+        if (!init) { for (int i = 0; i < kLayoutCount; i++) { light[i] = paper; light[i].layout = (Layout)i; } init = true; }
+        return light[(int)layout];
     }
-    return dark;
+    return layout == Layout::Console ? console : layout == Layout::ThreePane ? threePane : baseline;
 }
 
-COLORREF FallbackAccent(ThemeId id) {
-    switch (id) {
-        case ThemeId::Light:  return RGB(0,120,215);
-        case ThemeId::Dark:   return RGB(96,160,255);
-        case ThemeId::Fun:    return RGB(255,80,170);
-        case ThemeId::Boring: return RGB(232,216,176);
-    }
-    return RGB(96,160,255);
-}
+COLORREF FallbackAccent(ThemeId id, Layout layout) { return ThemeBase(id, layout).accent; }
 
 // --- colour maths -----------------------------------------------------------------------------
 
@@ -193,10 +201,15 @@ static bool SystemHighContrast() {
     return false;
 }
 
+COLORREF Mix(COLORREF a, COLORREF b, double t) {
+    auto ch = [t](int x, int y) { return (int)(x * t + y * (1 - t) + 0.5); };
+    return RGB(ch(GetRValue(a), GetRValue(b)), ch(GetGValue(a), GetGValue(b)), ch(GetBValue(a), GetBValue(b)));
+}
+
 // --- resolve ----------------------------------------------------------------------------------
 
-Theme Resolve(ThemeId id, COLORREF baseAccent) {
-    Theme t = ThemeBase(id);
+Theme Resolve(ThemeId id, COLORREF baseAccent, Layout layout) {
+    Theme t = ThemeBase(id, layout);
     t.accent  = baseAccent;
     t.accent2 = RotateHue(baseAccent, 90);
     t.accent3 = RotateHue(baseAccent, 180);
@@ -205,12 +218,11 @@ Theme Resolve(ThemeId id, COLORREF baseAccent) {
     return t;
 }
 
-Theme ResolveLive(ThemeId id) {
+Theme ResolveLive(ThemeId id, Layout layout) {
     bool achromatic = false;
     COLORREF a = SystemAccent(&achromatic);
-    // Boring is the Reading Room look, whose sand accent is part of it: it ignores the Windows accent.
-    if (achromatic || id == ThemeId::Boring) a = FallbackAccent(id);
-    return Resolve(id, a);
+    if (achromatic) a = FallbackAccent(id, layout);
+    return Resolve(id, a, layout);
 }
 
 }  // namespace hx::ui

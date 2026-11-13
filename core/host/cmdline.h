@@ -16,8 +16,8 @@ struct CommandLine {
     bool selftest = false;        // --selftest: run the active module's checks, headless
     std::wstring screenshot;      // --screenshot <png>: render the main view and exit
     std::wstring fixture;         // --fixture <dir>: data the screenshot/selftest loads
-    ui::ThemeId theme = ui::ThemeId::Dark;        // --theme light|dark|fun|boring
-    ui::Layout  layout = ui::Layout::Baseline;    // --layout baseline|console
+    ui::ThemeId theme = ui::ThemeId::Dark;        // --theme light|dark
+    ui::Layout  layout = ui::Layout::Baseline;    // --layout baseline|threepane|console
     bool     hasAccent = false;   // --accent RRGGBB: stand-in Windows accent for --screenshot (design review)
     COLORREF accent = 0;
     bool themeGiven = false, layoutGiven = false; // the flag was passed (overrides the saved choice)

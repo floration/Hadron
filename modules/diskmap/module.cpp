@@ -1,10 +1,16 @@
 // modules/diskmap/module.cpp — DiskMap: a read-only disk-space visualiser (docs/design/diskmap.md).
 //
-// Two layouts over one scan (owner's choice, 2026-11-11):
-//   Baseline — the legacy look: toolbar, sidebar (current view, drive breakdown, Categories / Safe to
-//              delete tabs, largest-files list), breadcrumb, squarified treemap.
-//   Console  — no treemap: the current folder as a dense, sortable, keyboard-driven core/ui ListView
-//              (Name / Type / Size / %) with a DetailPane for the selection.
+// Three layouts over one scan (owner, 2026-11-11 and 2026-11-13):
+//   Baseline   — the legacy look: toolbar, sidebar (current view, drive breakdown, Categories / Safe to
+//                delete tabs, largest-files list), breadcrumb, squarified treemap.
+//   Three-Pane — board 7: Categories and Safe to delete are NavNodes in the host's tree (selecting one
+//                filters and highlights like the Baseline sidebar click); the middle is a slim toolbar,
+//                a breadcrumb, the treemap and the current folder's list; the right pane (draggable
+//                splitter, width saved as tp_detail_w) is the selection's detail plus the largest files.
+//   Console    — board 4: no treemap and no cards. A filter line (/ search, show/cat chips, row n/N), a
+//                path line, the current folder as a full-width table (NAME TYPE SIZE % FILES CATEGORY
+//                SAFE) and a three-column detail along the bottom. The host draws the F-key bar
+//                (FKeys) and the machine line (ConsoleHeader).
 // The scan runs on a core/sys Worker (scan.cpp); the module never moves, deletes or reads a file.
 //
 // Window: the module registers its own content class "Hadron.diskmap.View" instead of calling
@@ -15,6 +21,7 @@
 #include "core/host/run.h"
 #include "core/host/registry.h"
 #include "core/host/cmdline.h"
+#include "core/sys/settings.h"
 #include "core/sys/sys.h"
 #include "core/sys/worker.h"
 #include "core/ui/draw.h"
@@ -152,9 +159,29 @@ struct ListE { u32 id; u8 kind; u64 size; };   // kind 0 file, 1 folder
 struct RowRef { u8 kind; u32 id; };            // Console list row: 0 file, 1 folder
 
 enum ClickId { ID_RESCAN = 1, ID_CANCEL = 2, ID_UP = 4, ID_DRIVE = 100, ID_CRUMB = 200, ID_CAT = 300,
-               ID_CLEARFILTER = 500, ID_TAB = 600, ID_SAFE = 700, ID_STREAMS = 800 };
+               ID_CLEARFILTER = 500, ID_TAB = 600, ID_SAFE = 700, ID_STREAMS = 800, ID_SHOW = 900 };
 enum class St { Idle, Scanning, Done };
-enum class Focus { None, Click, Largest, List, Detail };
+enum class Focus { None, Click, Largest, List, Detail, Search };
+
+// Three-Pane NavNode ids: the two sections, then one node per category / safe reason.
+constexpr int NAV_CATS = 1, NAV_SAFE = 2, NAV_CAT0 = 10, NAV_REASON0 = 200;
+
+// One row of a detail pane: a key/value pair, or a small-caps section header. Values wrap.
+struct KV {
+    enum Style : u8 { Plain, Head, Num, Good };
+    std::wstring k, v;
+    Style style = Plain;
+};
+// The selection's detail, grouped so Three-Pane can stack it and Console can split it into columns.
+struct DetailModel {
+    std::wstring title, kind;
+    std::vector<KV> main, comp, safe, view;
+};
+// A scrollable, wrapping key/value area (Three-Pane detail, Console detail columns).
+struct KVPane {
+    ScrollBar sb;
+    RECT rc{};
+};
 
 // Fonts the host doesn't supply (legacy g_fSmallSemi 12, g_fHuge 28, g_fBigNum 30), per DPI/layout.
 struct ExtraFonts {
@@ -194,13 +221,20 @@ public:
 
     HWND Create(IHost& host, HWND parent, const RECT& rc) override;
     void OnActivate() override { if (hwnd_) SetFocus(hwnd_); }
-    void OnDpiChanged(UINT dpi) override {
+    void OnDpiChanged(UINT dpi) override {   // also called on a layout switch
         if (host_) extra_.Build(dpi, host_->Layout());
         mapDirty_ = true;
+        if ((Console() || Three()) && (focus_ == Focus::None || focus_ == Focus::Click)) focus_ = Focus::List;
+        if (!Console() && !Three() && (focus_ == Focus::List || focus_ == Focus::Search || focus_ == Focus::Detail)) focus_ = Focus::None;
         if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
     }
     bool PreTranslateMessage(MSG& m) override;
     bool OnInput(UINT msg, WPARAM w, LPARAM l) override;
+    std::vector<NavNode> NavNodes() override;
+    int  NavSelected() override;
+    void OnNavSelect(int id) override;
+    std::vector<FKey> FKeys() override;
+    std::wstring ConsoleHeader() override;
     void Shutdown() override {
         worker_.Cancel();
         worker_.Join();   // must not return while the scan thread is alive (contract)
@@ -218,7 +252,10 @@ private:
     int  Sc(int px) const { return S(px, host_ ? host_->Dpi() : 96); }
     double AreaScale() const { double k = (host_ ? host_->Dpi() : 96) / 96.0; return k * k; }   // px² thresholds
     bool Console() const { return host_ && host_->Layout() == Layout::Console; }
+    bool Three() const { return host_ && host_->Layout() == Layout::ThreePane; }
     void Invalidate() { if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
+    // The host's tree, F-key bar and header line follow our state; Baseline shows none of them.
+    void Chrome() { if (host_ && hwnd_ && host_->Layout() != Layout::Baseline) host_->ChromeChanged(); }
 
     // data
     void RefreshDrives();
@@ -232,7 +269,12 @@ private:
     void FillLargestList();
     void BuildConsoleRows(u32 selectDir = UINT32_MAX);
     void SortConsoleRows();
+    bool RowVisible(const RowRef& r) const;
     void SyncDetail();
+    DetailModel BuildDetail() const;
+    void SetFilter(int tab, int filter);
+    std::wstring NoticeText() const;
+    void OpenSelected(bool explorer);
     bool SafeMatch(u8 r) const {
         if (filter_ == FILTER_SAFE) return r != SF_NONE;
         if (filter_ > FILTER_SAFE) return r == filter_ - FILTER_SAFE;
@@ -258,6 +300,18 @@ private:
     void DrawEmpty(HDC dc, const RECT& area);
     void DrawMapArea(HDC dc);
     void DrawConsole(HDC dc, const RECT& rc);
+    void DrawThree(HDC dc);
+    void DrawToolbarTP(HDC dc);
+    void DrawDetailTP(HDC dc);
+    void DrawFilterLine(HDC dc);
+    int  DrawPathCrumb(HDC dc, const RECT& strip, int x, int right, HFONT f, const wchar_t* sep);
+    void SqButton(HDC dc, RECT r, const std::wstring& label, int id, u32 data, bool on, bool enabled = true);
+    void Chip(HDC dc, int& x, int cy, const std::wstring& label, bool on, int id, u32 data);
+    int  PaintKV(HDC dc, const std::vector<KV>& rows, const RECT& area, int scroll, bool draw);
+    void PaintPane(HDC dc, KVPane& p, const std::vector<KV>& rows);
+    RECT PaneTrack(const KVPane& p) const { return RECT{p.rc.right - Sc(8), p.rc.top, p.rc.right, p.rc.bottom}; }
+    COLORREF Acc() const { const Theme& t = host_->Theme(); return t.highContrast ? GetSysColor(COLOR_HIGHLIGHT) : t.accent; }
+    COLORREF OnAcc() const { const Theme& t = host_->Theme(); return t.highContrast ? GetSysColor(COLOR_HIGHLIGHTTEXT) : OnFill(t.accent); }
     void DrawFocus(HDC dc);
     void AddClick(const RECT& r, int id, u32 data = 0) { clicks_.push_back({r, id, data}); }
     bool IsHover(int id, u32 data = 0) const { return hoverId_ == id && hoverData_ == data; }
@@ -320,6 +374,7 @@ private:
     std::wstring status_;
 
     RECT rcTool_{}, rcSide_{}, rcCrumb_{}, rcMap_{}, rcLargest_{}, rcList_{}, rcDetail_{}, rcBody_{};
+    RECT rcSearch_{}, rcSplit_{}, rcFilter_{}, rcPath_{};
     HDC mapDC_ = nullptr; HBITMAP mapBmp_ = nullptr, mapOld_ = nullptr; int mapW_ = 0, mapH_ = 0;
     bool mapDirty_ = true;
 
@@ -327,7 +382,13 @@ private:
     ListView largestList_;
     std::vector<RowRef> rows_;
     ListView list_;
-    DetailPane detail_;
+    DetailModel dm_;                 // detail of the list selection (Three-Pane and Console)
+    KVPane tpPane_, conPane_[3];
+    SearchBox search_;               // name filter over the current folder's list (Three-Pane, Console)
+    bool skipSlash_ = false;         // the '/' that focused the search box must not be typed into it
+    int detailW96_ = 360;            // Three-Pane detail width (96-DPI px), Prefs tp_detail_w
+    bool splitDrag_ = false; int splitX0_ = 0, splitW0_ = 0;
+    ULONGLONG chromeTick_ = 0;       // last Console header refresh while scanning
     Focus focus_ = Focus::None;
     int focusId_ = -1; u32 focusData_ = 0;
 };
@@ -372,6 +433,11 @@ LRESULT DiskMapModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SIZE: mapDirty_ = true; Invalidate(); return 0;
     case WM_SETCURSOR:
         if (LOWORD(l) == HTCLIENT) {
+            POINT cp; GetCursorPos(&cp); ScreenToClient(h, &cp);
+            if (Three() && (splitDrag_ || PtInRect(&rcSplit_, cp))) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
+            if (PtInRect(&rcSearch_, cp) && (Three() || Console()) && st_ == St::Done) {
+                SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); return TRUE;
+            }
             bool hand = hoverClick_ || (hoverHit_ >= 0 && hoverHit_ < (int)hits_.size() && hits_[hoverHit_].topKind == 1);
             SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
             return TRUE;
@@ -385,7 +451,14 @@ LRESULT DiskMapModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         return 0;
     case WM_TIMER:
-        if (w == TIMER_PROGRESS && st_ == St::Scanning) Invalidate();
+        if (w == TIMER_PROGRESS && st_ == St::Scanning) {
+            Invalidate();
+            if (Console() && GetTickCount64() - chromeTick_ >= 1000) { chromeTick_ = GetTickCount64(); Chrome(); }
+        }
+        return 0;
+    case WM_CAPTURECHANGED:
+        if (splitDrag_) { splitDrag_ = false; host_->Prefs().SetInt(L"tp_detail_w", detailW96_); }
+        search_.CancelDrag();
         return 0;
     case WM_DM_SCANDONE:
         OnScanDone(w != 0);
@@ -419,6 +492,8 @@ HWND DiskMapModule::Create(IHost& host, HWND parent, const RECT& rc) {
     // never reaches the process token, other modules or child processes.
     RefreshDrives();
 
+    detailW96_ = std::max(240, std::min(900, host.Prefs().GetInt(L"tp_detail_w", 360)));
+    search_.onChanged = [this](const std::wstring&) { BuildConsoleRows(); UpdateStatus(); Invalidate(); };
     list_.onSortChanged = [this](int, bool) { SortConsoleRows(); SyncDetail(); };
     list_.onActivate = [this](int i) {
         if (i >= 0 && i < (int)rows_.size() && rows_[i].kind == 1) SetView(rows_[i].id);
@@ -455,7 +530,7 @@ HWND DiskMapModule::Create(IHost& host, HWND parent, const RECT& rc) {
         host.Log(LogLevel::Error, m.c_str());
         return nullptr;
     }
-    if (Console()) focus_ = Focus::List;
+    if (Console() || Three()) focus_ = Focus::List;
     streams_ = StreamsArg();
 
     // Optional "--drive X": start scanning that drive (validated against the drive list). Not in
@@ -559,6 +634,7 @@ void DiskMapModule::LaunchWorker() {
     mapDirty_ = true;
     UpdateStatus();
     Invalidate();
+    Chrome();
 }
 
 void DiskMapModule::OnScanDone(bool cancelled) {
@@ -573,10 +649,10 @@ void DiskMapModule::OnScanDone(bool cancelled) {
         return;
     }
     RefreshDrives();
-    if (cancelled || !s) { st_ = St::Idle; UpdateStatus(); Invalidate(); return; }   // partial data discarded
+    if (cancelled || !s) { st_ = St::Idle; UpdateStatus(); Invalidate(); Chrome(); return; }   // partial data discarded
     if (!s->ok) {
         lastError_ = L"Could not read " + target_.display + L": " + sys::ErrorText(s->rootErr);
-        st_ = St::Idle; UpdateStatus(); Invalidate();
+        st_ = St::Idle; UpdateStatus(); Invalidate(); Chrome();
         return;
     }
     data_ = std::move(s);
@@ -587,10 +663,12 @@ void DiskMapModule::EnterDone() {
     st_ = St::Done;
     view_ = 0;
     mapDirty_ = true;
+    search_.SetText(L"");
     ComputeLargest();
     BuildConsoleRows();
     UpdateStatus();
     Invalidate();
+    Chrome();
 }
 
 void DiskMapModule::SetView(u32 d, u32 selectChild) {
@@ -598,10 +676,37 @@ void DiskMapModule::SetView(u32 d, u32 selectChild) {
     view_ = d;
     mapDirty_ = true;
     hoverHit_ = -1; hoverTopValid_ = false;
+    search_.SetText(L"");   // the name filter is per folder; SetText does not fire onChanged
+    if (focus_ == Focus::Search) focus_ = Focus::List;
     ComputeLargest();
     BuildConsoleRows(selectChild);
     UpdateStatus();
     Invalidate();
+    Chrome();   // the tree's category and safe sizes are the view's
+}
+
+// Category / safe-reason filter, shared by the Baseline sidebar, the Three-Pane tree and Console chips.
+void DiskMapModule::SetFilter(int tab, int filter) {
+    // The largest-files list depends on the tab and the safe filter only, so a category click leaves it
+    // (and its scroll and selection) alone, as the Baseline sidebar always did.
+    bool largest = tab != sideTab_ || tab == 1 || filter < 0;
+    sideTab_ = tab;
+    filter_ = filter;
+    mapDirty_ = true;
+    if (largest) ComputeLargest();
+    BuildConsoleRows();
+    UpdateStatus();
+    Invalidate();
+    Chrome();
+}
+
+// Enter opens the selected folder; F3 / Ctrl+Enter shows the selection in Explorer.
+void DiskMapModule::OpenSelected(bool explorer) {
+    int i = list_.Selected();
+    if (st_ != St::Done || !data_ || i < 0 || i >= (int)rows_.size()) return;
+    const RowRef r = rows_[i];
+    if (explorer) ShowInExplorer(r.kind ? data_->DirPath(r.id) : data_->FilePath(r.id), true);
+    else if (r.kind == 1) SetView(r.id);
 }
 
 // Legacy ComputeLargest (586-638).
@@ -686,8 +791,8 @@ void DiskMapModule::BuildConsoleRows(u32 selectDir) {
     rows_.clear();
     if (st_ == St::Done && data_) {
         const DirE& v = data_->dirs[view_];
-        for (u32 k = 0; k < v.kidCount; k++) rows_.push_back({1, data_->KidsOf(v)[k]});
-        for (u32 f = v.fileFirst; f < v.fileFirst + v.fileCount; f++) rows_.push_back({0, f});
+        for (u32 k = 0; k < v.kidCount; k++) { RowRef r{1, data_->KidsOf(v)[k]}; if (RowVisible(r)) rows_.push_back(r); }
+        for (u32 f = v.fileFirst; f < v.fileFirst + v.fileCount; f++) { RowRef r{0, f}; if (RowVisible(r)) rows_.push_back(r); }
     }
     SortConsoleRows();
     // Reset the list to the top (ListView has no public scroll reset: Home does it), then move the
@@ -708,6 +813,26 @@ void DiskMapModule::BuildConsoleRows(u32 selectDir) {
     SyncDetail();
 }
 
+// List rows (Three-Pane, Console): the search text, then the category / safe filter. A folder passes a
+// category filter when it holds any bytes of that category, and a safe filter when it matches or holds
+// matching bytes, so the filter never hides where the highlighted space is.
+bool DiskMapModule::RowVisible(const RowRef& r) const {
+    const Scan& s = *data_;
+    const std::wstring& q = search_.Text();
+    if (!q.empty()) {
+        std::wstring n = r.kind ? s.Name(s.dirs[r.id].name) : s.Name(s.files[r.id].name), lq = q;
+        for (auto& ch : n) ch = (wchar_t)towlower(ch);
+        for (auto& ch : lq) ch = (wchar_t)towlower(ch);
+        if (n.find(lq) == std::wstring::npos) return false;
+    }
+    if (filter_ < 0) return true;
+    if (r.kind == 0) return FileMatch(s.files[r.id]);
+    const DirE& d = s.dirs[r.id];
+    if (filter_ < NCAT) return d.cat[filter_] > 0;
+    if (SafeMatch(d.safe)) return true;
+    return (filter_ == FILTER_SAFE ? SafeSum(d.safeR) : d.safeR[filter_ - FILTER_SAFE]) > 0;
+}
+
 void DiskMapModule::SortConsoleRows() {
     RowRef keep{255, 0};
     int sel = list_.Selected();
@@ -722,6 +847,18 @@ void DiskMapModule::SortConsoleRows() {
             if (f.flags & FF_REPARSE_DIR) return L"Link to folder";
             return CatName(f.cat);
         };
+        // Console-only columns: FILES (recursive count), CATEGORY (a folder's dominant one) and SAFE (the
+        // rule's name, or the matched bytes inside a folder).
+        auto files = [&](const RowRef& r) -> u64 { return r.kind ? s.dirs[r.id].nFiles : 0; };
+        auto cat = [&](const RowRef& r) -> std::wstring { return CatName(r.kind ? s.dirs[r.id].dom : s.files[r.id].cat); };
+        auto safe = [&](const RowRef& r) -> std::wstring {
+            u8 own = r.kind ? s.dirs[r.id].safe : s.files[r.id].safe;
+            if (own) return SafeReason(own).name;
+            if (r.kind && SafeSum(s.dirs[r.id].safeR)) return FmtSize(SafeSum(s.dirs[r.id].safeR)) + L" inside";
+            return L"";
+        };
+        auto safeKey = [&](const RowRef& r) -> u64 { return r.kind ? SafeSum(s.dirs[r.id].safeR) : (s.files[r.id].safe ? s.files[r.id].size : 0); };
+        auto cmp3 = [](u64 a, u64 b) { return a < b ? -1 : a > b ? 1 : 0; };
         int col = list_.SortColumn(); bool asc = list_.SortAscending();
         std::stable_sort(rows_.begin(), rows_.end(), [&](const RowRef& a, const RowRef& b) {
             int r;
@@ -729,11 +866,15 @@ void DiskMapModule::SortConsoleRows() {
                 case 0: r = _wcsicmp(name(a), name(b)); break;
                 case 1: r = type(a).compare(type(b)); break;
                 case -1: return size(a) > size(b);   // default: biggest first, folders and files mixed
-                default: r = size(a) < size(b) ? -1 : size(a) > size(b) ? 1 : 0; break;
+                case 4: r = cmp3(files(a), files(b)); break;
+                case 5: r = cat(a).compare(cat(b)); break;
+                case 6: r = cmp3(safeKey(a), safeKey(b)); break;
+                default: r = cmp3(size(a), size(b)); break;
             }
             return asc ? r < 0 : r > 0;
         });
         std::vector<std::vector<std::wstring>> cells;
+        std::vector<ListView::Ink> ink;
         u64 tot = s.dirs[view_].total;
         for (auto& r : rows_) {
             std::wstring n = name(r);
@@ -744,9 +885,12 @@ void DiskMapModule::SortConsoleRows() {
                 if (f.flags & FF_HARDLINK_DUP) t += L" (hard link)";
                 else if ((f.flags & FF_REPARSE) && !(f.flags & FF_REPARSE_DIR)) t += L" (link)";
             } else if (s.dirs[r.id].flags & DF_DENIED) t = L"Folder (unreadable)";
-            cells.push_back({n, t, FmtSize(size(r)), Pct(size(r), tot)});
+            cells.push_back({n, t, FmtSize(size(r)), Pct(size(r), tot), r.kind ? U64Str(files(r)) : std::wstring(), cat(r), safe(r)});
+            u8 own = r.kind ? s.dirs[r.id].safe : s.files[r.id].safe;
+            ink.push_back(own ? ListView::Ink::Good : (r.kind && (s.dirs[r.id].flags & DF_DENIED)) ? ListView::Ink::Warn : ListView::Ink::Normal);
         }
         list_.SetRows(std::move(cells));
+        if (Console()) list_.SetRowInk(std::move(ink));   // the SAFE column says it in text too
     } else {
         list_.SetRows({});
     }
@@ -756,72 +900,103 @@ void DiskMapModule::SortConsoleRows() {
 }
 
 void DiskMapModule::SyncDetail() {
-    detail_.Clear();
-    if (st_ != St::Done || !data_) return;
+    dm_ = BuildDetail();
+    tpPane_.sb.SetOffset(0);
+    for (auto& p : conPane_) p.sb.SetOffset(0);
+}
+
+// The detail of the list selection (or of the current folder when nothing is selected), in four groups:
+// main facts, composition by category, the safe-to-delete verdict with its basis (rule 7), and the
+// current view (drive split, skipped items, the degraded-mode notice).
+DetailModel DiskMapModule::BuildDetail() const {
+    DetailModel m;
+    if (st_ != St::Done || !data_) return m;
     const Scan& s = *data_;
-    std::vector<std::pair<std::wstring, std::wstring>> rows;
+    auto bytes = [](u64 v) { return FmtSize(v) + L"  (" + U64Str(v) + L" bytes)"; };
     auto safeRows = [&](u8 reason, const u64* safeR) {
         if (reason) {
             const SafeInfo& si = SafeReason(reason);
-            rows.push_back({L"Safe to delete", si.name});
-            rows.push_back({L"Why", si.desc});
-            rows.push_back({L"Basis", std::wstring(si.basis) + L" \x2014 " + si.basisNote});
+            m.safe.push_back({L"Rule", si.name, KV::Good});
+            m.safe.push_back({L"Why", si.desc});
+            m.safe.push_back({L"Basis", std::wstring(si.basis) + L" \x2014 " + si.basisNote});
         } else if (safeR && SafeSum(safeR)) {
-            rows.push_back({L"Safe to delete", FmtSize(SafeSum(safeR)) + L" inside"});
+            m.safe.push_back({L"Inside", FmtSize(SafeSum(safeR)) + L" matched", KV::Good});
             for (int r = 1; r < NSAFE; r++)
-                if (safeR[r]) rows.push_back({std::wstring(L"  ") + SafeReason(r).name, FmtSize(safeR[r])});
+                if (safeR[r]) m.safe.push_back({SafeReason(r).name, FmtSize(safeR[r]), KV::Num});
         } else {
-            rows.push_back({L"Safe to delete", L"No rule matched"});
+            m.safe.push_back({L"Rule", L"No rule matched"});
         }
+        m.safe.push_back({L"", L"Rules match by folder and file name, so check before deleting. DiskMap never deletes anything itself."});
     };
+    auto comp = [&](const u64* cat, u64 total) {
+        int order[NCAT]; for (int i = 0; i < NCAT; i++) order[i] = i;
+        std::stable_sort(order, order + NCAT, [&](int a, int b) { return cat[a] > cat[b]; });
+        for (int i = 0; i < NCAT && cat[order[i]]; i++)
+            m.comp.push_back({CatName(order[i]), FmtSize(cat[order[i]]) + L"  " + Pct(cat[order[i]], total), KV::Num});
+    };
+    const DirE& v = s.dirs[view_];
     int sel = list_.Selected();
     if (sel < 0 || sel >= (int)rows_.size()) {
-        const DirE& v = s.dirs[view_];
-        detail_.SetTitle(view_ == 0 ? s.DirPath(0) : s.Name(v.name));
-        rows.push_back({L"Size", FmtSize(v.total)});
-        rows.push_back({L"Files", U64Str(v.nFiles)});
-        rows.push_back({L"Folders", U64Str(v.nDirs)});
+        m.title = view_ == 0 ? s.DirPath(0) : s.Name(v.name);
+        m.kind = L"Current folder";
+        m.main.push_back({L"Size", bytes(v.total), KV::Num});
+        m.main.push_back({L"Files", U64Str(v.nFiles), KV::Num});
+        m.main.push_back({L"Folders", U64Str(v.nDirs), KV::Num});
+        comp(v.cat, v.total);
         safeRows(v.safe, v.safeR);
-        if (view_ == 0) {
-            std::wstring sk = SkippedText();
-            if (!sk.empty()) rows.push_back({L"Skipped", sk});
-            if (target_.total) rows.push_back({L"Not mapped", NotMappedWhy(s.stats.streams)});
-        }
-        detail_.SetRows(std::move(rows));
-        return;
-    }
-    const RowRef& r = rows_[sel];
-    if (r.kind == 1) {
-        const DirE& d = s.dirs[r.id];
-        detail_.SetTitle(std::wstring(s.Name(d.name)) + L"\\");
-        rows.push_back({L"Path", s.DirPath(r.id)});
-        rows.push_back({L"Size", FmtSize(d.total) + L"  (" + U64Str(d.total) + L" bytes)"});
-        rows.push_back({L"Share of view", Pct(d.total, s.dirs[view_].total)});
-        rows.push_back({L"Files", U64Str(d.nFiles)});
-        rows.push_back({L"Folders", U64Str(d.nDirs)});
-        rows.push_back({L"Mostly", CatName(d.dom)});
-        if (d.flags & DF_DENIED) rows.push_back({L"Unreadable", sys::ErrorText(d.err)});
+    } else if (rows_[sel].kind == 1) {
+        u32 id = rows_[sel].id;
+        const DirE& d = s.dirs[id];
+        m.title = std::wstring(s.Name(d.name)) + L"\\";
+        m.kind = L"Folder";
+        m.main.push_back({L"Path", s.DirPath(id)});
+        m.main.push_back({L"Size", bytes(d.total), KV::Num});
+        m.main.push_back({L"Share of view", Pct(d.total, v.total), KV::Num});
+        m.main.push_back({L"Files", U64Str(d.nFiles), KV::Num});
+        m.main.push_back({L"Folders", U64Str(d.nDirs), KV::Num});
+        m.main.push_back({L"Mostly", CatName(d.dom)});
+        if (d.flags & DF_DENIED) m.main.push_back({L"Unreadable", sys::ErrorText(d.err)});
+        comp(d.cat, d.total);
         safeRows(d.safe, d.safeR);
-        int order[NCAT]; for (int i = 0; i < NCAT; i++) order[i] = i;
-        std::stable_sort(order, order + NCAT, [&](int a, int b) { return d.cat[a] > d.cat[b]; });
-        for (int i = 0; i < NCAT && d.cat[order[i]]; i++)
-            rows.push_back({std::wstring(L"  ") + CatName(order[i]), FmtSize(d.cat[order[i]])});
     } else {
-        const FileE& f = s.files[r.id];
-        detail_.SetTitle(s.Name(f.name));
-        rows.push_back({L"Path", s.FilePath(r.id)});
-        rows.push_back({L"Size", FmtSize(f.size) + L"  (" + U64Str(f.size) + L" bytes)"});
-        rows.push_back({L"Category", CatName(f.cat)});
+        u32 id = rows_[sel].id;
+        const FileE& f = s.files[id];
+        m.title = s.Name(f.name);
+        m.kind = L"File";
+        m.main.push_back({L"Path", s.FilePath(id)});
+        m.main.push_back({L"Size", bytes(f.size), KV::Num});
+        m.main.push_back({L"Share of view", Pct(f.size, v.total), KV::Num});
+        m.main.push_back({L"Category", CatName(f.cat)});
         if (f.flags & FF_HARDLINK_DUP)
-            rows.push_back({L"Hard link", L"Same file as another link already counted; shown as 0 B so it counts once"});
+            m.main.push_back({L"Hard link", L"Same file as another link already counted; shown as 0 B so it counts once"});
         if (f.flags & FF_REPARSE) {
             wchar_t tag[32]; swprintf(tag, 32, L"0x%08X", f.tag);
-            rows.push_back({L"Reparse point", std::wstring(f.flags & FF_REPARSE_DIR ? L"Folder link, not followed" : L"Counted at its reported size") +
-                                              L" (tag " + tag + L")"});
+            m.main.push_back({L"Reparse point", std::wstring(f.flags & FF_REPARSE_DIR ? L"Folder link, not followed" : L"Counted at its reported size") +
+                                                L" (tag " + tag + L")"});
         }
+        m.comp.push_back({CatName(f.cat), FmtSize(f.size), KV::Num});
         safeRows(f.safe, nullptr);
     }
-    detail_.SetRows(std::move(rows));
+    // Current view: what the Baseline sidebar shows above its tabs.
+    std::wstring notice = NoticeText();
+    if (!notice.empty()) m.view.push_back({L"Notice", notice});
+    m.view.push_back({L"Folder", s.DirPath(view_)});
+    m.view.push_back({L"Size", FmtSize(v.total), KV::Num});
+    m.view.push_back({L"Contents", U64Str(v.nFiles) + L" files  \x00B7  " + U64Str(v.nDirs) + L" folders"});
+    m.view.push_back({L"Safe inside", FmtSize(SafeSum(v.safeR)), KV::Good});
+    if (view_ == 0) {
+        if (target_.total) {
+            u64 mapped = std::min<u64>(v.total, target_.used), hidden = target_.used > mapped ? target_.used - mapped : 0;
+            m.view.push_back({L"Mapped", FmtSize(mapped), KV::Num});
+            m.view.push_back({L"Not mapped", FmtSize(hidden), KV::Num});
+            m.view.push_back({L"", NotMappedWhy(s.stats.streams)});
+            m.view.push_back({L"Free", FmtSize(FreeOf(target_)), KV::Num});
+        }
+        if (s.stats.deniedDirs) m.view.push_back({L"Unreadable", U64Str(s.stats.deniedDirs) + L" folders couldn't be read"});
+        std::wstring sk = SkippedText();
+        if (!sk.empty()) m.view.push_back({L"Skipped", sk});
+    }
+    return m;
 }
 
 void DiskMapModule::ShowInExplorer(const std::wstring& path, bool select) {
@@ -883,7 +1058,7 @@ void DiskMapModule::UpdateStatus() {
     if (!host_) return;
     std::wstring s;
     if (st_ == St::Done) {
-        if (Console()) {
+        if (Console() || (Three() && hoverHit_ < 0)) {
             int sel = list_.Selected();
             if (data_ && sel >= 0 && sel < (int)rows_.size())
                 s = rows_[sel].kind ? data_->DirPath(rows_[sel].id) : data_->FilePath(rows_[sel].id);
@@ -908,16 +1083,37 @@ void DiskMapModule::UpdateStatus() {
 // Painting — Baseline (legacy 866-1358, metrics through S(), colours from the theme)
 
 void DiskMapModule::LayoutRects(const RECT& rc) {
-    if (Console()) {
-        int tb = Sc(48), bc = Sc(36);
-        rcTool_ = {rc.left, rc.top, rc.right, rc.top + tb};
+    rcSearch_ = rcSplit_ = rcFilter_ = rcPath_ = rcLargest_ = RECT{0, 0, 0, 0};
+    if (Console()) {   // board 4: filter line, path line, full-width table, bottom detail (~30%)
+        rcTool_ = rcSide_ = rcCrumb_ = RECT{0, 0, 0, 0};
+        rcFilter_ = {rc.left, rc.top, rc.right, rc.top + Sc(26)};
+        rcPath_ = {rc.left, rcFilter_.bottom, rc.right, rcFilter_.bottom + Sc(22)};
+        int dh = std::max<int>(Sc(150), (int)(rc.bottom - rcPath_.bottom) * 30 / 100);
+        rcBody_ = {rc.left, rcPath_.bottom, rc.right, rc.bottom};
+        rcList_ = {rc.left, rcPath_.bottom, rc.right, rc.bottom - dh};
+        rcDetail_ = {rc.left, rcList_.bottom, rc.right, rc.bottom};
+        rcMap_ = rc;   // the empty state / progress card when there is no scan
+        return;
+    }
+    if (Three()) {     // board 7: toolbar, breadcrumb, treemap over the list | splitter | detail
         rcSide_ = {0, 0, 0, 0};
-        rcCrumb_ = {rc.left, rcTool_.bottom, rc.right, rcTool_.bottom + bc};
-        rcBody_ = {rc.left + Sc(12), rcCrumb_.bottom + Sc(30), rc.right - Sc(12), rc.bottom - Sc(12)};
-        int dw = std::min<int>(Sc(380), (int)(rcBody_.right - rcBody_.left) / 2);
-        rcList_ = {rcBody_.left, rcBody_.top, rcBody_.right - dw - Sc(10), rcBody_.bottom};
-        rcDetail_ = {rcList_.right + Sc(10), rcBody_.top, rcBody_.right, rcBody_.bottom};
-        rcMap_ = {rcCrumb_.left + Sc(12), rcCrumb_.bottom, rc.right - Sc(12), rc.bottom - Sc(10)};
+        rcTool_ = {rc.left, rc.top, rc.right, rc.top + Sc(36)};
+        rcCrumb_ = {rc.left, rcTool_.bottom, rc.right, rcTool_.bottom + Sc(28)};
+        int cy = (rcTool_.top + rcTool_.bottom) / 2;
+        rcSearch_ = {rc.right - Sc(10) - Sc(220), cy - Sc(12), rc.right - Sc(10), cy + Sc(12)};
+        rcBody_ = {rc.left, rcCrumb_.bottom, rc.right, rc.bottom};
+        if (st_ != St::Done || !data_) {
+            rcSearch_ = rcList_ = rcDetail_ = RECT{0, 0, 0, 0};
+            rcMap_ = {rc.left, rcTool_.bottom, rc.right, rc.bottom};
+            return;
+        }
+        int W = rc.right - rc.left;
+        int dw = std::max<int>(Sc(240), std::min<int>(Sc(detailW96_), W - Sc(380)));
+        rcDetail_ = {rc.right - dw, rcBody_.top, rc.right, rc.bottom};
+        rcSplit_ = {rcDetail_.left - Sc(5), rcBody_.top, rcDetail_.left, rc.bottom};
+        int mh = rc.bottom - rcBody_.top;
+        rcMap_ = {rc.left, rcBody_.top, rcSplit_.left, rcBody_.top + mh * 55 / 100};
+        rcList_ = {rc.left, rcMap_.bottom + Sc(1), rcSplit_.left, rc.bottom};
         return;
     }
     int tb = Sc(60), sb = Sc(300), bc = Sc(40);
@@ -1071,12 +1267,16 @@ std::wstring DiskMapModule::SkippedText() const {
 }
 
 // The one degraded-mode notice (deviation 1/5): unelevated, or SeBackupPrivilege refused.
+std::wstring DiskMapModule::NoticeText() const {
+    if (!elevated_) return L"Not running elevated, so protected folders can't be read and totals will be lower. Hadron asks for admin at start; it does not relaunch.";
+    if (data_ && !data_->stats.backupOk)   // known after a scan: the privilege is enabled per scan thread
+        return L"SeBackupPrivilege could not be enabled for the scan (" + sys::ErrorText(data_->stats.backupErr) +
+               L"), so some admin-only folders may be unreadable.";
+    return L"";
+}
+
 void DiskMapModule::DrawNotice(HDC dc, int& y, int L, int R) {
-    std::wstring msg;
-    if (!elevated_) msg = L"Not running elevated, so protected folders can't be read and totals will be lower. Hadron asks for admin at start; it does not relaunch.";
-    else if (data_ && !data_->stats.backupOk)   // known after a scan: the privilege is enabled per scan thread
-        msg = L"SeBackupPrivilege could not be enabled for the scan (" + sys::ErrorText(data_->stats.backupErr) +
-              L"), so some admin-only folders may be unreadable.";
+    std::wstring msg = NoticeText();
     if (msg.empty()) return;
     const Theme& t = host_->Theme();
     RECT box = {L + Sc(12), y + Sc(8), R - Sc(10), y + Sc(8)};
@@ -1411,6 +1611,17 @@ void DiskMapModule::DrawMapArea(HDC dc) {
         RECT r = hits_[hoverHit_].r; OffsetRect(&r, rcMap_.left, rcMap_.top);
         Outline(dc, r, host_->Theme().id == ThemeId::Light ? host_->Theme().text1 : RGB(255, 255, 255), Sc(1));
     }
+    // Three-Pane: the list selection's block, so the list and the map read as one view.
+    int sel = list_.Selected();
+    if (Three() && sel >= 0 && sel < (int)rows_.size()) {
+        const RowRef& rr = rows_[sel];
+        for (const Hit& h : hits_)
+            if (h.kind == rr.kind && h.id == rr.id && h.top == rr.id && h.topKind == rr.kind) {
+                RECT r = h.r; OffsetRect(&r, rcMap_.left, rcMap_.top);
+                Outline(dc, r, Acc(), Sc(2));
+                break;
+            }
+    }
 }
 
 COLORREF DiskMapModule::MixColor(const u64* cats, const u64* safeR, u64 total, u8 dom) const {
@@ -1567,51 +1778,408 @@ void DiskMapModule::RenderMap(HDC ref) {
     mapDirty_ = false;
 }
 
-// ---- Console layout ----------------------------------------------------------------------------
+// ---- shared Three-Pane / Console pieces ---------------------------------------------------------
+// Square button (board 7: 2px radius at most; we draw none).
+void DiskMapModule::SqButton(HDC dc, RECT r, const std::wstring& label, int id, u32 data, bool on, bool enabled) {
+    const Theme& t = host_->Theme();
+    bool hv = enabled && IsHover(id, data);
+    COLORREF fill = on ? Acc() : (hv ? t.panel3 : t.panel2);
+    FillC(dc, r, fill);
+    if (!on) FrameRectC(dc, r, hv ? Mix(t.border, t.text3, 0.5) : t.border);
+    Text(dc, label, r, host_->Fonts().ui, on ? OnAcc() : (enabled ? t.text1 : t.text3), TC);
+    if (enabled) AddClick(r, id, data);
+}
+
+// Small toggle chip for the Console filter line.
+void DiskMapModule::Chip(HDC dc, int& x, int cy, const std::wstring& label, bool on, int id, u32 data) {
+    const Theme& t = host_->Theme();
+    HFONT f = host_->Fonts().caption;
+    RECT r = {x, cy - Sc(9), x + TextW(dc, label, f) + Sc(12), cy + Sc(9)};
+    bool hv = IsHover(id, data);
+    if (on) FillC(dc, r, Acc());
+    else { FillC(dc, r, hv ? t.panel3 : t.panel2); FrameRectC(dc, r, t.border); }
+    Text(dc, label, r, f, on ? OnAcc() : (hv ? t.text1 : t.text2), TC);
+    AddClick(r, id, data);
+    x = r.right + Sc(4);
+}
+
+// Clickable path segments from the scan root to the view; early segments collapse to an ellipsis when
+// the strip is too narrow. Returns the x after the last segment.
+int DiskMapModule::DrawPathCrumb(HDC dc, const RECT& strip, int x, int right, HFONT f, const wchar_t* sep) {
+    const Theme& t = host_->Theme();
+    const Scan& s = *data_;
+    std::vector<u32> chain;
+    for (u32 d = view_;; d = s.dirs[d].parent) { chain.push_back(d); if (d == 0) break; }
+    std::reverse(chain.begin(), chain.end());
+    auto label = [&](size_t i) { return i == 0 ? s.DirPath(0) : std::wstring(s.Name(s.dirs[chain[i]].name)); };
+    int sw = TextW(dc, sep, f), ell = TextW(dc, L"\x2026", f);
+    auto width = [&](size_t first) {
+        int w = TextW(dc, label(0), f);
+        if (first > 1) w += sw + ell;
+        for (size_t i = first; i < chain.size(); i++) w += sw + TextW(dc, label(i), f);
+        return w;
+    };
+    size_t first = 1;
+    while (first + 1 < chain.size() && x + width(first) > right) first++;
+    int cy = (strip.top + strip.bottom) / 2;
+    for (size_t i = 0; i < chain.size(); i++) {
+        if (i > 0 && i < first) continue;
+        if (i > 0) {
+            if (i == first && first > 1) {
+                RECT er = {x, strip.top, x + sw + ell, strip.bottom};
+                Text(dc, std::wstring(sep) + L"\x2026", er, f, t.text3, TL);
+                x = er.right;
+            }
+            RECT sr = {x, strip.top, x + sw, strip.bottom};
+            Text(dc, sep, sr, f, t.text3, TL);
+            x = sr.right;
+        }
+        bool last = i + 1 == chain.size();
+        std::wstring nm = label(i);
+        RECT r = {x, cy - Sc(10), std::min<int>(x + TextW(dc, nm, f), right), cy + Sc(10)};
+        bool hv = !last && IsHover(ID_CRUMB, chain[i]);
+        Text(dc, nm, r, f, last || hv ? t.text1 : t.text2, i == 0 ? TP : TL);
+        if (hv) HLine(dc, r.left, r.right, r.bottom - 1, t.text2);
+        if (!last) AddClick(r, ID_CRUMB, chain[i]);
+        x = r.right;
+    }
+    return x;
+}
+
+int TextH(HDC dc, const std::wstring& s, int width, HFONT f) {
+    RECT r = {0, 0, std::max(1, width), 0};
+    HGDIOBJ o = SelectObject(dc, f);
+    DrawTextW(dc, s.c_str(), -1, &r, DT_WORDBREAK | DT_EDITCONTROL | DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, o);
+    return r.bottom - r.top;
+}
+
+// Wrapping key/value rows with small-caps section headers. Returns the content height.
+int DiskMapModule::PaintKV(HDC dc, const std::vector<KV>& rows, const RECT& area, int scroll, bool draw) {
+    const Theme& t = host_->Theme();
+    const Fonts& f = host_->Fonts();
+    bool con = Console();
+    int W = area.right - area.left;
+    int keyW = std::min<int>(Sc(con ? 120 : 112), W * 2 / 5);
+    int rowH = Sc(con ? 19 : 22), y = 0;
+    for (size_t i = 0; i < rows.size(); i++) {
+        const KV& kv = rows[i];
+        if (kv.style == KV::Head) {
+            if (i) y += Sc(10);
+            if (draw) {
+                RECT hr = {area.left, area.top + y - scroll, area.right, area.top + y - scroll + Sc(18)};
+                Text(dc, kv.k, hr, extra_.smallSemi, t.text3, TL);
+                HLine(dc, area.left + TextW(dc, kv.k, extra_.smallSemi) + Sc(8), area.right, (hr.top + hr.bottom) / 2, t.border);
+            }
+            y += Sc(20);
+            continue;
+        }
+        int vx = kv.k.empty() ? 0 : keyW;
+        int vh = TextH(dc, kv.v, W - vx, f.ui);
+        int h = std::max(rowH, vh + Sc(4));
+        if (draw) {
+            int top = area.top + y - scroll;
+            if (top + h >= area.top && top < area.bottom) {
+                COLORREF ink = kv.k.empty() ? t.text2
+                             : kv.style == KV::Good ? (t.highContrast ? t.text1 : t.good)
+                             : (kv.style == KV::Num && con) ? t.warn : t.text1;
+                if (!kv.k.empty()) { RECT kr = {area.left, top, area.left + keyW - Sc(8), top + rowH}; Text(dc, kv.k, kr, f.caption, t.text3, TL); }
+                RECT vr = {area.left + vx, top + (rowH - std::min(rowH, vh)) / 2, area.right, top + h};
+                Text(dc, kv.v, vr, f.ui, ink, DT_WORDBREAK | DT_EDITCONTROL);   // long paths break mid-word
+            }
+        }
+        y += h;
+    }
+    return y;
+}
+
+void DiskMapModule::PaintPane(HDC dc, KVPane& p, const std::vector<KV>& rows) {
+    RECT area = p.rc;
+    int full = PaintKV(dc, rows, area, 0, false);
+    bool sb = full > area.bottom - area.top;
+    if (sb) area.right -= Sc(12);
+    int content = sb ? PaintKV(dc, rows, area, 0, false) : full;
+    p.sb.Configure(area.bottom - area.top, content);
+    int saved = SaveDC(dc);
+    IntersectClipRect(dc, p.rc.left, p.rc.top, p.rc.right, p.rc.bottom);
+    PaintKV(dc, rows, area, p.sb.Offset(), true);
+    RestoreDC(dc, saved);
+    if (p.sb.Visible()) p.sb.Paint(dc, PaneTrack(p), Ctx());
+}
+
+// ---- Three-Pane layout (board 7) ---------------------------------------------------------------
+void DiskMapModule::DrawToolbarTP(HDC dc) {
+    const Theme& t = host_->Theme();
+    const Fonts& f = host_->Fonts();
+    FillC(dc, rcTool_, t.panel);
+    HLine(dc, rcTool_.left, rcTool_.right, rcTool_.bottom - 1, t.border);
+    int cy = (rcTool_.top + rcTool_.bottom) / 2, bh = Sc(26), x = rcTool_.left + Sc(10);
+    auto btn = [&](const std::wstring& label, int id, bool enabled) {
+        RECT r = {x, cy - bh / 2, x + TextW(dc, label, f.ui) + Sc(20), cy + bh / 2};
+        SqButton(dc, r, label, id, 0, false, enabled);
+        x = r.right + Sc(6);
+    };
+    btn(L"\x2190 Up", ID_UP, st_ == St::Done && view_ != 0);
+    if (st_ == St::Scanning) btn(L"Cancel", ID_CANCEL, true);
+    else if (!target_.fixture) btn(L"Rescan", ID_RESCAN, st_ == St::Done);
+    x += Sc(6);
+    int limit = (rcSearch_.right > rcSearch_.left ? rcSearch_.left : rcTool_.right) - Sc(200);
+    if (target_.fixture) {
+        size_t cut = target_.display.find_last_of(L'\\');
+        std::wstring leaf = cut == std::wstring::npos ? target_.display : target_.display.substr(cut + 1);
+        RECT r = {x, cy - bh / 2, x + TextW(dc, L"Fixture: " + leaf, f.ui) + Sc(20), cy + bh / 2};
+        FillC(dc, r, t.panel2); FrameRectC(dc, r, Acc());
+        Text(dc, L"Fixture: " + leaf, r, f.ui, t.text1, TC);
+        x = r.right + Sc(6);
+    } else {
+        for (size_t i = 0; i < drives_.size(); i++) {
+            const Drive& d = drives_[i];
+            std::wstring lab = std::wstring(1, d.letter) + L":  " + FmtSize(d.freeb) + L" free";
+            int w = TextW(dc, lab, f.caption) + Sc(20);
+            if (x + w > limit) break;
+            RECT r = {x, cy - bh / 2, x + w, cy + bh / 2};
+            bool active = st_ != St::Idle && d.letter == target_.letter, hv = IsHover(ID_DRIVE, (u32)i);
+            FillC(dc, r, active ? Mix(t.panel2, t.accent, 0.18) : (hv ? t.panel3 : t.panel2));
+            FrameRectC(dc, r, active ? Acc() : t.border);
+            RECT tr = {r.left, r.top, r.right, r.bottom - Sc(3)};
+            Text(dc, lab, tr, f.caption, t.text1, TC);
+            double used = d.total ? (double)UsedOf(d) / (double)d.total : 0;
+            RECT bar = {r.left + 1, r.bottom - Sc(3), r.right - 1, r.bottom - 1};
+            FillC(dc, bar, t.panel3);
+            bar.right = bar.left + (LONG)((bar.right - bar.left) * used);
+            FillC(dc, bar, used > 0.9 ? t.bad : Acc());
+            AddClick(r, ID_DRIVE, (u32)i);
+            x = r.right + Sc(6);
+        }
+    }
+    // "Check for data streams" (off by default): a square checkbox button.
+    {
+        std::wstring lab = streams_ ? L"Data streams: on (slower)" : L"Check for data streams";
+        int w = TextW(dc, lab, f.caption) + Sc(36);
+        RECT r = {x + Sc(4), cy - bh / 2, x + Sc(4) + w, cy + bh / 2};
+        if (r.right < limit + Sc(200)) {
+            bool hv = IsHover(ID_STREAMS);
+            FillC(dc, r, hv ? t.panel3 : t.panel2);
+            FrameRectC(dc, r, streams_ ? Acc() : t.border);
+            RECT box = {r.left + Sc(9), cy - Sc(6), r.left + Sc(21), cy + Sc(6)};
+            if (streams_) { FillC(dc, box, Acc()); RECT in = {box.left + Sc(3), box.top + Sc(3), box.right - Sc(3), box.bottom - Sc(3)}; FillC(dc, in, OnAcc()); }
+            else FrameRectC(dc, box, t.text3);
+            RECT lt = {box.right + Sc(7), r.top, r.right - Sc(4), r.bottom};
+            Text(dc, lab, lt, f.caption, t.text1, TL);
+            AddClick(r, ID_STREAMS);
+        }
+    }
+    if (rcSearch_.right > rcSearch_.left) search_.Paint(dc, rcSearch_, Ctx(), focus_ == Focus::Search);
+}
+
+void DiskMapModule::DrawDetailTP(HDC dc) {
+    const Theme& t = host_->Theme();
+    const Fonts& f = host_->Fonts();
+    RECT d = rcDetail_;
+    FillC(dc, d, t.panel);
+    int L = d.left + Sc(14), R = d.right - Sc(10);
+    int y = d.top + Sc(10);
+    RECT tr = {L, y, R, y + Sc(22)};
+    Text(dc, dm_.title, tr, f.semi, t.text1, TP);
+    y += Sc(22);
+    RECT kr = {L, y, R, y + Sc(16)};
+    Text(dc, dm_.kind, kr, f.caption, t.text3, TL);
+    y += Sc(22);
+    HLine(dc, L, R, y, t.border);
+    y += Sc(8);
+    // Largest files / biggest spots to clean at the bottom of the pane (the Baseline sidebar's list).
+    int lh = largest_.empty() ? 0 : std::min<int>(Sc(26 + 24 * 7 + 30), (d.bottom - y) * 45 / 100);
+    if (lh > Sc(80)) {
+        RECT cap = {L, d.bottom - lh, R, d.bottom - lh + Sc(20)};
+        Text(dc, sideTab_ == 1 ? L"BIGGEST SPOTS TO CLEAN" : L"LARGEST FILES", cap, extra_.smallSemi, t.text3, TL);
+        rcLargest_ = {d.left + Sc(6), cap.bottom + Sc(2), d.right - Sc(6), d.bottom - Sc(6)};
+        int w96 = MulDiv(rcLargest_.right - rcLargest_.left, 96, (int)host_->Dpi());
+        largestList_.SetColumns({{L"Name", std::max(60, w96 - 84)}, {L"Size", 84, true}});
+        largestList_.Paint(dc, rcLargest_, Ctx(), focus_ == Focus::Largest);
+    } else {
+        lh = 0;
+        rcLargest_ = {0, 0, 0, 0};
+    }
+    std::vector<KV> rows = dm_.main;
+    auto section = [&](const wchar_t* head, const std::vector<KV>& part) {
+        if (part.empty()) return;
+        rows.push_back({head, L"", KV::Head});
+        rows.insert(rows.end(), part.begin(), part.end());
+    };
+    section(L"COMPOSITION", dm_.comp);
+    section(L"SAFE TO DELETE", dm_.safe);
+    section(L"CURRENT VIEW", dm_.view);
+    tpPane_.rc = {L, y, d.right - Sc(4), d.bottom - lh - Sc(8)};
+    PaintPane(dc, tpPane_, rows);
+    if (focus_ == Focus::Detail) FocusRectC(dc, RECT{d.left + Sc(2), d.top + Sc(2), d.right - Sc(2), tpPane_.rc.bottom}, Acc());
+}
+
+void DiskMapModule::DrawThree(HDC dc) {
+    const Theme& t = host_->Theme();
+    const Fonts& f = host_->Fonts();
+    DrawToolbarTP(dc);
+    if (st_ != St::Done || !data_) {
+        int y = rcMap_.top + Sc(10);
+        DrawNotice(dc, y, rcMap_.left + Sc(12), rcMap_.left + Sc(420));
+        DrawMapArea(dc);
+        return;
+    }
+    // Breadcrumb with counts on the right.
+    FillC(dc, rcCrumb_, t.bg);
+    HLine(dc, rcCrumb_.left, rcCrumb_.right, rcCrumb_.bottom - 1, t.border);
+    const DirE& v = data_->dirs[view_];
+    std::wstring counts = U64Str(rows_.size()) + L" items  \x00B7  " + FmtSize(v.total) + L"  \x00B7  " + U64Str(v.nFiles) +
+                          L" files  \x00B7  " + FmtSize(SafeSum(v.safeR)) + L" safe to delete";
+    int cw = TextW(dc, counts, f.caption);
+    RECT cr = {rcCrumb_.right - Sc(16) - cw, rcCrumb_.top, rcCrumb_.right - Sc(12), rcCrumb_.bottom};
+    Text(dc, counts, cr, f.caption, t.text3, TR | DT_NOCLIP);
+    DrawPathCrumb(dc, rcCrumb_, rcCrumb_.left + Sc(12), cr.left - Sc(20), f.ui, L"  \x203A  ");
+
+    DrawMapArea(dc);
+    HLine(dc, rcMap_.left, rcMap_.right, rcMap_.bottom, t.border);
+    int w96 = MulDiv(rcList_.right - rcList_.left, 96, (int)host_->Dpi()) - 12;
+    int sizeW = 84, pctW = 64, typeW = std::min(180, std::max(100, w96 / 4));
+    list_.SetColumns({{L"Name", std::max(80, w96 - typeW - sizeW - pctW)}, {L"Type", typeW},
+                      {L"Size", sizeW, true}, {L"%", pctW, true}});
+    list_.Paint(dc, rcList_, Ctx(), focus_ == Focus::List);
+    // Splitter: 5px, 1px lines on both edges (the host's tree splitter look).
+    FillC(dc, rcSplit_, t.bg);
+    VLine(dc, rcSplit_.left, rcSplit_.top, rcSplit_.bottom, t.border);
+    VLine(dc, rcSplit_.right - 1, rcSplit_.top, rcSplit_.bottom, t.border);
+    DrawDetailTP(dc);
+}
+
+// ---- Console layout (board 4) -----------------------------------------------------------------
+// Short lower-case category label for a chip: the first word ("Archives & disk images" -> "archives").
+std::wstring ShortCat(int c) {
+    std::wstring n = CatName(c);
+    size_t cut = n.find_first_of(L" &");
+    if (cut != std::wstring::npos) n = n.substr(0, cut);
+    for (auto& ch : n) ch = (wchar_t)towlower(ch);
+    return n;
+}
+
+void DiskMapModule::DrawFilterLine(HDC dc) {
+    const Theme& t = host_->Theme();
+    const Fonts& f = host_->Fonts();
+    RECT r = rcFilter_;
+    FillC(dc, r, t.panel);
+    HLine(dc, r.left, r.right, r.bottom - 1, t.border);
+    int cy = (r.top + r.bottom) / 2, x = r.left + Sc(10);
+    auto word = [&](const std::wstring& s, COLORREF c) {
+        int w = TextW(dc, s, f.caption);
+        RECT wr = {x, r.top, x + w, r.bottom};
+        Text(dc, s, wr, f.caption, c, TL);
+        x = wr.right + Sc(6);
+    };
+    // Row counter on the right; everything else stops short of it.
+    int sel = list_.Selected();
+    std::wstring rowc = L"row " + std::to_wstring(sel >= 0 ? sel + 1 : 0) + L"/" + std::to_wstring(rows_.size());
+    int rw = TextW(dc, rowc, f.caption);
+    RECT rr = {r.right - Sc(10) - rw, r.top, r.right - Sc(10), r.bottom};
+    Text(dc, rowc, rr, f.caption, t.text2, TR | DT_NOCLIP);
+    int limit = rr.left - Sc(16);
+
+    word(L"/", Acc());
+    rcSearch_ = {x, cy - Sc(10), x + Sc(200), cy + Sc(10)};
+    search_.Paint(dc, rcSearch_, Ctx(), focus_ == Focus::Search);
+    x = rcSearch_.right + Sc(16);
+    word(L"show:", t.text3);
+    Chip(dc, x, cy, L"all", filter_ < 0, ID_SHOW, 0);
+    Chip(dc, x, cy, L"safe", filter_ >= FILTER_SAFE, ID_SHOW, 1);
+    x += Sc(12);
+    std::wstring st = streams_ ? L"streams:on" : L"streams:off";
+    int stw = TextW(dc, st, f.caption) + Sc(12);
+    word(L"cat:", t.text3);
+    const DirE& v = data_->dirs[view_];
+    int order[NCAT]; for (int i = 0; i < NCAT; i++) order[i] = i;
+    std::stable_sort(order, order + NCAT, [&](int a, int b) { return v.cat[a] > v.cat[b]; });
+    for (int oi = 0; oi < NCAT; oi++) {
+        int c = order[oi];
+        if (!v.cat[c] && filter_ != c) continue;
+        if (x + TextW(dc, ShortCat(c), f.caption) + Sc(12) > limit - stw - Sc(16)) break;
+        Chip(dc, x, cy, ShortCat(c), filter_ == c, ID_CAT, (u32)c);
+    }
+    x += Sc(12);
+    if (x + stw <= limit) Chip(dc, x, cy, st, streams_, ID_STREAMS, 0);
+}
+
 void DiskMapModule::DrawConsole(HDC dc, const RECT& rc) {
     const Theme& t = host_->Theme();
     const Fonts& f = host_->Fonts();
-    DrawToolbar(dc);
     if (st_ != St::Done || !data_) {
-        RECT area = {rc.left, rcTool_.bottom, rc.right, rc.bottom};
-        RECT inner = area; InflateRect(&inner, -Sc(12), -Sc(12));
-        int y = inner.top;
-        RECT nb = {inner.left, y, inner.left + Sc(420), inner.bottom};
-        int ny = y; DrawNotice(dc, ny, nb.left, nb.right);
-        if (st_ == St::Scanning) DrawProgress(dc, area); else DrawEmpty(dc, area);
-        rcList_ = rcDetail_ = RECT{0, 0, 0, 0};
+        int y = rc.top + Sc(12);
+        DrawNotice(dc, y, rc.left + Sc(12), rc.left + Sc(420));
+        if (st_ == St::Scanning) DrawProgress(dc, rcMap_); else DrawEmpty(dc, rcMap_);
+        rcList_ = rcDetail_ = rcSearch_ = RECT{0, 0, 0, 0};
         return;
     }
     const Scan& s = *data_;
-    FillC(dc, rcCrumb_, t.panel);
-    HLine(dc, rcCrumb_.left, rcCrumb_.right, rcCrumb_.bottom - 1, t.border);
-    DrawCrumb(dc, rcCrumb_, rcCrumb_.left + Sc(12));
+    DrawFilterLine(dc);
 
-    // One dense summary line for the view: size, counts, safe bytes, and at the root the drive split.
-    const DirE& v = s.dirs[view_];
-    std::wstring sum = FmtSize(v.total) + L"  \x00B7  " + U64Str(v.nFiles) + L" files  \x00B7  " + U64Str(v.nDirs) +
-                       L" folders  \x00B7  " + FmtSize(SafeSum(v.safeR)) + L" safe to delete";
-    if (view_ == 0 && target_.total) {
-        u64 mapped = std::min<u64>(v.total, target_.used), hidden = target_.used > mapped ? target_.used - mapped : 0;
-        sum += L"  \x00B7  not mapped " + FmtSize(hidden) + L" (metadata, unreadable, cluster slack)  \x00B7  free " + FmtSize(FreeOf(target_));
+    // Path line: clickable segments, the view's numbers, and the drives (live runs).
+    RECT pr = rcPath_;
+    FillC(dc, pr, t.bg);
+    int cy = (pr.top + pr.bottom) / 2, rx = pr.right - Sc(10);
+    if (!target_.fixture) {
+        for (int i = (int)drives_.size() - 1; i >= 0; i--) {
+            std::wstring lab = std::wstring(1, drives_[i].letter) + L":";
+            int w = TextW(dc, lab, f.caption) + Sc(12);
+            int x0 = rx - w;
+            Chip(dc, x0, cy, lab, st_ != St::Idle && drives_[i].letter == target_.letter, ID_DRIVE, (u32)i);
+            rx -= w + Sc(4);
+        }
+        RECT dl = {rx - TextW(dc, L"drive:", f.caption), pr.top, rx, pr.bottom};
+        Text(dc, L"drive:", dl, f.caption, t.text3, TR | DT_NOCLIP);
+        rx = dl.left - Sc(16);
     }
-    if (view_ == 0 && s.stats.deniedDirs) sum += L"  \x00B7  " + U64Str(s.stats.deniedDirs) + L" unreadable";
-    if (view_ == 0) { std::wstring sk = SkippedText(); if (!sk.empty()) sum += L"  \x00B7  " + sk; }
-    RECT sr = {rcBody_.left, rcCrumb_.bottom, rcBody_.right, rcBody_.top};
-    Text(dc, sum, sr, f.caption, t.text2, TL);
-    int ny = rcBody_.top;   // degraded notice, if any, sits at the top of the detail column
-    RECT dcol = rcDetail_;
-    DrawNotice(dc, ny, dcol.left, dcol.right);
-    rcDetail_.top = ny > rcBody_.top ? ny : rcBody_.top;
+    const DirE& v = s.dirs[view_];
+    std::wstring nums = FmtSize(v.total) + L"  files=" + U64Str(v.nFiles) + L"  folders=" + U64Str(v.nDirs) +
+                        L"  safe=" + FmtSize(SafeSum(v.safeR));
+    int nw = TextW(dc, nums, f.caption);
+    RECT nr = {rx - nw, pr.top, rx, pr.bottom};
+    Text(dc, nums, nr, f.caption, t.warn, TR | DT_NOCLIP);
+    RECT pl = {pr.left + Sc(10), pr.top, pr.left + Sc(10) + TextW(dc, L"path:", f.caption), pr.bottom};
+    Text(dc, L"path:", pl, f.caption, t.text3, TL);
+    DrawPathCrumb(dc, pr, pl.right + Sc(8), nr.left - Sc(20), f.ui, L"\\");
 
+    // Full-width table with the Console-only columns.
     int w96 = MulDiv(rcList_.right - rcList_.left, 96, (int)host_->Dpi()) - 12;
-    int sizeW = 96, pctW = 72, typeW = std::min(200, std::max(110, w96 / 4));
-    list_.SetColumns({{L"Name", std::max(80, w96 - typeW - sizeW - pctW)}, {L"Type", typeW},
-                      {L"Size", sizeW, true}, {L"%", pctW, true}});
-    PaintCtx c = Ctx();
-    list_.Paint(dc, rcList_, c, focus_ == Focus::List);
-    detail_.Paint(dc, rcDetail_, c);
-    if (focus_ == Focus::Detail) FocusRectC(dc, rcDetail_, t.accent);
+    int typeW = 150, sizeW = 90, pctW = 62, filesW = 70, catW = 170, safeW = std::min(240, std::max(150, w96 / 6));
+    list_.SetColumns({{L"NAME", std::max(120, w96 - typeW - sizeW - pctW - filesW - catW - safeW)}, {L"TYPE", typeW},
+                      {L"SIZE", sizeW, true}, {L"%", pctW, true}, {L"FILES", filesW, true}, {L"CATEGORY", catW},
+                      {L"SAFE", safeW}});
+    list_.Paint(dc, rcList_, Ctx(), focus_ == Focus::List);
+
+    // Bottom detail: three columns split by 1px lines.
+    RECT d = rcDetail_;
+    FillC(dc, d, t.panel);
+    HLine(dc, d.left, d.right, d.top, t.border);
+    int W = d.right - d.left;
+    int x1 = d.left + W * 38 / 100, x2 = d.left + W * 69 / 100;
+    VLine(dc, x1, d.top + 1, d.bottom, t.border);
+    VLine(dc, x2, d.top + 1, d.bottom, t.border);
+    int pad = Sc(10), top = d.top + Sc(6);
+    // Column 1: name + kind, then the main facts.
+    RECT tr = {d.left + pad, top, x1 - pad, top + Sc(20)};
+    Text(dc, dm_.title, tr, f.semi, t.text1, TP);
+    RECT kr = {d.left + pad, top + Sc(20), x1 - pad, top + Sc(38)};
+    Text(dc, dm_.kind, kr, f.caption, t.text3, TL);
+    conPane_[0].rc = {d.left + pad, top + Sc(42), x1 - Sc(4), d.bottom - Sc(4)};
+    PaintPane(dc, conPane_[0], dm_.main);
+    // Column 2: composition and the current view.
+    std::vector<KV> c2{{L"COMPOSITION", L"", KV::Head}};
+    c2.insert(c2.end(), dm_.comp.begin(), dm_.comp.end());
+    c2.push_back({L"CURRENT VIEW", L"", KV::Head});
+    c2.insert(c2.end(), dm_.view.begin(), dm_.view.end());
+    conPane_[1].rc = {x1 + pad, top, x2 - Sc(4), d.bottom - Sc(4)};
+    PaintPane(dc, conPane_[1], c2);
+    // Column 3: the safe-to-delete verdict, with the rule's basis (rule 7).
+    std::vector<KV> c3{{L"SAFE TO DELETE", L"", KV::Head}};
+    c3.insert(c3.end(), dm_.safe.begin(), dm_.safe.end());
+    conPane_[2].rc = {x2 + pad, top, d.right - Sc(4), d.bottom - Sc(4)};
+    PaintPane(dc, conPane_[2], c3);
+    if (focus_ == Focus::Detail) FocusRectC(dc, RECT{d.left + 1, d.top + 1, d.right - 1, d.bottom - 1}, Acc());
 }
 
 void DiskMapModule::DrawFocus(HDC dc) {
@@ -1633,6 +2201,8 @@ void DiskMapModule::Paint(HDC dc, const RECT& rc) {
     clicks_.clear();
     if (Console()) {
         DrawConsole(dc, rc);
+    } else if (Three()) {
+        DrawThree(dc);
     } else {
         DrawToolbar(dc);
         DrawSidebar(dc);
@@ -1695,12 +2265,11 @@ void DiskMapModule::ActivateClick(const Click& c, bool ctrl) {
         }
         break;
     case ID_CRUMB: SetView(c.data); break;
-    case ID_CAT: filter_ = (filter_ == (int)c.data) ? -1 : (int)c.data; mapDirty_ = true; break;
-    case ID_CLEARFILTER: filter_ = sideTab_ == 1 ? FILTER_SAFE : -1; mapDirty_ = true; ComputeLargest(); break;
-    case ID_TAB: sideTab_ = (int)c.data; filter_ = sideTab_ == 1 ? FILTER_SAFE : -1; mapDirty_ = true; ComputeLargest(); break;
-    case ID_SAFE:
-        filter_ = (filter_ == FILTER_SAFE + (int)c.data) ? FILTER_SAFE : FILTER_SAFE + (int)c.data;
-        mapDirty_ = true; ComputeLargest(); break;
+    case ID_CAT: SetFilter(0, filter_ == (int)c.data ? -1 : (int)c.data); break;
+    case ID_CLEARFILTER: SetFilter(sideTab_, sideTab_ == 1 ? FILTER_SAFE : -1); break;
+    case ID_TAB: SetFilter((int)c.data, c.data == 1 ? FILTER_SAFE : -1); break;
+    case ID_SAFE: SetFilter(1, filter_ == FILTER_SAFE + (int)c.data ? FILTER_SAFE : FILTER_SAFE + (int)c.data); break;
+    case ID_SHOW: SetFilter(c.data ? 1 : 0, c.data ? FILTER_SAFE : -1); break;   // Console "show: all safe"
     }
     UpdateStatus();
     Invalidate();
@@ -1726,12 +2295,18 @@ void DiskMapModule::OnClick(int mx, int my, bool ctrl) {
 }
 
 void DiskMapModule::CycleFocus(bool back) {
-    // Focus ring: every clickable in paint order, then the list widgets. Tab / Shift+Tab move it.
+    // Focus ring: every clickable in paint order, then the search box and the list widgets. Tab /
+    // Shift+Tab move it.
     struct Stop { Focus f; int id; u32 data; };
     std::vector<Stop> stops;
     for (auto& c : clicks_) stops.push_back({Focus::Click, c.id, c.data});
-    if (Console()) {
-        if (st_ == St::Done) { stops.push_back({Focus::List, 0, 0}); stops.push_back({Focus::Detail, 0, 0}); }
+    if (Console() || Three()) {
+        if (st_ == St::Done) {
+            stops.push_back({Focus::Search, 0, 0});
+            stops.push_back({Focus::List, 0, 0});
+            if (Three() && rcLargest_.bottom > rcLargest_.top) stops.push_back({Focus::Largest, 0, 0});
+            stops.push_back({Focus::Detail, 0, 0});
+        }
     } else if (rcLargest_.bottom > rcLargest_.top) {
         stops.push_back({Focus::Largest, 0, 0});
     }
@@ -1750,6 +2325,7 @@ void DiskMapModule::CycleFocus(bool back) {
 bool DiskMapModule::OnKey(WPARAM vk, bool alt) {
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    bool modern = Console() || Three();   // Three-Pane and Console: list, search and detail keys
     PaintCtx c = Ctx();
     if (alt) {   // Alt+Home = root, Alt+Up / Alt+Left = up (Explorer's keys), in either layout
         if (vk == VK_HOME) { if (st_ == St::Done) SetView(0); return true; }
@@ -1757,22 +2333,28 @@ bool DiskMapModule::OnKey(WPARAM vk, bool alt) {
         return true;
     }
     if (vk == VK_TAB) { CycleFocus(shift); return true; }
+    // The search box owns editing keys while focused; F-keys still work. Backspace is swallowed here
+    // (it is not Up) and arrives as WM_CHAR 0x08.
+    if (focus_ == Focus::Search && modern && !(vk >= VK_F1 && vk <= VK_F24)) {
+        if (vk == VK_ESCAPE || vk == VK_RETURN || vk == VK_DOWN) { focus_ = Focus::List; return true; }
+        search_.OnKey(vk, hwnd_);
+        return true;
+    }
     // Lists first: a focused list owns the navigation keys (Up/Down/PgUp/PgDn/Home/End/Enter).
     if (focus_ == Focus::List && st_ == St::Done &&
         (vk == VK_UP || vk == VK_DOWN || vk == VK_PRIOR || vk == VK_NEXT || vk == VK_HOME || vk == VK_END || vk == VK_RETURN)) {
-        if (vk == VK_RETURN && ctrl) {
-            int i = list_.Selected();
-            if (i >= 0 && i < (int)rows_.size())
-                ShowInExplorer(rows_[i].kind ? data_->DirPath(rows_[i].id) : data_->FilePath(rows_[i].id), true);
-            return true;
-        }
+        if (vk == VK_RETURN && ctrl) { OpenSelected(true); return true; }
         list_.OnKey(vk, rcList_, c);
         if (vk != VK_RETURN) { SyncDetail(); UpdateStatus(); }
         return true;
     }
     if (focus_ == Focus::Detail && (vk == VK_UP || vk == VK_DOWN || vk == VK_PRIOR || vk == VK_NEXT)) {
-        int d = (vk == VK_UP ? 1 : vk == VK_DOWN ? -1 : vk == VK_PRIOR ? 4 : -4) * WHEEL_DELTA;
-        return detail_.OnWheel(d, rcDetail_, c);
+        int d = (vk == VK_UP ? 1 : vk == VK_DOWN ? -1 : vk == VK_PRIOR ? 4 : -4) * Sc(40);
+        bool ch = false;
+        for (KVPane* p : {&tpPane_, &conPane_[0], &conPane_[1], &conPane_[2]}) {
+            int before = p->sb.Offset(); p->sb.SetOffset(before - d); ch |= p->sb.Offset() != before;
+        }
+        return ch;
     }
     if (focus_ == Focus::Largest && (vk == VK_UP || vk == VK_DOWN || vk == VK_PRIOR || vk == VK_NEXT ||
                                      vk == VK_HOME || vk == VK_END || vk == VK_RETURN)) {
@@ -1784,6 +2366,27 @@ bool DiskMapModule::OnKey(WPARAM vk, bool alt) {
         for (auto& k : clicks_) if (k.id == focusId_ && k.data == focusData_) { Click cc = k; ActivateClick(cc, ctrl); break; }
         return true;
     }
+    if (modern) {   // the Console F-key bar (FKeys) and its Three-Pane equivalents
+        switch (vk) {
+        case VK_RETURN: OpenSelected(ctrl); return true;
+        case VK_F3: OpenSelected(true); return true;
+        case VK_F6: SetFilter(filter_ >= FILTER_SAFE ? 0 : 1, filter_ >= FILTER_SAFE ? -1 : FILTER_SAFE); return true;
+        case VK_F7: {   // next category present in the view, then back to all
+            if (st_ != St::Done || !data_) return true;
+            const DirE& v = data_->dirs[view_];
+            int nf = -1;
+            for (int k = (filter_ >= 0 && filter_ < NCAT) ? filter_ + 1 : 0; k < NCAT; k++) if (v.cat[k]) { nf = k; break; }
+            SetFilter(0, nf);
+            return true;
+        }
+        case VK_F8: { Click cc{RECT{}, ID_STREAMS, 0}; ActivateClick(cc, false); return true; }
+        case VK_OEM_2: case VK_DIVIDE:   // '/': focus the search box
+            if (st_ != St::Done) return false;
+            focus_ = Focus::Search;
+            skipSlash_ = true;
+            return true;
+        }
+    }
     switch (vk) {   // legacy keys (the complete legacy list): Backspace/Escape = Up, F5 = rescan, Home = root
     case VK_BACK: case VK_ESCAPE: GoUp(); return true;   // Escape does not cancel a scan (legacy)
     case VK_F5: if (st_ == St::Done && !target_.fixture) StartScan(target_); return true;
@@ -1794,15 +2397,42 @@ bool DiskMapModule::OnKey(WPARAM vk, bool alt) {
 
 bool DiskMapModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (!host_) return false;
+    // F-key bar clicks (lParam 0) mean the command on the bar, whatever has keyboard focus.
+    if (msg == WM_KEYDOWN && l == 0 && w == VK_HOME) { if (st_ == St::Done) SetView(0); return true; }
+    if (msg == WM_KEYDOWN && l == 0 && w == VK_RETURN) { OpenSelected(false); return true; }
     PaintCtx c = Ctx();
     int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
     POINT p{x, y};
+    bool modern = Console() || Three();
+    bool done = st_ == St::Done;
+    auto paneAt = [&](POINT q) -> KVPane* {
+        if (Three()) return PtInRect(&tpPane_.rc, q) ? &tpPane_ : nullptr;
+        if (Console()) for (auto& pn : conPane_) if (PtInRect(&pn.rc, q)) return &pn;
+        return nullptr;
+    };
+    auto paneMouse = [&](UINT m) {
+        bool ch = false;
+        for (KVPane* pn : {&tpPane_, &conPane_[0], &conPane_[1], &conPane_[2]}) {
+            if (!pn->sb.Visible()) continue;
+            RECT tr = PaneTrack(*pn);
+            if (pn->sb.Dragging() || (m == WM_LBUTTONDOWN && PtInRect(&tr, p))) ch |= pn->sb.OnMouse(m, x, y, tr) || m == WM_LBUTTONDOWN;
+        }
+        return ch;
+    };
     switch (msg) {
     case WM_MOUSEMOVE: {
         bool ch = false;
-        if (Console()) {
+        if (splitDrag_) {
+            int px = splitW0_ + (splitX0_ - x);
+            int nw = std::max(240, std::min(900, MulDiv(px, 96, (int)host_->Dpi())));
+            if (nw != detailW96_) { detailW96_ = nw; mapDirty_ = true; ch = true; }
+            return ch;
+        }
+        if (search_.Dragging()) return search_.OnMouse(hwnd_, msg, x, y, rcSearch_, c);
+        if (modern) {
             ch |= list_.OnMouse(msg, x, y, rcList_, c);
-            ch |= detail_.OnMouse(msg, x, y, rcDetail_, c);
+            ch |= paneMouse(msg);
+            if (Three() && rcLargest_.bottom > rcLargest_.top) ch |= largestList_.OnMouse(msg, x, y, rcLargest_, c);
         } else if (rcLargest_.bottom > rcLargest_.top) {
             ch |= largestList_.OnMouse(msg, x, y, rcLargest_, c);
         }
@@ -1811,51 +2441,172 @@ bool DiskMapModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     }
     case WM_LBUTTONDOWN: {
         bool ctrl = (w & MK_CONTROL) != 0;
-        if (Console() && st_ == St::Done && PtInRect(&rcList_, p)) {
-            focus_ = Focus::List;
-            list_.OnMouse(msg, x, y, rcList_, c);   // may fire onActivate (double-click) -> SetView
-            SyncDetail(); UpdateStatus();
-            return true;
+        if (modern && done) {
+            if (Three() && PtInRect(&rcSplit_, p)) {
+                splitDrag_ = true; splitX0_ = x; splitW0_ = rcDetail_.right - rcDetail_.left;
+                SetCapture(hwnd_);
+                return true;
+            }
+            if (PtInRect(&rcSearch_, p)) {
+                focus_ = Focus::Search;
+                search_.OnMouse(hwnd_, msg, x, y, rcSearch_, c);
+                return true;
+            }
+            if (PtInRect(&rcList_, p)) {
+                focus_ = Focus::List;
+                list_.OnMouse(msg, x, y, rcList_, c);   // may fire onActivate (double-click) -> SetView
+                SyncDetail(); UpdateStatus();
+                return true;
+            }
+            if (paneMouse(msg) || (PtInRect(&rcDetail_, p) && !PtInRect(&rcLargest_, p) && paneAt(p))) {
+                focus_ = Focus::Detail;
+                return true;
+            }
         }
-        if (Console() && st_ == St::Done && PtInRect(&rcDetail_, p)) {
-            focus_ = Focus::Detail;
-            detail_.OnMouse(msg, x, y, rcDetail_, c);
-            return true;
-        }
-        if (!Console() && PtInRect(&rcLargest_, p)) {
+        if (PtInRect(&rcLargest_, p)) {
             focus_ = Focus::Largest;
             largestList_.OnMouse(msg, x, y, rcLargest_, c);
             UpdateStatus();
             return true;
         }
-        if (focus_ != Focus::List || !Console()) focus_ = Focus::None;
+        if (!modern || (focus_ != Focus::List && focus_ != Focus::Search)) focus_ = Focus::None;
         OnClick(x, y, ctrl);
         UpdateHover(x, y);
         return true;
     }
-    case WM_LBUTTONUP:
-        if (Console()) return list_.OnMouse(msg, x, y, rcList_, c) | detail_.OnMouse(msg, x, y, rcDetail_, c);
-        return rcLargest_.bottom > rcLargest_.top && largestList_.OnMouse(msg, x, y, rcLargest_, c);
+    case WM_LBUTTONUP: {
+        if (splitDrag_) {
+            splitDrag_ = false;
+            ReleaseCapture();
+            host_->Prefs().SetInt(L"tp_detail_w", detailW96_);   // saved with the host's settings
+            return true;
+        }
+        if (search_.Dragging()) return search_.OnMouse(hwnd_, msg, x, y, rcSearch_, c);
+        bool ch = false;
+        if (modern) ch |= list_.OnMouse(msg, x, y, rcList_, c) | paneMouse(msg);
+        if (rcLargest_.bottom > rcLargest_.top) ch |= largestList_.OnMouse(msg, x, y, rcLargest_, c);
+        return ch;
+    }
     case WM_MOUSEWHEEL: {
         // Legacy ignored the wheel; every list scrolls with it now. lParam is in screen coordinates.
         int delta = GET_WHEEL_DELTA_WPARAM(w);
         POINT sp{x, y}; ScreenToClient(hwnd_, &sp);
-        if (Console()) {
-            if (PtInRect(&rcDetail_, sp)) return detail_.OnWheel(delta, rcDetail_, c);
-            return list_.OnWheel(delta, rcList_, c);
-        }
         if (PtInRect(&rcLargest_, sp)) return largestList_.OnWheel(delta, rcLargest_, c);
+        if (modern) {
+            if (KVPane* pn = paneAt(sp)) {
+                int before = pn->sb.Offset();
+                pn->sb.SetOffset(before - (delta / WHEEL_DELTA) * Sc(48));
+                return pn->sb.Offset() != before;
+            }
+            if (PtInRect(&rcList_, sp) || Console()) return list_.OnWheel(delta, rcList_, c);
+        }
         return false;
     }
-    case WM_RBUTTONDOWN: GoUp(); return true;                      // right-click anywhere: Up
+    case WM_RBUTTONDOWN: if (modern && PtInRect(&rcSearch_, p)) return false; GoUp(); return true;   // right-click anywhere: Up
     case WM_XBUTTONDOWN: if (GET_XBUTTON_WPARAM(w) == XBUTTON1) GoUp(); return true;
-    case WM_KEYDOWN: return OnKey(w, false);
+    case WM_KEYDOWN: {
+        if (l == 0 && focus_ == Focus::Search) focus_ = Focus::List;   // an F-key bar click acts on the list
+        if ((w == VK_OEM_2 || w == VK_DIVIDE) && focus_ != Focus::Search) {
+            bool r = OnKey(w, false);
+            if (r && l == 0) skipSlash_ = false;   // an F-key bar click: no WM_CHAR follows
+            return r;
+        }
+        return OnKey(w, false);
+    }
     case WM_SYSKEYDOWN:   // Alt+Home = root, Alt+Up / Alt+Left = up; other Alt keys are not ours
         if (w == VK_HOME || w == VK_UP || w == VK_LEFT) return OnKey(w, true);
         return false;
-    case WM_CHAR: return false;
+    case WM_CHAR:
+        if (focus_ != Focus::Search || !modern) return false;
+        if (skipSlash_ && w == L'/') { skipSlash_ = false; return true; }
+        skipSlash_ = false;
+        if (w == 0x1B || w == L'\r' || w == L'\t') return false;   // handled as keys
+        return search_.OnChar((wchar_t)w);
     }
     return false;
+}
+
+// ============================================================================================
+// Layout chrome: Three-Pane tree sections, Console F-keys and machine line
+
+std::vector<NavNode> DiskMapModule::NavNodes() {
+    std::vector<NavNode> out;
+    bool have = st_ == St::Done && data_;
+    const DirE* v = have ? &data_->dirs[view_] : nullptr;
+    NavNode cats; cats.id = NAV_CATS; cats.label = L"Categories";
+    if (v) cats.note = FmtSize(v->total);
+    out.push_back(cats);
+    int order[NCAT]; for (int i = 0; i < NCAT; i++) order[i] = i;
+    if (v) std::stable_sort(order, order + NCAT, [&](int a, int b) { return v->cat[a] > v->cat[b]; });
+    for (int oi = 0; oi < NCAT; oi++) {
+        int c = order[oi];
+        if (v && !v->cat[c]) continue;
+        NavNode n; n.id = NAV_CAT0 + c; n.depth = 1; n.label = CatName(c);
+        if (v) n.note = FmtSize(v->cat[c]);
+        out.push_back(n);
+    }
+    NavNode safe; safe.id = NAV_SAFE; safe.label = L"Safe to delete";
+    if (v) safe.note = FmtSize(SafeSum(v->safeR));
+    out.push_back(safe);
+    if (v) {
+        int ro[NSAFE]; int no = 0;
+        for (int r = 1; r < NSAFE; r++) if (v->safeR[r]) ro[no++] = r;
+        std::stable_sort(ro, ro + no, [&](int a, int b) { return v->safeR[a] > v->safeR[b]; });
+        for (int i = 0; i < no; i++) {
+            NavNode n; n.id = NAV_REASON0 + ro[i]; n.depth = 1; n.label = SafeReason(ro[i]).name;
+            n.note = FmtSize(v->safeR[ro[i]]);
+            out.push_back(n);
+        }
+    }
+    return out;
+}
+
+int DiskMapModule::NavSelected() {
+    if (sideTab_ == 1) return filter_ > FILTER_SAFE ? NAV_REASON0 + (filter_ - FILTER_SAFE) : NAV_SAFE;
+    return (filter_ >= 0 && filter_ < NCAT) ? NAV_CAT0 + filter_ : NAV_CATS;
+}
+
+void DiskMapModule::OnNavSelect(int id) {
+    if (id == NAV_CATS) SetFilter(0, -1);
+    else if (id == NAV_SAFE) SetFilter(1, FILTER_SAFE);
+    else if (id >= NAV_CAT0 && id < NAV_CAT0 + NCAT) SetFilter(0, id - NAV_CAT0);
+    else if (id > NAV_REASON0 && id < NAV_REASON0 + NSAFE) SetFilter(1, FILTER_SAFE + (id - NAV_REASON0));
+}
+
+std::vector<FKey> DiskMapModule::FKeys() {
+    return {{VK_F5, L"F5", L"Rescan"},        {VK_BACK, L"Bksp", L"Up"},
+            {VK_RETURN, L"Enter", L"Open"},   {VK_F3, L"F3", L"Show in Explorer"},
+            {VK_HOME, L"Home", L"Root"},      {VK_F6, L"F6", L"Safe only"},
+            {VK_F7, L"F7", L"Next category"}, {VK_F8, L"F8", L"Data streams"},
+            {VK_OEM_2, L"/", L"Search"},      {VK_TAB, L"Tab", L"Pane"}};
+}
+
+// "C:\ used=566GB/931GB files=1,234,567 mapped=540GB safe=12.3GB src=live mode=READ-ONLY".
+std::wstring DiskMapModule::ConsoleHeader() {
+    auto tight = [](std::wstring s) { s.erase(std::remove(s.begin(), s.end(), L' '), s.end()); return s; };
+    std::wstring h;
+    if (target_.fixture) {
+        size_t cut = target_.display.find_last_of(L'\\');
+        h = L"fixture=" + (cut == std::wstring::npos ? target_.display : target_.display.substr(cut + 1));
+    } else if (st_ != St::Idle && target_.letter) {
+        h = target_.display;
+        if (target_.total) h += L" used=" + tight(FmtSize(target_.used)) + L"/" + tight(FmtSize(target_.total));
+    } else {
+        h = L"drives=";
+        for (size_t i = 0; i < drives_.size(); i++) h += (i ? L"," : L"") + std::wstring(1, drives_[i].letter) + L":";
+        if (drives_.empty()) h += L"none";
+    }
+    if (st_ == St::Scanning) {
+        h += L" scanning files=" + U64Str(prog_.files.load()) + L" found=" + tight(FmtSize(prog_.bytes.load()));
+    } else if (st_ == St::Done && data_) {
+        const DirE& r = data_->dirs[0];
+        h += L" files=" + U64Str(r.nFiles) + L" mapped=" + tight(FmtSize(r.total)) + L" safe=" + tight(FmtSize(SafeSum(r.safeR)));
+        if (data_->stats.deniedDirs) h += L" unreadable=" + U64Str(data_->stats.deniedDirs);
+    }
+    h += target_.fixture ? L" src=fixture" : L" src=live";
+    if (!elevated_) h += L" elevated=no";
+    h += L" mode=READ-ONLY";
+    return h;
 }
 
 // ============================================================================================

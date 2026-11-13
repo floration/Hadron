@@ -8,6 +8,7 @@
 #include "core/sys/win_compat.h"
 #include "core/ui/theme.h"
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace hx {
@@ -21,8 +22,8 @@ enum class Admin { None, Optional, Required };
 enum class LogLevel { Debug, Info, Warn, Error };
 
 struct ModuleInfo {
-    const wchar_t* id;       // "hello": used by --module/--solo and in class/resource names
-    const wchar_t* name;     // "Hello"
+    const wchar_t* id;       // "diskmap": used by --module/--solo and in class/resource names
+    const wchar_t* name;     // "DiskMap"
     const wchar_t* summary;  // one line for the sidebar/catalog
     Admin admin;
 };
@@ -42,7 +43,28 @@ struct IHost {
     virtual void Log(LogLevel, const wchar_t*) = 0;
     virtual const ui::Theme& Theme() = 0;         // active palette (theme id + resolved accents)
     virtual const ui::Fonts& Fonts() = 0;         // per-DPI fonts for the active layout
-    virtual ui::Layout Layout() = 0;              // Baseline (default) or Console
+    virtual ui::Layout Layout() = 0;              // Baseline (default), ThreePane or Console
+    // Call when NavNodes()/NavSelected()/FKeys()/ConsoleHeader() changed, so the host repaints its chrome.
+    virtual void ChromeChanged() {}
+};
+
+// Three-Pane: rows the host shows under the active module in its navigation tree.
+struct NavNode {
+    int id = 0;                 // passed back to OnNavSelect; ignored for headers
+    int depth = 0;              // 0 = directly under the module's own row
+    std::wstring label;
+    std::wstring note;          // right-aligned count or size ("812", "214 GB"); may be empty
+    bool header = false;        // a small, unclickable group caption ("VIEWS")
+    bool dim = false;           // drawn in text3 (e.g. "Hidden in BIOS menus")
+    bool expandable = false;    // draws a chevron: open (expanded) or closed
+    bool expanded = false;
+};
+
+// Console: one function-key command for the F-key bar. Clicking it sends WM_KEYDOWN(vk) through OnInput.
+struct FKey {
+    UINT vk = 0;                // VK_F2 ...; also any key the module handles (VK_TAB for "Tab Pane")
+    std::wstring key;           // "F2", "Tab", "/"
+    std::wstring label;         // "Save snapshot"
 };
 
 class Module {
@@ -69,6 +91,18 @@ public:
     // back buffer) and for WM_PRINTCLIENT / --screenshot, so the two always match. Modules override
     // this instead of handling WM_PAINT themselves.
     virtual void Paint(HDC dc, const RECT& rc) { (void)dc; (void)rc; }
+
+    // Layout chrome (docs/ARCHITECTURE.md "Layouts"). All optional; a module without them still works in
+    // every layout. Three-Pane tree: the module's sections, the selected one, and selection from the tree.
+    virtual std::vector<NavNode> NavNodes() { return {}; }
+    virtual int  NavSelected() { return -1; }
+    virtual void OnNavSelect(int id) { (void)id; }
+    virtual std::wstring NavNote() { return {}; }     // count on the module's own tree row ("5,368")
+    virtual std::wstring NavFooter() { return {}; }   // small text at the bottom of the tree; '\n' splits lines
+    // Console: the F-key bar, and the one-line machine status after the module tabs
+    // ("MS-7E06 7E06vAF src=live n=5368 changed=37").
+    virtual std::vector<FKey> FKeys() { return {}; }
+    virtual std::wstring ConsoleHeader() { return {}; }
 };
 
 // Host message-ID split (docs/ARCHITECTURE.md): the host owns WM_APP+0..0xFF; modules start here.
