@@ -26,7 +26,7 @@ shot() {   # name exe args...  (one retry: a shot that joins a dying wineserver 
 S="$BUILD/HadronServices.exe"
 A=(--fixture "$FIX" --select DiagTrack --accent 0078D7)
 if [ "$ONLY" = all ] || [ "$ONLY" = main ]; then
-    for t in light dark fun boring; do shot "baseline-$t" "$S" "${A[@]}" --theme "$t"; done
+    for t in light dark; do shot "baseline-$t" "$S" "${A[@]}" --theme "$t"; done
 fi
 if [ "$ONLY" = all ] || [ "$ONLY" = extra ]; then
     shot baseline-plan-stripped-dark "$S" "${A[@]}" --theme dark --plan stripped
@@ -36,20 +36,20 @@ if [ "$ONLY" = all ] || [ "$ONLY" = extra ]; then
     shot baseline-sort-hadron-dark "$S" --fixture "$FIX" --select BluetoothUserService --accent 0078D7 --theme dark --sort kb
     shot baseline-bluetooth-dark "$S" --fixture "$FIX" --select BluetoothUserService --accent 0078D7 --theme dark
     shot baseline-drivers-light "$S" --fixture "$FIX" --tab drivers --accent 0078D7 --theme light
-    shot baseline-interrupted-boring "$S" --fixture "$FIX/interrupted" --accent 0078D7 --theme boring
+    shot baseline-interrupted-light "$S" --fixture "$FIX/interrupted" --accent 0078D7 --theme light
     shot baseline-plan-ti-stop-light "$S" --fixture "$FIX/interrupted" --accent 0078D7 --theme light --plan ti-stop
-    shot baseline-accent-grey-fun "$S" --fixture "$FIX" --select DiagTrack --accent 808080 --theme fun
+    shot baseline-accent-grey-dark "$S" --fixture "$FIX" --select DiagTrack --accent 808080 --theme dark
     shot baseline-accent-grey-light "$S" --fixture "$FIX" --select DiagTrack --accent 808080 --theme light
     shot baseline-accent-red-dark "$S" --fixture "$FIX" --select DiagTrack --accent E81123 --theme dark
-    shot baseline-accent-red-boring "$S" --fixture "$FIX" --select DiagTrack --accent E81123 --theme boring
+    shot baseline-accent-red-light "$S" --fixture "$FIX" --select DiagTrack --accent E81123 --theme light
     shot baseline-accent-yellow-light "$S" --fixture "$FIX" --select DiagTrack --accent FFB900 --theme light
     shot baseline-accent-green-light "$S" --fixture "$FIX" --select DiagTrack --accent 10C010 --theme light
 fi
 if [ "$ONLY" = all ] || [ "$ONLY" = focus ]; then
-    for t in light dark fun boring; do shot "baseline-focus-list-$t" "$S" "${A[@]}" --theme "$t" --focus list; done
+    for t in light dark; do shot "baseline-focus-list-$t" "$S" "${A[@]}" --theme "$t" --focus list; done
     shot baseline-focus-chip-dark "$S" "${A[@]}" --theme dark --focus 2          # TrustedInstaller switch
     shot baseline-focus-preset-light "$S" "${A[@]}" --theme light --focus 5      # Pure bloat removal
-    shot baseline-focus-plan-boring "$S" --fixture "$FIX" --accent 0078D7 --theme boring --plan stripped --focus 0   # Cancel
+    shot baseline-focus-plan-light "$S" --fixture "$FIX" --accent 0078D7 --theme light --plan stripped --focus 0   # Cancel
 fi
 if [ "$ONLY" = all ] || [ "$ONLY" = finalize ]; then
     for ly in baseline console; do
@@ -57,7 +57,7 @@ if [ "$ONLY" = all ] || [ "$ONLY" = finalize ]; then
         shot "fin-$ly-thirdparty-dark" "$S" --fixture "$FIX" --tab drivers --select nvlddmkm --accent 0078D7 --theme dark --layout "$ly"
         shot "fin-$ly-protected-red" "$S" --fixture "$FIX" --select RpcSs --accent E81123 --theme light --layout "$ly"
         shot "fin-$ly-drivers-light" "$S" --fixture "$FIX" --tab drivers --accent 0078D7 --theme light --layout "$ly"
-        shot "fin-$ly-interrupted-boring" "$S" --fixture "$FIX/interrupted" --accent 0078D7 --theme boring --layout "$ly"
+        shot "fin-$ly-interrupted-light" "$S" --fixture "$FIX/interrupted" --accent 0078D7 --theme light --layout "$ly"
     done
     shot fin-console-help-dark "$S" "${A[@]}" --theme dark --layout console --keys F1
     shot fin-console-help-plan "$S" "${A[@]}" --theme dark --layout console --plan stripped --keys F1

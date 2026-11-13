@@ -100,8 +100,12 @@ bool ScrollBar::OnMouse(UINT msg, int x, int y, const RECT& track) {
 
 // ================================ ListView ====================================================
 
-int ListView::RowH(const PaintCtx& c) const    { return S(c.layout == Layout::Console ? 22 : 30, c.dpi); }
-int ListView::HeaderH(const PaintCtx& c) const { return S(c.layout == Layout::Console ? 24 : 32, c.dpi); }
+int ListView::RowH(const PaintCtx& c) const {
+    return S(c.layout == Layout::Console ? 22 : c.layout == Layout::ThreePane ? 24 : 30, c.dpi);
+}
+int ListView::HeaderH(const PaintCtx& c) const {
+    return S(c.layout == Layout::Console ? 24 : c.layout == Layout::ThreePane ? 26 : 32, c.dpi);
+}
 
 RECT ListView::BodyRect(const RECT& rc, const PaintCtx& c) const {
     RECT b = rc;
@@ -195,8 +199,12 @@ void ListView::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
         RECT row{rc.left, ry, rc.right - sbW, ry + rowH};
         bool selected = (i == sel_);
         if (selected) {
-            RECT sel = row; sel.left += S(2, c.dpi); sel.right -= S(2, c.dpi);
-            RoundFill(dc, sel, S(5, c.dpi), p.selBg());
+            if (c.layout == Layout::Baseline) {   // Three-Pane and Console boards draw square, full-width selection
+                RECT sel = row; sel.left += S(2, c.dpi); sel.right -= S(2, c.dpi);
+                RoundFill(dc, sel, S(5, c.dpi), p.selBg());
+            } else {
+                FillSolid(dc, row, p.selBg());
+            }
         } else if (i % 2) {
             FillSolid(dc, row, p.panel2());
         }

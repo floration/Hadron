@@ -44,12 +44,13 @@ shot() {   # name exe args...
     if [ -s "$OUT/$name.png" ]; then echo "wrote $OUT/$name.png"; else echo "MISSING $OUT/$name.png"; cat "$FIX/$name.log"; exit 1; fi
 }
 for th in dark light; do
-    for ly in baseline console; do
+    for ly in baseline threepane console; do
         shot "bios-$ly-$th" "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --theme $th --layout $ly
     done
 done
 shot bios-suite-baseline "$BUILD/Hadron.exe" --module bios --snapshot "$FIX/snap.zip" --layout baseline
 shot bios-suite-console "$BUILD/Hadron.exe" --module bios --snapshot "$FIX/snap" --layout console
+shot bios-suite-threepane "$BUILD/Hadron.exe" --module bios --snapshot "$FIX/snap" --layout threepane
 shot bios-empty-dark "$BUILD/HadronBios.exe"
 shot bios-goal-latency-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --goal 5
 shot bios-detail-iccmax-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --goal 5 --select "IA ICC Max Current Limit Override"

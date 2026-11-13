@@ -14,6 +14,7 @@
 #include "core/sys/worker.h"
 #include "core/ui/theme.h"
 #include "core/ui/aa.h"
+#include "core/ui/widgets.h"   // ScrollBar for the Three-Pane tree (widgets.h does not pull in draw.h)
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <objbase.h>   // CoInitializeEx/CoUninitialize: WIN32_LEAN_AND_MEAN excludes OLE on MSVC
@@ -40,6 +41,10 @@ void HLine(HDC dc, int x0, int x1, int y, COLORREF c) {
 void TextLeft(HDC dc, const std::wstring& s, RECT r, HFONT f, COLORREF c) {
     SelectObject(dc, f); SetTextColor(dc, c); SetBkMode(dc, TRANSPARENT);
     DrawTextW(dc, s.c_str(), -1, &r, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+}
+void TextRight(HDC dc, const std::wstring& s, RECT r, HFONT f, COLORREF c) {
+    SelectObject(dc, f); SetTextColor(dc, c); SetBkMode(dc, TRANSPARENT);
+    DrawTextW(dc, s.c_str(), -1, &r, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS | DT_NOPREFIX);
 }
 
 // user32 entry points that may be absent in older import libs: resolve at runtime.
@@ -129,15 +134,53 @@ private:
     // Smallest content area any module is laid out for, in 96-DPI units (scaled by the window's DPI). The
     // frame's minimum track size is this plus the sidebar and the status bar; modules degrade down to it.
     static constexpr int kMinContentW = 800, kMinContentH = 560;
-    int sidebarW() const { return suite_ ? S(188, dpi_) : 0; }
+    // Per-layout chrome (docs/ARCHITECTURE.md "Layouts"). Baseline: a module sidebar (suite only). Three-Pane:
+    // a navigation tree (modules plus the active module's NavNodes) with a draggable splitter. Console: no
+    // sidebar; a one-line module tab strip on top and an F-key bar above the status bar.
+    bool Tree() const { return layout_ == ui::Layout::ThreePane; }
+    bool Con() const { return layout_ == ui::Layout::Console; }
+    int splitW() const { return S(5, dpi_); }
+    int sidebarW() const {
+        if (Tree()) return S(treeW_, dpi_) + splitW();
+        if (Con()) return 0;
+        return suite_ ? S(188, dpi_) : 0;
+    }
+    int topH() const { return Con() ? S(22, dpi_) : 0; }
+    int fkeyH() const { return Con() && active_ >= 0 && !fkeys_.empty() ? S(22, dpi_) : 0; }
+    int treeRowH() const { return S(24, dpi_); }
     int statusH() const { return S(28, dpi_); }
-    RECT SidebarRect(const RECT& cl) const { return {0, 0, sidebarW(), cl.bottom - statusH()}; }
-    RECT ContentRect(const RECT& cl) const { return {sidebarW(), 0, cl.right, cl.bottom - statusH()}; }
+    RECT SidebarRect(const RECT& cl) const {
+        return {0, 0, Tree() ? S(treeW_, dpi_) : sidebarW(), cl.bottom - statusH()};
+    }
+    RECT SplitRect(const RECT& cl) const { int x = S(treeW_, dpi_); return {x, 0, x + splitW(), cl.bottom - statusH()}; }
+    RECT ContentRect(const RECT& cl) const {
+        return {sidebarW(), topH(), cl.right, cl.bottom - statusH() - fkeyH()};
+    }
     RECT RowRect(int i, const RECT& cl) const {
         (void)cl; int top = S(60, dpi_), rowH = S(38, dpi_), pad = S(8, dpi_);
         return {pad, top + i * rowH, sidebarW() - pad, top + (i + 1) * rowH};
     }
 
+    // Three-Pane tree rows: every module, and under the active one its NavNodes.
+    struct TreeRow { int module; int nav; int depth; std::wstring label, note; bool header, dim; };
+    std::vector<TreeRow> treeRows_;
+    int treeW_ = 264;                 // 96-DPI units; [host] tree_w
+    bool splitDrag_ = false;
+    ui::ScrollBar treeSb_;
+    std::vector<FKey> fkeys_;         // Console: the active module's F-key bar
+    std::vector<RECT> fkeyRects_, tabRects_;
+    void RebuildChromeModel();
+    RECT TreeBody(const RECT& cl) const { RECT r = SidebarRect(cl); r.top += S(6, dpi_); return r; }
+    RECT TreeRowRect(int i, const RECT& cl) const {
+        RECT b = TreeBody(cl);
+        int y = b.top + i * treeRowH() - treeSb_.Offset();
+        return {b.left, y, b.right - (treeSb_.Visible() ? S(8, dpi_) : 0), y + treeRowH()};
+    }
+    void PaintTree(HDC dc, const RECT& cl);
+    void PaintConsoleTop(HDC dc, const RECT& cl);
+    void PaintFKeys(HDC dc, const RECT& cl);
+    void StepTree(int dir);
+    void ChromeChanged() override { RebuildChromeModel(); LayoutContent(); InvalidateChrome(); }
     void Activate(int i);
     void LayoutContent() {
         if (active_ >= 0 && content_[active_]) {
@@ -151,8 +194,8 @@ private:
     // Layout and theme switch (status bar chips, Ctrl+Shift+L / Ctrl+Shift+T). Saved in [host] of
     // settings.ini; a --layout/--theme flag overrides the saved value for that run.
     void SetLook(ui::Layout l, ui::ThemeId t);
-    void ToggleLayout() { SetLook(layout_ == ui::Layout::Console ? ui::Layout::Baseline : ui::Layout::Console, themeId_); }
-    void NextTheme(int dir) { SetLook(layout_, (ui::ThemeId)((((int)themeId_ + dir) % 4 + 4) % 4)); }
+    void NextLayout(int dir) { SetLook((ui::Layout)((((int)layout_ + dir) % ui::kLayoutCount + ui::kLayoutCount) % ui::kLayoutCount), themeId_); }
+    void NextTheme(int dir) { SetLook(layout_, (ui::ThemeId)((((int)themeId_ + dir) % ui::kThemeCount + ui::kThemeCount) % ui::kThemeCount)); }
     void ApplyCaptionColour();
     void PaintChrome(HDC dc, const RECT& cl);
     int Screenshot(const CommandLine& cl);
@@ -198,9 +241,9 @@ private:
     void BuildTheme(bool deterministic) {
         fonts_.Build(dpi_, layout_);
         if (deterministic && hasAccentOverride_)
-            theme_ = Resolve(themeId_, ui::IsAchromatic(accentOverride_) ? FallbackAccent(themeId_) : accentOverride_);
+            theme_ = Resolve(themeId_, ui::IsAchromatic(accentOverride_) ? FallbackAccent(themeId_, layout_) : accentOverride_, layout_);
         else
-            theme_ = deterministic ? Resolve(themeId_, FallbackAccent(themeId_)) : ResolveLive(themeId_);
+            theme_ = deterministic ? Resolve(themeId_, FallbackAccent(themeId_, layout_), layout_) : ResolveLive(themeId_, layout_);
     }
     bool     hasAccentOverride_ = false;
     COLORREF accentOverride_ = 0;
@@ -236,13 +279,154 @@ void Host::Activate(int i) {
     }
     modules_[i]->OnActivate();
     SetTitle(modules_[i]->Info().name);
+    RebuildChromeModel();
+    LayoutContent();
     InvalidateChrome();
+}
+
+void Host::RebuildChromeModel() {
+    treeRows_.clear();
+    for (int i = 0; i < (int)modules_.size(); i++) {
+        if (!suite_ && i != active_) continue;
+        treeRows_.push_back({i, -1, 0, modules_[i]->Info().name, L"", false, false});
+        if (i == active_ && content_[i])
+            for (const NavNode& n : modules_[i]->NavNodes())
+                treeRows_.push_back({i, n.header ? -1 : n.id, n.depth + 1, n.label, n.note, n.header, n.dim});
+    }
+    fkeys_ = (active_ >= 0 && content_[active_]) ? modules_[active_]->FKeys() : std::vector<FKey>{};
+}
+
+void Host::StepTree(int dir) {
+    if (treeRows_.empty() || active_ < 0) return;
+    int sel = modules_[active_]->NavSelected(), cur = 0;
+    for (int i = 0; i < (int)treeRows_.size(); i++)
+        if (treeRows_[i].module == active_ && (sel >= 0 ? treeRows_[i].nav == sel : treeRows_[i].depth == 0)) { cur = i; break; }
+    for (int i = cur + dir; i >= 0 && i < (int)treeRows_.size(); i += dir) {
+        const TreeRow row = treeRows_[i];
+        if (row.header) continue;
+        Activate(row.module);
+        if (row.nav >= 0) modules_[row.module]->OnNavSelect(row.nav);
+        if (content_[row.module]) InvalidateRect(content_[row.module], nullptr, FALSE);
+        RebuildChromeModel();
+        // keep the new row in view
+        RECT cl; GetClientRect(frame_, &cl);
+        RECT b = TreeBody(cl);
+        int y = i * treeRowH(), vh = b.bottom - b.top;
+        if (y < treeSb_.Offset()) treeSb_.SetOffset(y);
+        else if (y + treeRowH() > treeSb_.Offset() + vh) treeSb_.SetOffset(y + treeRowH() - vh);
+        InvalidateChrome();
+        return;
+    }
+}
+
+void Host::PaintTree(HDC dc, const RECT& cl) {
+    const ui::Theme& t = theme_;
+    RECT sb = SidebarRect(cl);
+    FillSolid(dc, sb, t.panel);
+    RECT sp = SplitRect(cl);
+    FillSolid(dc, sp, t.bg);
+    { RECT l{sp.left, sp.top, sp.left + 1, sp.bottom}, r{sp.right - 1, sp.top, sp.right, sp.bottom};
+      FillSolid(dc, l, t.border); FillSolid(dc, r, t.border); }
+    RECT body = TreeBody(cl);
+    treeSb_.Configure(body.bottom - body.top, (int)treeRows_.size() * treeRowH());
+    int sel = active_ >= 0 ? modules_[active_]->NavSelected() : -1;
+    int save = SaveDC(dc);
+    IntersectClipRect(dc, body.left, body.top, body.right, body.bottom);
+    for (int i = 0; i < (int)treeRows_.size(); i++) {
+        const TreeRow& row = treeRows_[i];
+        RECT r = TreeRowRect(i, cl);
+        if (r.bottom <= body.top || r.top >= body.bottom) continue;
+        bool on = row.module == active_ && (row.nav >= 0 ? row.nav == sel : (sel < 0 && !row.header && row.depth == 0));
+        if (on) FillSolid(dc, r, t.highContrast ? GetSysColor(COLOR_HIGHLIGHT) : ui::Mix(t.accent, t.panel, 0.30));
+        RECT tr = r;
+        tr.left += S(8, dpi_) + row.depth * S(16, dpi_);
+        tr.right -= S(8, dpi_);
+        COLORREF ink = row.header ? t.text3 : row.dim ? t.text3 : (on ? t.text1 : t.text2);
+        if (t.highContrast) ink = on ? GetSysColor(COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_WINDOWTEXT);
+        if (!row.note.empty()) {
+            TextRight(dc, row.note, tr, fonts_.caption, row.header ? t.text3 : (on ? t.text1 : t.text3));
+            SIZE ns{}; HGDIOBJ o = SelectObject(dc, fonts_.caption);
+            GetTextExtentPoint32W(dc, row.note.c_str(), (int)row.note.size(), &ns); SelectObject(dc, o);
+            tr.right -= ns.cx + S(8, dpi_);
+        }
+        HFONT f = row.header ? fonts_.caption : (row.depth == 0 || on) ? fonts_.semi : fonts_.ui;
+        TextLeft(dc, row.label, tr, f, ink);
+    }
+    RestoreDC(dc, save);
+    if (treeSb_.Visible()) {
+        RECT track{body.right - S(8, dpi_), body.top, body.right, body.bottom};
+        ui::PaintCtx pc{theme_, fonts_, dpi_, layout_};
+        treeSb_.Paint(dc, track, pc);
+    }
+}
+
+void Host::PaintConsoleTop(HDC dc, const RECT& cl) {
+    const ui::Theme& t = theme_;
+    RECT top{0, 0, cl.right, topH()};
+    FillSolid(dc, top, t.panel);
+    HLine(dc, top.left, top.right, top.bottom - 1, t.border);
+    tabRects_.assign(modules_.size(), RECT{});
+    int x = S(8, dpi_);
+    for (int i = 0; i < (int)modules_.size(); i++) {
+        if (!suite_ && i != active_) continue;
+        std::wstring name = modules_[i]->Info().name;
+        for (auto& c : name) c = (wchar_t)towupper(c);
+        std::wstring label = suite_ ? std::to_wstring(i + 1) + L" " + name : name;
+        SIZE sz{}; HGDIOBJ o = SelectObject(dc, fonts_.caption);
+        GetTextExtentPoint32W(dc, label.c_str(), (int)label.size(), &sz); SelectObject(dc, o);
+        RECT r{x, top.top + S(3, dpi_), x + sz.cx + S(12, dpi_), top.bottom - S(3, dpi_)};
+        bool on = i == active_;
+        if (on) FillSolid(dc, r, t.highContrast ? GetSysColor(COLOR_HIGHLIGHT) : t.accent);
+        RECT tr = r;
+        SelectObject(dc, fonts_.caption);
+        SetTextColor(dc, t.highContrast ? GetSysColor(on ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT)
+                                        : on ? ui::OnFill(t.accent) : t.text3);
+        SetBkMode(dc, TRANSPARENT);
+        DrawTextW(dc, label.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        tabRects_[i] = r;
+        x = r.right + S(4, dpi_);
+    }
+    if (active_ >= 0) {
+        RECT sr{x + S(12, dpi_), top.top, cl.right - S(8, dpi_), top.bottom};
+        TextLeft(dc, content_[active_] ? modules_[active_]->ConsoleHeader() : std::wstring(), sr, fonts_.caption, t.text3);
+    }
+}
+
+void Host::PaintFKeys(HDC dc, const RECT& cl) {
+    const ui::Theme& t = theme_;
+    int h = fkeyH();
+    fkeyRects_.assign(fkeys_.size(), RECT{});
+    if (!h) return;
+    RECT bar{0, cl.bottom - statusH() - h, cl.right, cl.bottom - statusH()};
+    FillSolid(dc, bar, t.panel);
+    HLine(dc, bar.left, bar.right, bar.top, t.border);
+    int x = S(8, dpi_);
+    HGDIOBJ o = SelectObject(dc, fonts_.caption);
+    SetBkMode(dc, TRANSPARENT);
+    for (size_t i = 0; i < fkeys_.size(); i++) {
+        const FKey& k = fkeys_[i];
+        SIZE ks{}, ls{};
+        GetTextExtentPoint32W(dc, k.key.c_str(), (int)k.key.size(), &ks);
+        GetTextExtentPoint32W(dc, k.label.c_str(), (int)k.label.size(), &ls);
+        int w = ks.cx + S(4, dpi_) + ls.cx;
+        if (x + w > bar.right - S(8, dpi_)) break;
+        RECT kr{x, bar.top, x + ks.cx, bar.bottom}, lr{x + ks.cx + S(4, dpi_), bar.top, x + w, bar.bottom};
+        SetTextColor(dc, t.highContrast ? GetSysColor(COLOR_HIGHLIGHT) : t.accent);
+        DrawTextW(dc, k.key.c_str(), -1, &kr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        SetTextColor(dc, t.highContrast ? GetSysColor(COLOR_WINDOWTEXT) : t.text2);
+        DrawTextW(dc, k.label.c_str(), -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        fkeyRects_[i] = RECT{x, bar.top, x + w, bar.bottom};
+        x += w + S(14, dpi_);
+    }
+    SelectObject(dc, o);
 }
 
 void Host::PaintChrome(HDC dc, const RECT& cl) {
     const ui::Theme& t = theme_;
     FillSolid(dc, cl, t.bg);
-    if (suite_) {
+    if (Tree()) PaintTree(dc, cl);
+    else if (Con()) { PaintConsoleTop(dc, cl); PaintFKeys(dc, cl); }
+    else if (suite_) {
         RECT sb = SidebarRect(cl);
         FillSolid(dc, sb, t.panel);
         HLine(dc, sb.right - 1, sb.right - 1, sb.bottom, t.border);   // 1px right edge
@@ -273,7 +457,7 @@ void Host::PaintChrome(HDC dc, const RECT& cl) {
         : status_;
     int chipsLeft = st.right;
     if (interactive_) {
-        // Two chips at the right of the status bar: click to switch. Right-click the theme to go back.
+        // Two chips at the right of the status bar: click to switch, right-click to go back.
         auto chip = [&](const std::wstring& label, int right, RECT* out) {
             SIZE sz{}; HGDIOBJ o = SelectObject(dc, fonts_.caption);
             GetTextExtentPoint32W(dc, label.c_str(), (int)label.size(), &sz);
@@ -338,12 +522,8 @@ void Host::SetLook(ui::Layout l, ui::ThemeId t) {
     // Save only the key that changed, so a --theme/--layout flag for this run isn't made permanent by
     // switching the other one.
     sys::Settings look = store_.Section(L"host");
-    if (layoutChanged) look.SetStr(L"layout", l == ui::Layout::Console ? L"console" : L"baseline");
-    if (themeChanged) {
-        std::wstring tn = ui::ThemeName(t);
-        for (auto& c : tn) c = (wchar_t)towlower(c);
-        look.SetStr(L"theme", tn);
-    }
+    if (layoutChanged) look.SetStr(L"layout", ui::LayoutKey(l));
+    if (themeChanged) look.SetStr(L"theme", t == ui::ThemeId::Light ? L"light" : L"dark");
     DWORD serr = 0;
     if (!store_.Save(&serr)) {   // save now, so the choice survives a crash or a killed process
         sys::Write(LogLevel::Warn, L"look: settings.ini not saved: " + sys::ErrorText(serr));
@@ -473,9 +653,57 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_MOUSEMOVE: {
+        POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+        RECT cl; GetClientRect(h, &cl);
+        if (splitDrag_) {
+            int w = MulDiv(p.x, 96, (int)dpi_);
+            treeW_ = std::clamp(w, 180, std::max(180, std::min(480, MulDiv(cl.right, 96, (int)dpi_) / 2)));
+            LayoutContent();
+            InvalidateChrome();
+        } else if (treeSb_.Dragging()) {
+            RECT body = TreeBody(cl);
+            RECT track{body.right - S(8, dpi_), body.top, body.right, body.bottom};
+            if (treeSb_.OnMouse(WM_MOUSEMOVE, p.x, p.y, track)) InvalidateChrome();
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        if (splitDrag_) {
+            splitDrag_ = false;
+            store_.Section(L"host").SetStr(L"tree_w", std::to_wstring(treeW_));
+            DWORD serr = 0;
+            if (!store_.Save(&serr)) sys::Write(LogLevel::Warn, L"tree width not saved: " + sys::ErrorText(serr));
+        }
+        if (treeSb_.Dragging()) { RECT cl; GetClientRect(h, &cl); RECT b = TreeBody(cl);
+            RECT track{b.right - S(8, dpi_), b.top, b.right, b.bottom};
+            treeSb_.OnMouse(WM_LBUTTONUP, GET_X_LPARAM(l), GET_Y_LPARAM(l), track); }
+        if (GetCapture() == h) ReleaseCapture();
+        return 0;
+    case WM_MOUSEWHEEL: {
+        POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+        ScreenToClient(h, &p);
+        RECT cl; GetClientRect(h, &cl);
+        RECT sb = SidebarRect(cl);
+        if (Tree() && PtInRect(&sb, p)) {
+            treeSb_.SetOffset(treeSb_.Offset() - GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA * 3 * treeRowH());
+            InvalidateChrome();
+            return 0;
+        }
+        break;
+    }
+    case WM_SETCURSOR:
+        if (Tree() && LOWORD(l) == HTCLIENT) {
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            RECT cl; GetClientRect(h, &cl);
+            RECT sp = SplitRect(cl);
+            if (PtInRect(&sp, p) || splitDrag_) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
+        }
+        break;
     case WM_RBUTTONDOWN: {
         POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
         if (interactive_ && PtInRect(&chipTheme_, p)) NextTheme(-1);
+        if (interactive_ && PtInRect(&chipLayout_, p)) NextLayout(-1);
         if (interactive_ && PtInRect(&chipUpd_, p) && !updReady_) StartUpdateCheck(/*install=*/true);   // check now
         return 0;
     }
@@ -485,7 +713,7 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LBUTTONDOWN:
         if (interactive_) {
             POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
-            if (PtInRect(&chipLayout_, p)) { ToggleLayout(); return 0; }
+            if (PtInRect(&chipLayout_, p)) { NextLayout(+1); return 0; }
             if (PtInRect(&chipTheme_, p))  { NextTheme(+1); return 0; }
             if (PtInRect(&chipYes_, p))    { SetUpdateMode(UpdMode::On); return 0; }
             if (PtInRect(&chipNo_, p))     { SetUpdateMode(UpdMode::Off); return 0; }
@@ -495,12 +723,45 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
                 return 0;
             }
         }
-        if (suite_) {
+        {
             POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
             RECT cl; GetClientRect(h, &cl);
-            for (int i = 0; i < (int)modules_.size(); i++) {
-                RECT r = RowRect(i, cl);
-                if (PtInRect(&r, p)) { Activate(i); break; }
+            if (Tree()) {
+                RECT sp = SplitRect(cl);
+                if (PtInRect(&sp, p)) { splitDrag_ = true; SetCapture(h); return 0; }
+                RECT body = TreeBody(cl);
+                RECT track{body.right - S(8, dpi_), body.top, body.right, body.bottom};
+                if (treeSb_.Visible() && treeSb_.OnMouse(WM_LBUTTONDOWN, p.x, p.y, track)) {
+                    SetCapture(h); InvalidateChrome(); return 0;
+                }
+                if (PtInRect(&body, p))
+                    for (int i = 0; i < (int)treeRows_.size(); i++) {
+                        RECT r = TreeRowRect(i, cl);
+                        if (!PtInRect(&r, p) || treeRows_[i].header) continue;
+                        TreeRow row = treeRows_[i];
+                        Activate(row.module);
+                        if (row.nav >= 0) {
+                            modules_[row.module]->OnNavSelect(row.nav);
+                            if (content_[row.module]) InvalidateRect(content_[row.module], nullptr, FALSE);
+                        }
+                        RebuildChromeModel();
+                        InvalidateChrome();
+                        break;
+                    }
+            } else if (Con()) {
+                for (int i = 0; i < (int)tabRects_.size(); i++)
+                    if (PtInRect(&tabRects_[i], p)) { Activate(i); return 0; }
+                for (size_t i = 0; i < fkeyRects_.size() && i < fkeys_.size(); i++)
+                    if (PtInRect(&fkeyRects_[i], p) && active_ >= 0) {
+                        if (modules_[active_]->OnInput(WM_KEYDOWN, fkeys_[i].vk, 0) && content_[active_])
+                            InvalidateRect(content_[active_], nullptr, FALSE);
+                        return 0;
+                    }
+            } else if (suite_) {
+                for (int i = 0; i < (int)modules_.size(); i++) {
+                    RECT r = RowRect(i, cl);
+                    if (PtInRect(&r, p)) { Activate(i); break; }
+                }
             }
         }
         return 0;
@@ -555,6 +816,8 @@ int Host::Screenshot(const CommandLine& cl) {
     int init = PickInitial(cl);
     Activate(init);
     if (active_ >= 0 && !cl.fixture.empty()) modules_[active_]->LoadFixture(cl.fixture.c_str());
+    RebuildChromeModel();   // the fixture fills the tree sections and F-keys
+    LayoutContent();
 
     RECT cl2; GetClientRect(frame_, &cl2);
     BITMAPINFO bi{};
@@ -669,13 +932,10 @@ int Host::Run(const CommandLine& cl) {
     layout_  = cl.layout;
     {
         sys::Settings look = store_.Section(L"host");
-        if (!cl.layoutGiven && look.GetStr(L"layout") == L"console") layout_ = ui::Layout::Console;
-        if (!cl.themeGiven) {
-            std::wstring v = look.GetStr(L"theme");
-            if (v == L"light") themeId_ = ui::ThemeId::Light;
-            else if (v == L"fun") themeId_ = ui::ThemeId::Fun;
-            else if (v == L"boring") themeId_ = ui::ThemeId::Boring;
-        }
+        if (!cl.layoutGiven) ui::ParseLayout(look.GetStr(L"layout").c_str(), &layout_);
+        if (!cl.themeGiven) ui::ParseTheme(look.GetStr(L"theme").c_str(), &themeId_);   // old fun/boring => Dark
+        int tw = _wtoi(look.GetStr(L"tree_w", L"264").c_str());
+        if (tw >= 180 && tw <= 480) treeW_ = tw;
     }
     interactive_ = true;
     {
@@ -704,7 +964,17 @@ int Host::Run(const CommandLine& cl) {
         if (msg.message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) &&
             !(GetKeyState(VK_MENU) & 0x8000) && (msg.wParam == 'L' || msg.wParam == 'T')) {
             if (!(msg.lParam & (1 << 30)))   // ignore autorepeat: one switch per press
-                msg.wParam == 'L' ? ToggleLayout() : NextTheme(+1);
+                msg.wParam == 'L' ? NextLayout(+1) : NextTheme(+1);
+            continue;
+        }
+        // Ctrl+1..9 switches module (suite); Alt+Up/Down walks the Three-Pane tree.
+        if (msg.message == WM_KEYDOWN && suite_ && (GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) &&
+            msg.wParam >= '1' && msg.wParam <= '9' && (int)(msg.wParam - '1') < (int)modules_.size()) {
+            Activate((int)(msg.wParam - '1'));
+            continue;
+        }
+        if (msg.message == WM_SYSKEYDOWN && Tree() && (msg.wParam == VK_UP || msg.wParam == VK_DOWN)) {
+            StepTree(msg.wParam == VK_DOWN ? +1 : -1);
             continue;
         }
         if (active_ >= 0 && modules_[active_]->PreTranslateMessage(msg)) continue;

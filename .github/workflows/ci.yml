@@ -71,23 +71,23 @@ jobs:
           shot() { xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" wine "$@"; }
           shot build/HadronHello.exe --screenshot shots/hello-standalone.png
           shot build/Hadron.exe --screenshot shots/hello-suite.png
-          for th in light dark fun boring; do
-            for ly in baseline console; do
+          for th in light dark; do
+            for ly in baseline threepane console; do
               shot build/HadronUikit.exe --theme $th --layout $ly --screenshot shots/uikit-$ly-$th.png
             done
           done
           for th in dark light; do
-            for ly in baseline console; do
+            for ly in baseline threepane console; do
               shot build/HadronDiskMap.exe --fixture dmfix/tree --theme $th --layout $ly --screenshot shots/diskmap-$ly-$th.png
             done
           done
           # Non-solo suite shot: the module drawn under the host's content offset (catches clip bugs
           # that standalone and --solo hide).
-          for ly in baseline console; do
+          for ly in baseline threepane console; do
             shot build/Hadron.exe --module diskmap --fixture dmfix/tree --layout $ly --screenshot shots/diskmap-suite-$ly.png
           done
           for th in dark light; do
-            for ly in baseline console; do
+            for ly in baseline threepane console; do
               shot build/HadronRunAs.exe --theme $th --layout $ly --screenshot shots/runas-$ly-$th.png
             done
           done
@@ -244,7 +244,7 @@ jobs:
           mkdir shots
           build\HadronHello.exe --screenshot shots\hello-standalone.png
           build\Hadron.exe --screenshot shots\hello-suite.png
-          foreach ($th in 'light','dark','fun','boring') {
+          foreach ($th in 'light','dark') {
             foreach ($ly in 'baseline','console') {
               build\HadronUikit.exe --theme $th --layout $ly --screenshot "shots\uikit-$ly-$th.png"
             }
