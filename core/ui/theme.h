@@ -91,11 +91,13 @@ struct Fonts {
                                DEFAULT_PITCH | FF_DONTCARE, face);
         };
         const wchar_t* body = (layout == Layout::Console) ? L"Consolas" : L"Segoe UI";
-        ui      = f(15, FW_NORMAL,   body);
-        semi    = f(15, FW_SEMIBOLD, body);
-        caption = f(12, FW_NORMAL,   body);
-        title   = f(20, FW_SEMIBOLD, (layout == Layout::Console) ? L"Consolas" : L"Segoe UI");
-        mono    = f(14, FW_NORMAL,   L"Consolas");
+        // Boards 7 and 4 are dense: 13px body text. Baseline (board 1) keeps its 15px.
+        const bool dense = layout != Layout::Baseline;
+        ui      = f(dense ? 13 : 15, FW_NORMAL,   body);
+        semi    = f(dense ? 13 : 15, FW_SEMIBOLD, body);
+        caption = f(dense ? 12 : 12, FW_NORMAL,   body);
+        title   = f(dense ? 16 : 20, FW_SEMIBOLD, body);
+        mono    = f(dense ? 13 : 14, FW_NORMAL,   L"Consolas");
     }
     void Free() {
         for (HFONT* h : {&ui, &semi, &caption, &title, &mono})

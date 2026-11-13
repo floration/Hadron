@@ -56,6 +56,8 @@ struct NavNode {
     std::wstring note;          // right-aligned count or size ("812", "214 GB"); may be empty
     bool header = false;        // a small, unclickable group caption ("VIEWS")
     bool dim = false;           // drawn in text3 (e.g. "Hidden in BIOS menus")
+    bool expandable = false;    // draws a chevron: open (expanded) or closed
+    bool expanded = false;
 };
 
 // Console: one function-key command for the F-key bar. Clicking it sends WM_KEYDOWN(vk) through OnInput.
@@ -95,6 +97,8 @@ public:
     virtual std::vector<NavNode> NavNodes() { return {}; }
     virtual int  NavSelected() { return -1; }
     virtual void OnNavSelect(int id) { (void)id; }
+    virtual std::wstring NavNote() { return {}; }     // count on the module's own tree row ("5,368")
+    virtual std::wstring NavFooter() { return {}; }   // small text at the bottom of the tree; '\n' splits lines
     // Console: the F-key bar, and the one-line machine status after the module tabs
     // ("MS-7E06 7E06vAF src=live n=5368 changed=37").
     virtual std::vector<FKey> FKeys() { return {}; }

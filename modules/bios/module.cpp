@@ -70,7 +70,7 @@ enum ClickId {
     ID_NONE = 0, ID_EXPORT = 1, ID_LOAD = 2, ID_SAVE = 3, ID_BANNER_LOAD = 4, ID_SEARCH = 5, ID_BANNER_TOGGLE = 6,
     ID_WRITE_SWITCH = 7, ID_RESTORE = 8, ID_REVIEW = 9, ID_STAGE_REC = 10, ID_STAGE = 11, ID_UNSTAGE = 12,
     ID_PLAN_CANCEL = 13, ID_PLAN_WRITE = 14, ID_OPEN_BACKUP = 15, ID_INCOMPLETE_RESTORE = 16, ID_NUMEDIT = 17,
-    ID_UNSTAGE_ALL = 18, ID_PLAN_SURFACE = 19, ID_SPLIT = 20, ID_GOAL_NEXT = 21,
+    ID_UNSTAGE_ALL = 18, ID_PLAN_SURFACE = 19, ID_SPLIT = 20, ID_GOAL_NEXT = 21, ID_GOAL_MENU = 22,
     ID_GOAL = 100,     // + goal + 1 (100 = None)
     ID_FILTER = 200,   // + filter
     ID_OPTION = 300,   // + option index of the selected setting (the "New value" chips)
@@ -159,6 +159,8 @@ public:
     void OnNavSelect(int id) override;
     std::vector<FKey> FKeys() override;
     std::wstring ConsoleHeader() override;
+    std::wstring NavNote() override;
+    std::wstring NavFooter() override;
 
 private:
     static LRESULT CALLBACK ViewProc(HWND, UINT, WPARAM, LPARAM);
@@ -329,6 +331,7 @@ private:
     ScrollBar detSbX_[2];                      // Console detail columns 2 and 3 (column 1 uses detSb_)
     RECT rcDetCol_[3]{}, rcDetSbTrackX_[2]{};
     std::wstring cpu_;                         // processor name for the Console header (live runs only)
+    RECT rcGoalBox_{};                         // Three-Pane goal drop-down
     std::wstring chromeSig_;
 };
 
@@ -963,6 +966,19 @@ void BiosModule::OnClickId(int id) {
     else if (id == ID_SAVE) DoSaveDialog();
     else if (id == ID_BANNER_TOGGLE) bannerExpanded_ = !bannerExpanded_;
     else if (id == ID_GOAL_NEXT) OnClickId(ID_GOAL + (goal_ + 1 >= kGoalCount ? -1 : goal_ + 1) + 1);
+    else if (id == ID_GOAL_MENU) {
+        // Three-Pane: the goal is a drop-down (board 7). A plain popup menu on the UI thread.
+        HMENU m = CreatePopupMenu();
+        if (!m) { if (host_) host_->SetStatus((L"Couldn't open the goal menu: " + sys::ErrorText(GetLastError())).c_str()); return; }
+        AppendMenuW(m, MF_STRING | (goal_ < 0 ? MF_CHECKED : 0), (UINT_PTR)(ID_GOAL), L"None");
+        for (int g = 0; g < kGoalCount; g++)
+            AppendMenuW(m, MF_STRING | (goal_ == g ? MF_CHECKED : 0), (UINT_PTR)(ID_GOAL + 1 + g), kGoalNames[g]);
+        POINT pt{rcGoalBox_.left, rcGoalBox_.bottom};
+        ClientToScreen(hwnd_, &pt);
+        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd_, nullptr);
+        DestroyMenu(m);
+        if (cmd >= ID_GOAL && cmd < ID_GOAL + 1 + kGoalCount) OnClickId(cmd);
+    }
     else if (id == ID_SEARCH) focus_ = Focus::Search;
     else if (id == ID_WRITE_SWITCH) ToggleWriteSwitch();
     else if (id == ID_RESTORE) DoRestoreDialog();
@@ -1771,9 +1787,10 @@ int BiosModule::Button(HDC dc, int right, int y, const std::wstring& label, int 
     int w = TextW(dc, label, f.caption) + Sc(Console() ? 14 : Tree() ? 20 : 26);
     RECT r{right - w, y, right, y + h};
     bool hot = enabled && hoverId_ == id;
+    if (Tree()) primary = false;   // board 7: plain square buttons with a 1px border, no accent fill
     COLORREF fill = primary ? (hot ? Mix(p.acc, RGB(255, 255, 255), 0.18) : p.acc) : (hot ? p.chipHot : p.chip);
     if (!enabled) fill = Mix(fill, p.bg, 0.5);
-    RoundFill(dc, r, Rad(10), fill);
+    RoundFill(dc, r, Rad(10), fill, Tree() ? p.line : kNoColor);
     COLORREF tc = primary ? p.onAcc : p.text;
     if (!enabled) tc = Mix(tc, fill, 0.5);
     ui::DrawText(dc, label, r, f.caption, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
@@ -2059,11 +2076,23 @@ void BiosModule::BuildForms() {
     }
 }
 
+// "5368" -> "5,368" (board 7 counts).
+static std::wstring Grouped(size_t n) {
+    std::wstring d = std::to_wstring(n), out;
+    for (size_t i = 0; i < d.size(); i++) {
+        if (i && (d.size() - i) % 3 == 0) out += L',';
+        out += d[i];
+    }
+    return out;
+}
+
 std::vector<NavNode> BiosModule::NavNodes() {
     std::vector<NavNode> n;
     if (!dbOk_) return n;
     // The tree shows the sub-forms of the selected top-level form only (it opens as you pick it).
     int openTop = form_ < 0 || form_ >= (int)forms_.size() ? -1 : (forms_[(size_t)form_].depth ? forms_[(size_t)form_].parent : form_);
+    std::vector<bool> hasKids(forms_.size(), false);
+    for (auto& f : forms_) if (f.depth && f.parent >= 0 && f.parent < (int)forms_.size()) hasKids[(size_t)f.parent] = true;
     for (int i = 0; i < (int)forms_.size(); i++) {
         const Form& f = forms_[(size_t)i];
         if (f.depth && f.parent != openTop) continue;
@@ -2071,7 +2100,9 @@ std::vector<NavNode> BiosModule::NavNodes() {
         nn.id = kNavForm + i;
         nn.depth = f.depth;
         nn.label = f.label;
-        nn.note = std::to_wstring(f.members.size());
+        nn.note = Grouped(f.members.size());
+        nn.expandable = !f.depth && hasKids[(size_t)i];
+        nn.expanded = nn.expandable && i == openTop;
         n.push_back(nn);
     }
     int key = 0, changed = 0, hidden = 0, differs = 0, snapd = 0;
@@ -2086,7 +2117,7 @@ std::vector<NavNode> BiosModule::NavNodes() {
         NavNode nn;
         nn.id = 1 + filter;
         nn.label = label;
-        nn.note = std::to_wstring(count);
+        nn.note = Grouped((size_t)count);
         nn.dim = dim;
         n.push_back(nn);
     };
@@ -2120,6 +2151,19 @@ void BiosModule::OnNavSelect(int id) {
     Invalidate();
 }
 
+std::wstring BiosModule::NavNote() { return dbOk_ ? Grouped(db_.S.size()) : std::wstring(); }
+
+// Board 7: the machine and the write mode at the bottom of the tree.
+std::wstring BiosModule::NavFooter() {
+    if (!dbOk_) return {};
+    std::wstring a = db_.board.empty() ? L"No board guard" : db_.board + L" · " + db_.bios;
+    a += primary_ == Src::Live ? (compare_ ? L" · live + snapshot" : L" · live read")
+       : primary_ == Src::Snapshot ? L" · snapshot" : L" · no values";
+    if (unverified_) a += L" · unverified";
+    std::wstring b = !writeSwitch_ ? L"Read-only: writes are off" : WritesPossible() ? L"BIOS writes allowed" : L"BIOS writes blocked";
+    return a + L"\n" + b;
+}
+
 std::vector<FKey> BiosModule::FKeys() {
     return {{VK_F2, L"F2", L"Save snapshot"}, {VK_F3, L"F3", L"Load snapshot…"},
             {VK_F4, L"F4", compare_ ? L"Snapshot differs" : L"Compare snapshot…"}, {VK_F6, L"F6", L"Export changes"},
@@ -2145,7 +2189,7 @@ std::wstring BiosModule::ConsoleHeader() {
 void BiosModule::ChromeMaybe() {
     if (!host_ || !hwnd_) return;
     std::wstring sig = ConsoleHeader() + L"|" + std::to_wstring(NavSelected()) + L"|" + std::to_wstring(goal_) +
-                       (compare_ ? L"c" : L"") + std::to_wstring(staged_.size());
+                       (compare_ ? L"c" : L"") + std::to_wstring(staged_.size()) + NavFooter();
     if (sig == chromeSig_) return;
     chromeSig_ = sig;
     host_->ChromeChanged();
@@ -2175,34 +2219,48 @@ int BiosModule::Toolbar(HDC dc, const RECT& rc, int y) {
     rcSearch_ = RECT{rc.right - pad - sw, y, rc.right - pad, y + h};
     search_.Paint(dc, rcSearch_, c, focus_ == Focus::Search && GetFocus() == hwnd_);
     AddClick(rcSearch_, ID_SEARCH);
-    int right = rcSearch_.left - Sc(10);
+    {   // a magnifier left of the field (board 7), drawn with GDI lines
+        int r0 = Sc(4), cx = rcSearch_.left - Sc(14), cy = y + h / 2 - Sc(1);
+        HPEN pen = CreatePen(PS_SOLID, std::max(1, Sc(1)), p.mute);
+        HGDIOBJ op = SelectObject(dc, pen), ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        Ellipse(dc, cx - r0, cy - r0, cx + r0 + 1, cy + r0 + 1);
+        MoveToEx(dc, cx + r0 - Sc(1), cy + r0 - Sc(1), nullptr);
+        LineTo(dc, cx + r0 + Sc(3), cy + r0 + Sc(3));
+        SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(pen);
+    }
+    int right = rcSearch_.left - Sc(26);
     right -= Switch(dc, right, y, L"Allow BIOS writes", ID_WRITE_SWITCH, writeSwitch_, dbOk_ && job_ != Job::Write) + Sc(6);
     if (writeSwitch_) right -= Button(dc, right, y, L"Restore backup…", ID_RESTORE, false, WritesPossible() && !busy) + Sc(6);
-    // Goal chips between: full names when they fit, else the short ones, else none (F7 still cycles).
+    // Goal: a drop-down box, "Goal [Low latency v]" (board 7). F7 still steps through the goals.
     x += Sc(10);
     VLine(dc, x - Sc(6), y + Sc(4), y + h - Sc(4), p.line);
-    int labelW = TextW(dc, L"Goal", f.caption) + Sc(8);
-    for (int pass = 0; pass < 2; pass++) {
-        auto name = [&](int g) {
-            if (g < 0) return std::wstring(L"None");
-            if (!pass) return std::wstring(kGoalNames[g]);
-            std::wstring t = kGoalShort[g];
-            t[0] = (wchar_t)towupper(t[0]);
-            return t;
-        };
-        int need = labelW;
-        for (int g = -1; g < kGoalCount; g++) need += TextW(dc, name(g), f.caption) + Sc(16) + Sc(4);
-        if (x + need > right - Sc(6)) {
-            if (pass == 0) continue;
-            // Too narrow for the chips: one button that steps through the goals (as F7 does).
-            btn(std::wstring(L"Goal: ") + (goal_ < 0 ? L"None" : kGoalNames[goal_]) + L"  \u203A", ID_GOAL_NEXT, false, true);
-            break;
-        }
+    {
+        int labelW = TextW(dc, L"Goal", f.caption) + Sc(8);
         RECT lr{x, y, x + labelW, y + h};
         TextLeft(dc, L"Goal", lr, f.caption, p.mute);
-        int cx = x + labelW;
-        for (int g = -1; g < kGoalCount; g++) Chip(dc, cx, y, name(g), ID_GOAL + 1 + g, goal_ == g);
-        break;
+        int boxW = 0;
+        for (int g = -1; g < kGoalCount; g++) boxW = std::max(boxW, TextW(dc, g < 0 ? L"None" : kGoalNames[g], f.caption));
+        boxW += Sc(36);
+        if (x + labelW + boxW <= right - Sc(6)) {
+            rcGoalBox_ = RECT{x + labelW, y, x + labelW + boxW, y + h};
+            FillSolid(dc, rcGoalBox_, hoverId_ == ID_GOAL_MENU ? p.chipHot : p.bg);
+            FrameRectC(dc, rcGoalBox_, p.line);
+            RECT tr{rcGoalBox_.left + Sc(8), y, rcGoalBox_.right - Sc(20), y + h};
+            TextLeft(dc, goal_ < 0 ? L"None" : kGoalNames[goal_], tr, f.caption, p.text);
+            // the drop-down mark: a small chevron drawn with lines (no symbol font needed)
+            int cx = rcGoalBox_.right - Sc(11), cy = y + h / 2, a = Sc(3);
+            HPEN pen = CreatePen(PS_SOLID, std::max(1, Sc(1)), p.mute);
+            HGDIOBJ op = SelectObject(dc, pen);
+            POINT pt[3] = {{cx - a, cy - a / 2}, {cx, cy + a / 2 + 1}, {cx + a + 1, cy - a / 2 - 1}};
+            Polyline(dc, pt, 3);
+            SelectObject(dc, op);
+            DeleteObject(pen);
+            AddClick(rcGoalBox_, ID_GOAL_MENU);
+        } else {
+            rcGoalBox_ = RECT{};
+            x += labelW;
+            btn(goal_ < 0 ? L"None" : kGoalNames[goal_], ID_GOAL_NEXT, false, true);
+        }
     }
     return bar.bottom;
 }
@@ -2224,14 +2282,14 @@ void BiosModule::PaintThreePane(HDC dc, const RECT& rc, int y) {
     if (!search_.Text().empty()) crumb += L" › “" + search_.Text() + L"”";
     int changed = 0, hidden = 0;
     for (int i : V_) { changed += Changed(db_.S[(size_t)i]); hidden += db_.S[(size_t)i].hidden; }
-    std::wstring counts = std::to_wstring(V_.size()) + (V_.size() == 1 ? L" setting" : L" settings") + L"  ·  " +
-                          std::to_wstring(changed) + L" changed  ·  " + std::to_wstring(hidden) + L" hidden";
+    std::wstring counts = Grouped(V_.size()) + (V_.size() == 1 ? L" setting" : L" settings") + L" · " +
+                          Grouped((size_t)changed) + L" changed · " + Grouped((size_t)hidden) + L" hidden";
     int cw = TextW(dc, counts, f.caption);
     // Left-aligned in a rect a little wider than measured: right-aligned, the last glyph lost pixels (Wine).
     RECT cr{(int)rc.right - pad - cw - Sc(4), y, (int)rc.right - pad + Sc(4), y + Sc(28)};
     TextLeft(dc, counts, cr, f.caption, p.faint);
     RECT tr{pad, y, std::max(pad, (int)rc.right - pad - cw - Sc(16)), y + Sc(28)};
-    TextLeft(dc, crumb, tr, f.ui, p.mute);
+    TextLeft(dc, crumb, tr, f.caption, p.text);
     y += Sc(28);
     HLine(dc, rc.left, rc.right, y, p.line);
     y += 1;
@@ -2357,7 +2415,7 @@ void BiosModule::PaintGrid(HDC dc) {
             want = {{C_NAME, 0}, {C_CUR, W * 18 / 100}};
             if (compare_) want.push_back({C_SNAP, W * 14 / 100});
             want.push_back({C_DEF, W * 15 / 100});
-            if (goal_ >= 0) want.push_back({C_GOAL, W * 18 / 100});
+            want.push_back({C_GOAL, W * 18 / 100});   // board 7 always shows Goal ("—" without one)
         }
         int fixed = 0;
         for (auto& w : want) fixed += w.second;
@@ -2432,14 +2490,7 @@ void BiosModule::PaintGrid(HDC dc) {
                     break;
                 }
                 case C_NAME: {
-                    int nx = r.left;
-                    if (!con) {   // Three-Pane keeps Baseline's key-setting dot
-                        if (db_.IsKey(s)) {
-                            int d = Sc(6), dy = ry + (pitch - d) / 2;
-                            AaEllipse(dc, RECT{nx, dy, nx + d, dy + d}, selected ? p.selText : p.acc);
-                        }
-                        nx += Sc(12);
-                    }
+                    int nx = r.left;   // board 7 has no key-setting dot: "Key settings" is a view in the tree
                     RECT nr{nx, ry, r.right, ry + pitch};
                     TextLeft(dc, s.prompt, nr, cellF, ink(s.hidden ? p.faint : p.text));
                     if (!s.ctx.empty()) {
@@ -2471,7 +2522,9 @@ void BiosModule::PaintGrid(HDC dc) {
                 }
                 case C_DEF: TextLeft(dc, DefText(s), r, cellF, ink(p.mute)); break;
                 case C_GOAL:
-                    if (goal_ >= 0 && db_.KbOf(s)) {
+                    if (goal_ < 0 || !db_.KbOf(s) || RecText(db_, s, goal_).empty()) {
+                        if (!con) TextLeft(dc, L"—", r, cellF, ink(p.faint));
+                    } else {
                         std::wstring rt = RecText(db_, s, goal_);
                         long long v;
                         COLORREF gc2 = p.mute;
@@ -2703,7 +2756,19 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
     auto block = [&](const std::wstring& t, HFONT font, COLORREF col, int gapAfter = 4) {
         y += para(t, font, col, L, R) + Sc(gapAfter);
     };
+    const bool tree = Tree();
     auto heading = [&](const std::wstring& t) {
+        if (tree) {
+            // Board 7: a 1px rule across the pane, then the caption in small caps.
+            std::wstring u = t;
+            for (auto& ch : u) ch = (wchar_t)towupper(ch);
+            y += Sc(8);
+            if (draw) HLine(dc, L, R, y, p.line);
+            y += Sc(10);
+            if (draw) { RECT r{L, y, R, y + Sc(16)}; TextLeft(dc, u, r, f.caption, p.faint); }
+            y += Sc(22);
+            return;
+        }
         if (con) {
             // Three-Pane and Console: small upper-case section captions in text3.
             std::wstring u = t;
@@ -2718,6 +2783,12 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
         y += Sc(24);
     };
     auto labelled = [&](const std::wstring& label, const std::wstring& t, COLORREF lc, HFONT lf, COLORREF tc) {
+        if (tree) {   // board 7: the label in semibold on its own line, the text under it
+            if (draw) { RECT r{L, y, R, y + Sc(18)}; TextLeft(dc, label, r, f.semi, lc == p.mute ? p.text : lc); }
+            y += Sc(18);
+            y += para(t, body, tc, L, R) + Sc(8);
+            return;
+        }
         if (cons) {   // Console columns are narrow: the label sits on its own line above the text
             if (draw) { RECT r{L, y, R, y + Sc(16)}; TextLeft(dc, label, r, f.caption, lc); }
             y += Sc(16);
@@ -2749,7 +2820,19 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
     const Setting& s = db_.S[sel_];
     const Kb* k = db_.KbOf(s);
     // 1-2. Prompt and path (Three-Pane / Console: label/value rows instead of the path line).
-    if (in(1)) block(s.prompt, con ? f.semi : f.title, p.text, con ? 4 : 2);
+    if (in(1)) block(s.prompt, cons ? f.semi : f.title, p.text, tree ? 2 : con ? 4 : 2);
+    int boxTop = 0;
+    if (in(1) && tree) {
+        // Subtitle: the menu path, short ("OC › Advanced CPU Configuration"), then the values in a framed box.
+        std::wstring path = s.path.substr(0, s.path.find(L" | "));
+        if (path.rfind(L"Setup > ", 0) == 0) path = path.substr(8);
+        for (size_t q; (q = path.find(L" > ")) != std::wstring::npos;) path.replace(q, 3, L" › ");
+        if (!path.empty()) block(path, f.caption, p.faint, 0);
+        y += Sc(10);
+        boxTop = y;
+        y += Sc(6);
+        L += Sc(10); R -= Sc(10);
+    }
     if (in(1) && con) {
         wchar_t loc[160];
         swprintf(loc, 160, L"%ls + 0x%X (%d byte%ls)", s.var.c_str(), (unsigned)s.offset, s.width, s.width == 1 ? L"" : L"s");
@@ -2770,8 +2853,13 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
             kv(cons ? L"goal" : L"Goal", rt.empty() ? L"no advice" : rt, rt.empty() ? p.faint : gc, body);
         }
         if (!cons) kv(L"Variable", loc, p.mute, f.caption);
-        if (!s.path.empty()) kv(cons ? L"path" : L"Menu path", s.path, p.mute, f.caption);
-        y += Sc(cons ? 2 : 4);
+        if (!s.path.empty() && !tree) kv(cons ? L"path" : L"Menu path", s.path, p.mute, f.caption);
+        if (tree) {   // close the box
+            y += Sc(3);
+            L -= Sc(10); R += Sc(10);
+            if (draw) FrameRectC(dc, RECT{L, boxTop, R, y}, p.line);
+            y += Sc(10);
+        } else y += Sc(cons ? 2 : 4);
     } else if (in(1) && !s.path.empty()) block(s.path, f.caption, p.mute, 6);
     // 3. Badges.
     if (in(1)) {
@@ -2790,7 +2878,7 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
         int badgesTop = y;
         if (s.hidden) badge(L"Hidden in BIOS menus", p.mute);
         else if (s.cond) badge(L"Shown depending on other settings", p.mute);
-        if (Changed(s)) badge(L"Changed from default", p.warn);
+        if (Changed(s) && !tree) badge(L"Changed from default", p.warn);   // Three-Pane: Current is already warn-coloured
         if (unverified_ && s.hasCur)
             badge(guardText_.empty() ? L"Unverified (board/BIOS not checked)" : L"Unverified (board/BIOS mismatch)", p.bad);
         if (compare_ && snapUnverified_ && s.hasSnap) badge(L"Snapshot unverified", p.bad);
@@ -2892,12 +2980,12 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
     }
     // 4. What it does + basis (rule 7: the UI shows the basis; Console shows it in column 3).
     if (k && in(1)) {
-        heading(cons ? L"Description" : L"What it does");
-        block(k->expl, body, p.text);
+        if (!tree) heading(cons ? L"Description" : L"What it does");   // board 7: the text follows the box directly
+        block(k->expl, body, p.text, tree ? 6 : 4);
     }
     if (cons && part == 3 && k && !k->claim.empty()) { heading(L"Claim check"); block(k->claim, body, p.claim); }
-    if (k && (part == 0 || part == 3)) {
-        if (cons) heading(L"Basis");
+    auto basisBlock = [&]() {
+        if (cons || tree) heading(L"Basis");
         COLORREF bc = k->basis == L"published" || k->basis == L"owner-measured" ? p.good
                     : k->basis == L"folklore" ? p.warn : (k->basis.empty() ? p.faint : p.mute);
         std::wstring bt = BasisLabel(k->basis);
@@ -2905,9 +2993,11 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
         else if (k->basis.empty())
             bt += L": this settings map doesn't record where this text comes from. Treat its claims as unchecked "
                   L"and test on your own system.";
-        if (cons) block(bt, body, bc);
+        if (cons || tree) block(bt, body, bc);
         else labelled(L"Basis", bt, p.mute, f.semi, bc);
-    }
+    };
+    // Three-Pane (board 7) shows the basis after the effects and the claim check; the others right here.
+    if (k && (part == 0 || part == 3) && !tree) basisBlock();
     // 5. Real-world effect + claim check.
     if (cons && part == 2 && !(k && !k->fx[0].empty())) {
         heading(L"Effects");
@@ -2920,7 +3010,7 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
         block(L"Nothing to check: no knowledge-base entry, so no claims are made about this setting.", f.caption, p.faint);
     }
     if (k && !k->fx[0].empty() && in(2)) {
-        heading(cons ? L"Effects" : L"Real-world effect");
+        heading(cons || tree ? L"Effects" : L"Real-world effect");
         if (k->fx[0] == k->fx[1] && k->fx[1] == k->fx[2]) labelled(L"All workloads", k->fx[0], p.mute, f.semi, p.text);
         else {
             labelled(L"FPS / esports", k->fx[0], p.mute, f.semi, p.text);
@@ -2932,6 +3022,7 @@ int BiosModule::PaintDetail(HDC dc, bool draw, int part) {
         heading(L"Claim check");
         block(k->claim, body, p.claim);
     }
+    if (k && tree) basisBlock();
     // Sources for numbers (K field 17).
     if (k && !k->sources.empty() && (part == 0 || part == 3)) {
         heading(L"Sources for numbers");

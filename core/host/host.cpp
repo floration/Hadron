@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include "core/host/run.h"
+#include "core/ui/draw.h"
 #include "core/host/cmdline.h"
 #include "core/host/registry.h"
 #include "core/sys/sys.h"
@@ -147,7 +148,7 @@ private:
     }
     int topH() const { return Con() ? S(22, dpi_) : 0; }
     int fkeyH() const { return Con() && active_ >= 0 && !fkeys_.empty() ? S(22, dpi_) : 0; }
-    int treeRowH() const { return S(24, dpi_); }
+    int treeRowH() const { return S(21, dpi_); }   // board 7: dense tree rows
     int statusH() const { return S(28, dpi_); }
     RECT SidebarRect(const RECT& cl) const {
         return {0, 0, Tree() ? S(treeW_, dpi_) : sidebarW(), cl.bottom - statusH()};
@@ -162,7 +163,14 @@ private:
     }
 
     // Three-Pane tree rows: every module, and under the active one its NavNodes.
-    struct TreeRow { int module; int nav; int depth; std::wstring label, note; bool header, dim; };
+    struct TreeRow { int module; int nav; int depth; std::wstring label, note; bool header, dim, expandable, expanded; };
+    std::wstring treeFooter_;         // the active module's NavFooter()
+    int treeFooterH() const {
+        if (treeFooter_.empty()) return 0;
+        int lines = 1;
+        for (wchar_t c : treeFooter_) lines += c == L'\n';
+        return S(10, dpi_) + lines * S(16, dpi_);
+    }
     std::vector<TreeRow> treeRows_;
     int treeW_ = 264;                 // 96-DPI units; [host] tree_w
     int treeCursor_ = -1;             // last row Ctrl+Shift+Up/Down stepped to (-1: start from NavSelected)
@@ -171,7 +179,9 @@ private:
     std::vector<FKey> fkeys_;         // Console: the active module's F-key bar
     std::vector<RECT> fkeyRects_, tabRects_;
     void RebuildChromeModel();
-    RECT TreeBody(const RECT& cl) const { RECT r = SidebarRect(cl); r.top += S(6, dpi_); return r; }
+    RECT TreeBody(const RECT& cl) const {
+        RECT r = SidebarRect(cl); r.top += S(6, dpi_); r.bottom = std::max((int)r.top, (int)r.bottom - treeFooterH()); return r;
+    }
     RECT TreeRowRect(int i, const RECT& cl) const {
         RECT b = TreeBody(cl);
         int y = b.top + i * treeRowH() - treeSb_.Offset();
@@ -289,11 +299,15 @@ void Host::RebuildChromeModel() {
     treeRows_.clear();
     for (int i = 0; i < (int)modules_.size(); i++) {
         if (!suite_ && i != active_) continue;
-        treeRows_.push_back({i, -1, 0, modules_[i]->Info().name, L"", false, false});
-        if (i == active_ && content_[i])
-            for (const NavNode& n : modules_[i]->NavNodes())
-                treeRows_.push_back({i, n.header ? -1 : n.id, n.depth + 1, n.label, n.note, n.header, n.dim});
+        bool open = i == active_ && content_[i];
+        std::vector<NavNode> nodes = open ? modules_[i]->NavNodes() : std::vector<NavNode>{};
+        // Other modules show closed: their sections appear once they are active.
+        treeRows_.push_back({i, -1, 0, modules_[i]->Info().name, open ? modules_[i]->NavNote() : L"", false, false,
+                             !open || !nodes.empty(), open && !nodes.empty()});
+        for (const NavNode& n : nodes)
+            treeRows_.push_back({i, n.header ? -1 : n.id, n.depth + 1, n.label, n.note, n.header, n.dim, n.expandable, n.expanded});
     }
+    treeFooter_ = (active_ >= 0 && content_[active_]) ? modules_[active_]->NavFooter() : std::wstring();
     fkeys_ = (active_ >= 0 && content_[active_]) ? modules_[active_]->FKeys() : std::vector<FKey>{};
 }
 
@@ -335,6 +349,7 @@ void Host::StepTree(int dir) {
 
 void Host::PaintTree(HDC dc, const RECT& cl) {
     const ui::Theme& t = theme_;
+    const bool hc = t.highContrast;
     RECT sb = SidebarRect(cl);
     FillSolid(dc, sb, t.panel);
     RECT sp = SplitRect(cl);
@@ -344,26 +359,54 @@ void Host::PaintTree(HDC dc, const RECT& cl) {
     RECT body = TreeBody(cl);
     treeSb_.Configure(body.bottom - body.top, (int)treeRows_.size() * treeRowH());
     int sel = active_ >= 0 ? modules_[active_]->NavSelected() : -1;
+    const bool focused = GetFocus() == frame_;
     int save = SaveDC(dc);
     IntersectClipRect(dc, body.left, body.top, body.right, body.bottom);
+    const int indent = S(14, dpi_), chevW = S(14, dpi_);
     for (int i = 0; i < (int)treeRows_.size(); i++) {
         const TreeRow& row = treeRows_[i];
         RECT r = TreeRowRect(i, cl);
         if (r.bottom <= body.top || r.top >= body.bottom) continue;
-        bool on = row.module == active_ && (row.nav >= 0 ? row.nav == sel : (sel < 0 && !row.header && row.depth == 0));
-        if (on) FillSolid(dc, r, t.highContrast ? GetSysColor(COLOR_HIGHLIGHT) : ui::Mix(t.accent, t.panel, 0.30));
+        if (row.header) {
+            // Board 7: a group caption ("VIEWS") under a 1px rule, in small text3.
+            RECT rule{r.left, r.top + S(4, dpi_), r.right, r.top + S(4, dpi_) + 1};
+            FillSolid(dc, rule, t.border);
+            RECT hr{r.left + S(10, dpi_), r.top + S(6, dpi_), r.right - S(8, dpi_), r.bottom};
+            TextLeft(dc, row.label, hr, fonts_.caption, hc ? GetSysColor(COLOR_GRAYTEXT) : t.text3);
+            continue;
+        }
+        bool on = row.module == active_ && (row.nav >= 0 ? row.nav == sel : (sel < 0 && row.depth == 0));
+        if (on) {
+            FillSolid(dc, r, hc ? GetSysColor(COLOR_HIGHLIGHT) : ui::Mix(t.accent, t.panel, 0.30));
+            if (focused || treeCursor_ == i) {   // the keyboard row: dashed focus rect, as the lists draw it
+                RECT fr = r; InflateRect(&fr, -1, 0);
+                ui::FocusRectC(dc, fr, hc ? GetSysColor(COLOR_HIGHLIGHTTEXT) : t.accent);
+            }
+        }
         RECT tr = r;
-        tr.left += S(8, dpi_) + row.depth * S(16, dpi_);
+        tr.left += S(8, dpi_) + row.depth * indent;
         tr.right -= S(8, dpi_);
-        COLORREF ink = row.header ? t.text3 : row.dim ? t.text3 : (on ? t.text1 : t.text2);
-        if (t.highContrast) ink = on ? GetSysColor(COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_WINDOWTEXT);
+        COLORREF ink = row.dim ? t.text3 : (on || row.depth == 0 ? t.text1 : t.text2);
+        if (hc) ink = on ? GetSysColor(COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_WINDOWTEXT);
+        if (row.expandable) {
+            // A small chevron: › closed, ⌄ open, drawn as two lines so it needs no symbol font.
+            int cx = tr.left + chevW / 2 - S(1, dpi_), cy = (r.top + r.bottom) / 2, a = S(3, dpi_);
+            COLORREF cc = hc ? ink : t.text3;
+            HPEN pen = CreatePen(PS_SOLID, std::max(1, S(1, dpi_)), cc);
+            HGDIOBJ op = SelectObject(dc, pen);
+            if (row.expanded) { POINT pt[3] = {{cx - a, cy - a / 2}, {cx, cy + a / 2 + 1}, {cx + a + 1, cy - a / 2 - 1}}; Polyline(dc, pt, 3); }
+            else { POINT pt[3] = {{cx - a / 2, cy - a}, {cx + a / 2 + 1, cy}, {cx - a / 2 - 1, cy + a + 1}}; Polyline(dc, pt, 3); }
+            SelectObject(dc, op);
+            DeleteObject(pen);
+        }
+        tr.left += chevW;
         if (!row.note.empty()) {
-            TextRight(dc, row.note, tr, fonts_.caption, row.header ? t.text3 : (on ? t.text1 : t.text3));
+            TextRight(dc, row.note, tr, fonts_.caption, hc ? ink : (on ? t.text1 : t.text3));
             SIZE ns{}; HGDIOBJ o = SelectObject(dc, fonts_.caption);
             GetTextExtentPoint32W(dc, row.note.c_str(), (int)row.note.size(), &ns); SelectObject(dc, o);
             tr.right -= ns.cx + S(8, dpi_);
         }
-        HFONT f = row.header ? fonts_.caption : (row.depth == 0 || on) ? fonts_.semi : fonts_.ui;
+        HFONT f = (row.depth == 0 && row.module == active_) || on ? fonts_.semi : fonts_.ui;
         TextLeft(dc, row.label, tr, f, ink);
     }
     RestoreDC(dc, save);
@@ -371,6 +414,10 @@ void Host::PaintTree(HDC dc, const RECT& cl) {
         RECT track{body.right - S(8, dpi_), body.top, body.right, body.bottom};
         ui::PaintCtx pc{theme_, fonts_, dpi_, layout_};
         treeSb_.Paint(dc, track, pc);
+    }
+    if (!treeFooter_.empty()) {   // the module's machine line, pinned to the bottom of the tree
+        RECT fr{sb.left + S(10, dpi_), body.bottom + S(6, dpi_), sb.right - S(8, dpi_), sb.bottom};
+        ui::DrawText(dc, treeFooter_, fr, fonts_.caption, hc ? GetSysColor(COLOR_GRAYTEXT) : t.text3, DT_WORDBREAK);
     }
 }
 
