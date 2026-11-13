@@ -51,10 +51,20 @@ constexpr size_t kMaxRuns = 50;
 enum {
     ID_NONE = 0,
     ID_BROWSE, ID_RUN, ID_ALLOW, ID_MODE, ID_WHO, ID_ACCOUNT, ID_TOOL,
+    ID_SHOW,   // Console "show:" filter chip (data = Who, or -1 for all)
 };
 
+// Three-Pane NavNode ids: 1 + Who for the identities, kNavRecent + k for the recent launches.
+constexpr int kNavRecent = 100;
+constexpr size_t kNavRecentMax = 8;
+
+// Sort keys, so the Baseline/Three-Pane list (4 columns) and the wider Console table share SortRuns.
+enum SortKey { K_MARK, K_TYPE, K_PATH, K_ARGS, K_IDENT, K_TOKEN, K_INTEG, K_WHEN };
+const SortKey kStdKeys[] = {K_PATH, K_IDENT, K_INTEG, K_WHEN};
+const SortKey kConKeys[] = {K_MARK, K_TYPE, K_PATH, K_ARGS, K_IDENT, K_TOKEN, K_INTEG, K_WHEN};
+
 // Where keyboard/typing focus sits.
-enum class Focus { None, Path, Args, Work, Click, List };
+enum class Focus { None, Path, Args, Work, Search, Click, List };
 
 // Text fields are core/ui TextField (selection, clipboard, context menu).
 using Edit = hx::ui::TextField;
@@ -91,6 +101,11 @@ public:
     HWND Create(IHost&, HWND parent, const RECT& rc) override;
     void OnActivate() override { if (hwnd_) SetFocus(hwnd_); }
     void OnDpiChanged(UINT) override { if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
+    std::vector<NavNode> NavNodes() override;
+    int  NavSelected() override { return 1 + (int)who_; }
+    void OnNavSelect(int id) override;
+    std::vector<FKey> FKeys() override;
+    std::wstring ConsoleHeader() override;
     bool OnInput(UINT msg, WPARAM w, LPARAM l) override;
     bool CanClose() override { return !worker_.Running(); }
     void Shutdown() override {
@@ -109,6 +124,11 @@ private:
     PaintCtx Ctx() const { return PaintCtx{host_->Theme(), host_->Fonts(), host_->Dpi(), host_->Layout()}; }
     int  Sc(int px) const { return S(px, host_ ? host_->Dpi() : 96); }
     bool Console() const { return host_ && host_->Layout() == Layout::Console; }
+    bool ThreePane() const { return host_ && host_->Layout() == Layout::ThreePane; }
+    // One list per layout (Baseline's 4 columns, Three-Pane's fitted ones, Console's wider table), so
+    // each keeps its own columns, sort and selection.
+    ListView& List() { return Console() ? listCon_ : ThreePane() ? listTp_ : list_; }
+    void Chrome() { if (host_) host_->ChromeChanged(); }
     void Invalidate() { if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
     void AddClick(const RECT& r, int id, int data = 0) { clicks_.push_back({r, id, data}); }
     bool IsHover(int id, int data = 0) const { return hoverId_ == id && hoverData_ == data; }
@@ -120,6 +140,9 @@ private:
     void RememberRun(const LaunchResult& res);
     void RefillList();
     void SortRuns();
+    bool Visible(const LastRun& r) const;   // search + Console "show:" filter (never in Baseline)
+    void Refill(const LastRun& r);          // re-fill the form from a history row (never runs it)
+    const LastRun* SelectedRun();
     bool Gate(Who w) {   // rule-4 gate; says why on refusal
         if (LaunchAllowed(w, allowElevated_)) return true;
         resultLine_ = L"Turn on \"Allow SYSTEM / TrustedInstaller\" first.";
@@ -130,8 +153,15 @@ private:
 
     void Button(HDC dc, const RECT& r, const std::wstring& label, int id, int data, bool primary,
                 bool enabled, bool selected);
-    void DrawForm(HDC dc, const RECT& rc);
+    void DrawForm(HDC dc, const RECT& rc);        // Baseline (unchanged)
+    void DrawThreePane(HDC dc, const RECT& rc);
+    void DrawConsole(HDC dc, const RECT& rc);
     void DrawFocusRing(HDC dc);
+    // Square controls for Three-Pane and Console (radius 0; Baseline keeps its rounded Button).
+    void SqButton(HDC dc, const RECT& r, const std::wstring& label, int id, int data, bool primary,
+                  bool enabled, bool selected, HFONT font);
+    void SqCheck(HDC dc, const RECT& r, const std::wstring& label, int id, bool on, HFONT font);
+    std::wstring HowText() const;            // what Run does for the chosen identity (from launch.cpp)
 
     void OnClickId(int id, int data);
     void DoRun(const LaunchRequest& req);
@@ -144,7 +174,8 @@ private:
     }
     void CycleFocusStops(bool back);
 
-    bool SystemAllowed() const { return allowElevated_; }
+    void CycleWho();
+    void SetDetailWidthFromX(int x);
     bool WhoEnabled(Who w) const {
         return (w == Who::System || w == Who::TrustedInstaller) ? allowElevated_ : true;
     }
@@ -154,8 +185,33 @@ private:
     bool demo_ = false;
 
     Edit path_, args_, work_;
-    Edit* DragEdit() { return path_.Dragging() ? &path_ : args_.Dragging() ? &args_ : work_.Dragging() ? &work_ : nullptr; }
-    const RECT& EditRect(const Edit* e) const { return e == &path_ ? rcPath_ : e == &args_ ? rcArgs_ : rcWork_; }
+    SearchBox search_;                     // filters the recent list (Three-Pane and Console)
+    Edit* DragEdit() {
+        for (Edit* e : {&path_, &args_, &work_, (Edit*)&search_}) if (e->Dragging()) return e;
+        return nullptr;
+    }
+    const RECT& EditRect(const Edit* e) const {
+        return e == &path_ ? rcPath_ : e == &args_ ? rcArgs_ : e == &work_ ? rcWork_ : rcSearch_;
+    }
+    Edit* EditAt(POINT p) {
+        if (PtInRect(&rcPath_, p)) return &path_;
+        if (PtInRect(&rcArgs_, p)) return &args_;
+        if (PtInRect(&rcWork_, p)) return &work_;
+        if (PtInRect(&rcSearch_, p)) return &search_;
+        return nullptr;
+    }
+    Focus FocusOf(const Edit* e) const {
+        return e == &path_ ? Focus::Path : e == &args_ ? Focus::Args : e == &work_ ? Focus::Work : Focus::Search;
+    }
+    Edit* FocusedEdit() {
+        switch (focus_) {
+        case Focus::Path: return &path_;
+        case Focus::Args: return &args_;
+        case Focus::Work: return &work_;
+        case Focus::Search: return &search_;
+        default: return nullptr;
+        }
+    }
     Who who_ = Who::ThisAdmin;
     TokenMode mode_ = TokenMode::Full;
     bool allowElevated_ = false;          // OFF at every start, never persisted (rule 4)
@@ -164,7 +220,17 @@ private:
 
     std::vector<Tool> tools_;
     std::vector<LastRun> runs_;
-    ListView list_;
+    std::vector<int> view_;                // list row -> runs_ index (after the filter)
+    std::vector<LastRun> recentNav_;       // the runs behind the Three-Pane "RECENT" nodes
+    ListView list_, listTp_, listCon_;
+    int showWho_ = -1;                     // Console "show:" chip; -1 = all
+    std::wstring userName_;                // for the Console header
+    bool layoutKnown_ = false;
+    Layout lastLayout_ = Layout::Baseline;
+    int  detailW_ = 360;                   // Three-Pane detail pane width, DIPs (Prefs "detailw")
+    bool splitDrag_ = false;
+    int  splitGrab_ = 0;
+    bool swallowSlash_ = false;            // the '/' that focused the search must not be typed into it
 
     sys::Worker worker_;
     LaunchRequest req_;
@@ -179,7 +245,7 @@ private:
     Focus focus_ = Focus::Path;
     int focusId_ = -1, focusData_ = 0;
 
-    RECT rcPath_{}, rcArgs_{}, rcWork_{}, rcList_{};
+    RECT rcPath_{}, rcArgs_{}, rcWork_{}, rcList_{}, rcSearch_{}, rcSplit_{};
 };
 
 // ============================================================================================
@@ -224,8 +290,10 @@ LRESULT RunAsModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SETCURSOR:
         if (LOWORD(l) == HTCLIENT) {
             POINT cp; GetCursorPos(&cp); ScreenToClient(h, &cp);
-            bool inEdit = PtInRect(&rcPath_, cp) || PtInRect(&rcArgs_, cp) || PtInRect(&rcWork_, cp);
-            SetCursor(LoadCursorW(nullptr, inEdit ? IDC_IBEAM : hoverId_ > 0 ? IDC_HAND : IDC_ARROW));
+            bool inEdit = EditAt(cp) != nullptr;
+            bool inSplit = splitDrag_ || PtInRect(&rcSplit_, cp);
+            SetCursor(LoadCursorW(nullptr, inSplit ? IDC_SIZEWE : inEdit ? IDC_IBEAM
+                                           : hoverId_ > 0 ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
         break;
@@ -250,10 +318,16 @@ LRESULT RunAsModule::OnView(HWND h, UINT m, WPARAM w, LPARAM l) {
             resultBad_ = true;
         }
         host_->SetStatus(resultLine_.c_str());
+        Chrome();   // the recent-launch nodes and the Console header changed
         Invalidate();
         return 0;
     case WM_CAPTURECHANGED:
-        path_.CancelDrag(); args_.CancelDrag(); work_.CancelDrag();
+        path_.CancelDrag(); args_.CancelDrag(); work_.CancelDrag(); search_.CancelDrag();
+        if (splitDrag_) {
+            splitDrag_ = false;
+            host_->Prefs().SetInt(L"detailw", detailW_);
+            Invalidate();
+        }
         return 0;
     case WM_LBUTTONDOWN:
         SetFocus(h);
@@ -276,27 +350,22 @@ HWND RunAsModule::Create(IHost& host, HWND parent, const RECT& rc) {
     work_.placeholder = L"Working folder (optional; defaults to the target's folder)";
     BuildTools();
 
-    list_.SetColumns({{L"Path", Sc(360)}, {L"Identity", Sc(150)}, {L"Integrity", Sc(90)},
-                      {L"When", Sc(130)}});
-    list_.onActivate = [this](int i) {
-        if (i < 0 || i >= (int)runs_.size()) return;
-        const LastRun& r = runs_[i];
-        path_.SetText(r.path); args_.SetText(r.args); work_.SetText(L"");
-        who_ = (Who)r.who; mode_ = (TokenMode)r.mode;
-        if (who_ == Who::AnotherUser && !r.account.empty()) {
-            for (size_t k = 0; k < accounts_.size(); k++)
-                if (accounts_[k].name == r.account) { accountIdx_ = (int)k; break; }
-        }
-        resultLine_ = L"Re-filled from history — review, then Run.";
-        resultBad_ = false;
-        // A persisted SYSTEM/TI row must never bypass the off-by-default switch (rule 4).
-        if (!LaunchAllowed(who_, allowElevated_)) {
-            who_ = Who::ThisAdmin;
-            resultLine_ = L"Re-filled from history. SYSTEM/TrustedInstaller needs the switch; set to This admin.";
-        }
-        Invalidate();
-    };
-    list_.onSortChanged = [this](int, bool) { SortRuns(); RefillList(); Invalidate(); };
+    // Column widths are DIPs: ListView scales them itself (they were Sc()'d twice before).
+    list_.SetColumns({{L"Path", 360}, {L"Identity", 150}, {L"Integrity", 90}, {L"When", 130}});
+    for (ListView* lv : {&list_, &listTp_, &listCon_}) {
+        lv->onActivate = [this](int i) {
+            if (i < 0 || i >= (int)view_.size()) return;
+            Refill(runs_[view_[i]]);
+        };
+        lv->onSortChanged = [this](int, bool) { SortRuns(); RefillList(); Invalidate(); };
+    }
+    search_.onChanged = [this](const std::wstring&) { RefillList(); Invalidate(); };
+    {
+        wchar_t un[257] = {};
+        DWORD n = 257;
+        userName_ = GetUserNameW(un, &n) ? un : L"?";
+    }
+    detailW_ = std::clamp(host.Prefs().GetInt(L"detailw", 360), 240, 900);
 
     CommandLine cl = CommandLine::Parse(GetCommandLineW());
     demo_ = !cl.screenshot.empty();
@@ -371,6 +440,9 @@ void RunAsModule::LoadDemo() {
     };
     runs_[2].account = L"alice";
     RefillList();
+    // Three-Pane and Console screenshots show a selected row and its detail; Baseline's list stays as it was.
+    listTp_.Select(1);
+    listCon_.Select(1);
 }
 
 void RunAsModule::LoadRuns() {
@@ -429,32 +501,141 @@ int IntegrityRank(const std::wstring& s) {
     return -1;
 }
 
-// Sort runs_ itself (stable) so a list row index still maps to runs_[i] in onActivate.
+std::wstring Lower(std::wstring s) {
+    for (auto& c : s) c = (wchar_t)towlower(c);
+    return s;
+}
+
+// "exe", "lnk", "msc"... for the Console TYPE column.
+std::wstring ExtOf(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/"), dot = path.find_last_of(L'.');
+    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return L"";
+    return Lower(path.substr(dot + 1));
+}
+
+std::wstring FileNameOf(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+bool Elevated(int who) { return who == (int)Who::System || who == (int)Who::TrustedInstaller; }
+
+// Identity without the token mode: "This admin", "alice", "SYSTEM", "TrustedInstaller".
+std::wstring WhoText(int who, const std::wstring& account) {
+    if (who == (int)Who::AnotherUser && !account.empty()) return account;
+    return WhoName((Who)who);
+}
+
+// Short identity for tree notes and Console chips.
+const wchar_t* WhoKey(Who w) {
+    switch (w) {
+    case Who::ThisAdmin:        return L"this-admin";
+    case Who::AnotherUser:      return L"another-user";
+    case Who::System:           return L"system";
+    case Who::TrustedInstaller: return L"trustedinstaller";
+    }
+    return L"?";
+}
+
+// Sort runs_ itself (stable) so a list row maps back to runs_ through view_ in onActivate.
 void RunAsModule::SortRuns() {
-    int col = list_.SortColumn();
+    ListView& lv = List();
+    int col = lv.SortColumn();
     if (col < 0) return;
-    bool asc = list_.SortAscending();
+    bool con = Console();
+    if (col >= (con ? 8 : 4)) return;
+    SortKey key = con ? kConKeys[col] : kStdKeys[col];
+    bool asc = lv.SortAscending();
     std::stable_sort(runs_.begin(), runs_.end(), [&](const LastRun& a, const LastRun& b) {
         int c = 0;
-        switch (col) {
-            case 0: c = _wcsicmp(a.path.c_str(), b.path.c_str()); break;
-            case 1: c = _wcsicmp(IdentityLabel(a.who, a.mode, a.account).c_str(),
-                                 IdentityLabel(b.who, b.mode, b.account).c_str()); break;
-            case 2: c = IntegrityRank(a.integrity) - IntegrityRank(b.integrity); break;
-            default: c = (a.when < b.when) ? -1 : (a.when > b.when ? 1 : 0); break;   // by timestamp
+        switch (key) {
+            case K_MARK:  c = (int)Elevated(a.who) - (int)Elevated(b.who); break;
+            case K_TYPE:  c = _wcsicmp(ExtOf(a.path).c_str(), ExtOf(b.path).c_str()); break;
+            case K_PATH:  c = _wcsicmp(a.path.c_str(), b.path.c_str()); break;
+            case K_ARGS:  c = _wcsicmp(a.args.c_str(), b.args.c_str()); break;
+            case K_IDENT: c = _wcsicmp(IdentityLabel(a.who, a.mode, a.account).c_str(),
+                                       IdentityLabel(b.who, b.mode, b.account).c_str()); break;
+            case K_TOKEN: c = a.mode - b.mode; break;
+            case K_INTEG: c = IntegrityRank(a.integrity) - IntegrityRank(b.integrity); break;
+            case K_WHEN:  c = (a.when < b.when) ? -1 : (a.when > b.when ? 1 : 0); break;   // by timestamp
         }
         return asc ? c < 0 : c > 0;
     });
 }
 
+// The filter exists only where its controls are drawn: Baseline always lists every run.
+bool RunAsModule::Visible(const LastRun& r) const {
+    if (!host_ || host_->Layout() == Layout::Baseline) return true;
+    if (host_->Layout() == Layout::Console && showWho_ >= 0 && r.who != showWho_) return false;
+    std::wstring q = Lower(search_.Text());
+    if (q.empty()) return true;
+    for (const std::wstring* f : {&r.path, &r.args, &r.integrity})
+        if (Lower(*f).find(q) != std::wstring::npos) return true;
+    return Lower(IdentityLabel(r.who, r.mode, r.account)).find(q) != std::wstring::npos;
+}
+
+const LastRun* RunAsModule::SelectedRun() {
+    int i = List().Selected();
+    return (i >= 0 && i < (int)view_.size()) ? &runs_[view_[i]] : nullptr;
+}
+
 void RunAsModule::RefillList() {
-    std::vector<std::vector<std::wstring>> rows;
-    rows.reserve(runs_.size());
-    for (const LastRun& r : runs_) {
-        rows.push_back({r.path, IdentityLabel(r.who, r.mode, r.account),
-                        r.integrity.empty() ? L"—" : r.integrity, WhenText(r.when)});
+    // Keep the selected run selected across a re-sort or a filter change.
+    auto keyOf = [](const LastRun& r) {
+        return r.path + L'\x1' + r.args + L'\x1' + r.account + L'\x1' + std::to_wstring(r.who) +
+               L'\x1' + std::to_wstring(r.mode) + L'\x1' + std::to_wstring(r.when);
+    };
+    std::wstring selKey[3];
+    ListView* lvs[3] = {&list_, &listTp_, &listCon_};
+    for (int k = 0; k < 3; k++) {
+        int i = lvs[k]->Selected();
+        if (i >= 0 && i < (int)view_.size() && view_[i] < (int)runs_.size()) selKey[k] = keyOf(runs_[view_[i]]);
     }
+    view_.clear();
+    for (int i = 0; i < (int)runs_.size(); i++)
+        if (Visible(runs_[i])) view_.push_back(i);
+
+    std::vector<std::vector<std::wstring>> rows, con;
+    std::vector<ListView::Ink> ink;
+    rows.reserve(view_.size());
+    con.reserve(view_.size());
+    for (int idx : view_) {
+        const LastRun& r = runs_[idx];
+        std::wstring integ = r.integrity.empty() ? L"—" : r.integrity;
+        rows.push_back({r.path, IdentityLabel(r.who, r.mode, r.account), integ, WhenText(r.when)});
+        con.push_back({Elevated(r.who) ? L"!" : L"", ExtOf(r.path), r.path, r.args.empty() ? L"-" : r.args,
+                       WhoText(r.who, r.account), r.mode == (int)TokenMode::Limited ? L"limited" : L"full",
+                       integ, WhenText(r.when)});
+        // Console colours SYSTEM/TI rows like changed values; the "!" column says it in text too.
+        ink.push_back(Elevated(r.who) ? ListView::Ink::Warn : ListView::Ink::Normal);
+    }
+    listTp_.SetRows(rows);
     list_.SetRows(std::move(rows));
+    listCon_.SetRows(std::move(con));
+    listCon_.SetRowInk(std::move(ink));
+    for (int k = 0; k < 3; k++) {
+        if (selKey[k].empty()) continue;
+        for (int i = 0; i < (int)view_.size(); i++)
+            if (keyOf(runs_[view_[i]]) == selKey[k]) { lvs[k]->Select(i); break; }
+    }
+}
+
+void RunAsModule::Refill(const LastRun& r) {
+    path_.SetText(r.path); args_.SetText(r.args); work_.SetText(L"");
+    who_ = (Who)r.who; mode_ = (TokenMode)r.mode;
+    if (who_ == Who::AnotherUser && !r.account.empty()) {
+        for (size_t k = 0; k < accounts_.size(); k++)
+            if (accounts_[k].name == r.account) { accountIdx_ = (int)k; break; }
+    }
+    resultLine_ = L"Re-filled from history — review, then Run.";
+    resultBad_ = false;
+    // A persisted SYSTEM/TI row must never bypass the off-by-default switch (rule 4).
+    if (!LaunchAllowed(who_, allowElevated_)) {
+        who_ = Who::ThisAdmin;
+        resultLine_ = L"Re-filled from history. SYSTEM/TrustedInstaller needs the switch; set to This admin.";
+    }
+    Chrome();
+    Invalidate();
 }
 
 // ============================================================================================
@@ -640,6 +821,538 @@ void RunAsModule::DrawForm(HDC dc, const RECT& rc) {
     list_.Paint(dc, rcList_, Ctx(), focus_ == Focus::List);
 }
 
+// ============================================================================================
+// Three-Pane and Console (board 7 and board 4). Baseline above is unchanged.
+
+int TextW(HDC dc, HFONT f, const std::wstring& s) {
+    HGDIOBJ o = SelectObject(dc, f);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
+    SelectObject(dc, o);
+    return sz.cx;
+}
+
+// Height of word-wrapped text in a column of width w.
+int WrapH(HDC dc, HFONT f, const std::wstring& s, int w) {
+    RECT r{0, 0, w, 0};
+    HGDIOBJ o = SelectObject(dc, f);
+    DrawTextW(dc, s.c_str(), -1, &r, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, o);
+    return r.bottom;
+}
+
+void RunAsModule::SqButton(HDC dc, const RECT& r, const std::wstring& label, int id, int data,
+                           bool primary, bool enabled, bool selected, HFONT font) {
+    const Theme& t = host_->Theme();
+    bool hv = enabled && IsHover(id, data);
+    COLORREF bg, bc, tc;
+    if (t.highContrast) {
+        bool on = primary || selected;
+        bg = GetSysColor(on ? COLOR_HIGHLIGHT : COLOR_BTNFACE);
+        bc = GetSysColor(COLOR_WINDOWTEXT);
+        tc = enabled ? GetSysColor(on ? COLOR_HIGHLIGHTTEXT : COLOR_BTNTEXT) : GetSysColor(COLOR_GRAYTEXT);
+    } else if (primary || (selected && Console())) {
+        // Console fills a selected chip with the accent, like its selected row.
+        bg = hv ? Mix(t.accent, RGB(255, 255, 255), 0.12) : t.accent;
+        bc = bg;
+        tc = enabled ? OnFill(t.accent) : Mix(OnFill(t.accent), t.accent, 0.45);
+    } else if (selected) {
+        bg = Mix(t.panel2, t.accent, 0.22);
+        bc = t.accent;
+        tc = t.text1;
+    } else {
+        bg = hv ? t.panel3 : t.panel2;
+        bc = hv ? Mix(t.border, t.text3, 0.5) : t.border;
+        tc = enabled ? t.text1 : t.text3;
+    }
+    FillSolid(dc, r, bg);
+    FrameRectC(dc, r, bc);
+    RECT tr{r.left + Sc(6), r.top, r.right - Sc(6), r.bottom};
+    DrawText(dc, label, tr, font, tc, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
+    if (enabled) AddClick(r, id, data);
+}
+
+// The "Allow SYSTEM / TrustedInstaller" switch as a square check. Same ID_ALLOW click as Baseline.
+void RunAsModule::SqCheck(HDC dc, const RECT& r, const std::wstring& label, int id, bool on, HFONT font) {
+    const Theme& t = host_->Theme();
+    bool hv = IsHover(id);
+    COLORREF bg = t.highContrast ? GetSysColor(COLOR_BTNFACE) : (hv ? t.panel3 : t.panel2);
+    COLORREF bc = t.highContrast ? GetSysColor(COLOR_WINDOWTEXT) : (on ? t.warn : t.border);
+    COLORREF ink = t.highContrast ? GetSysColor(COLOR_BTNTEXT) : t.text1;
+    FillSolid(dc, r, bg);
+    FrameRectC(dc, r, bc);
+    int bs = Sc(12), bx = r.left + Sc(7), by = (r.top + r.bottom) / 2 - bs / 2;
+    RECT box{bx, by, bx + bs, by + bs};
+    FrameRectC(dc, box, t.highContrast ? ink : (on ? t.warn : t.text3));
+    if (on) {
+        RECT in{box.left + Sc(3), box.top + Sc(3), box.right - Sc(3), box.bottom - Sc(3)};
+        FillSolid(dc, in, t.highContrast ? ink : t.warn);
+    }
+    RECT lt{box.right + Sc(7), r.top, r.right - Sc(6), r.bottom};
+    DrawText(dc, label, lt, font, ink, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+    AddClick(r, id);
+}
+
+// What Run does for the chosen identity, in the words of launch.cpp (no numbers, no promises: the result
+// line shows the identity read back from the child's token).
+std::wstring RunAsModule::HowText() const {
+    bool lim = mode_ == TokenMode::Limited;
+    switch (who_) {
+    case Who::ThisAdmin:
+        return lim ? L"Uses the shell's de-elevated token (or this admin's UAC-linked token), so the program "
+                     L"runs without admin rights."
+                   : L"Starts the target with ShellExecuteEx from this elevated process: your full admin token. "
+                     L"Documents, shortcuts and .msc files open with their usual handler.";
+    case Who::AnotherUser:
+        return L"Logs on as the chosen local account with CreateProcessWithLogonW. Windows asks for its "
+               L"password each time; it is never saved. The token is the one Windows gives that logon; the "
+               L"Full/Limited choice does not change it.";
+    case Who::System:
+        return lim ? L"Duplicates the SYSTEM token of winlogon.exe in this session, restricts it (LUA) and "
+                     L"lowers it to medium integrity."
+                   : L"Duplicates the SYSTEM token of winlogon.exe in this session. More power than an "
+                     L"administrator; it can damage Windows.";
+    case Who::TrustedInstaller:
+        return std::wstring(L"Starts the TrustedInstaller service if needed, takes its token while acting as "
+                            L"SYSTEM and moves it to this session.") +
+               (lim ? L" Then restricts it (LUA) and lowers it to medium integrity."
+                    : L" It can change protected parts of Windows.");
+    }
+    return L"";
+}
+
+void RunAsModule::DrawThreePane(HDC dc, const RECT& rc) {
+    const Theme& t = host_->Theme();
+    const Fonts& f = host_->Fonts();
+    const bool hc = t.highContrast;
+    const COLORREF text1 = hc ? GetSysColor(COLOR_WINDOWTEXT) : t.text1;
+    const COLORREF text2 = hc ? GetSysColor(COLOR_WINDOWTEXT) : t.text2;
+    const COLORREF text3 = hc ? GetSysColor(COLOR_GRAYTEXT) : t.text3;
+    const COLORREF border = hc ? GetSysColor(COLOR_WINDOWTEXT) : t.border;
+    const COLORREF panel = hc ? GetSysColor(COLOR_WINDOW) : t.panel;
+    clicks_.clear();
+    const bool running = worker_.Running();
+
+    // --- columns: list | 5px splitter | detail ----------------------------------------------
+    int W = rc.right - rc.left;
+    int minMid = Sc(380), minDet = Sc(240);
+    int dw = Sc(detailW_);
+    if (dw > W - minMid - Sc(5)) dw = W - minMid - Sc(5);
+    if (dw < minDet) dw = minDet;
+    RECT det{rc.right - dw, rc.top, rc.right, rc.bottom};
+    rcSplit_ = {det.left - Sc(5), rc.top, det.left, rc.bottom};
+    RECT mid{rc.left, rc.top, rcSplit_.left, rc.bottom};
+    FillSolid(dc, rcSplit_, hc ? GetSysColor(COLOR_WINDOW) : t.bg);
+    VLine(dc, rcSplit_.left, rc.top, rc.bottom, border);
+    VLine(dc, rcSplit_.right - 1, rc.top, rc.bottom, border);
+
+    // --- toolbar: square buttons, search at the right end -------------------------------------
+    const int P = Sc(10), gap = Sc(6), tbH = Sc(26);
+    RECT bar{mid.left, mid.top, mid.right, mid.top + Sc(40)};
+    FillSolid(dc, bar, panel);
+    HLine(dc, bar.left, bar.right, bar.bottom - 1, border);
+    int x = mid.left + P, ty = bar.top + (Sc(40) - tbH) / 2;
+    auto tb = [&](const std::wstring& s, int id, int data, bool primary, bool enabled, bool selected) {
+        int w = TextW(dc, f.semi, s) + Sc(22);
+        RECT r{x, ty, x + w, ty + tbH};
+        SqButton(dc, r, s, id, data, primary, enabled, selected, f.semi);
+        x = r.right + gap;
+    };
+    auto sep = [&]() { VLine(dc, x + gap / 2, ty + Sc(3), ty + tbH - Sc(3), border); x += gap * 2; };
+    tb(running ? L"Running…" : L"Run", ID_RUN, 0, true, !running, false);
+    tb(L"Browse…", ID_BROWSE, 0, false, true, false);
+    sep();
+    tb(L"Full", ID_MODE, (int)TokenMode::Full, false, true, mode_ == TokenMode::Full);
+    tb(L"Limited", ID_MODE, (int)TokenMode::Limited, false, true, mode_ == TokenMode::Limited);
+    sep();
+    {
+        std::wstring s = L"Allow SYSTEM / TI";
+        int w = TextW(dc, f.semi, s) + Sc(36);
+        RECT r{x, ty, x + w, ty + tbH};
+        SqCheck(dc, r, s, ID_ALLOW, allowElevated_, f.semi);
+        x = r.right + gap;
+    }
+    int sw = std::min(Sc(220), (int)(mid.right - P) - (x + Sc(8)));
+    if (sw >= Sc(90)) {
+        rcSearch_ = {mid.right - P - sw, ty, mid.right - P, ty + tbH};
+        search_.Paint(dc, rcSearch_, Ctx(), focus_ == Focus::Search);
+    }
+
+    // --- breadcrumb + counts ----------------------------------------------------------------
+    int L = mid.left + P, R = mid.right - P;
+    int y = bar.bottom;
+    {
+        RECT crumb{L, y, R, y + Sc(30)};
+        std::wstring who = WhoText((int)who_, who_ == Who::AnotherUser && !accounts_.empty()
+                                                  ? accounts_[accountIdx_].name : L"");
+        std::wstring path = L"Run As  ›  " + who + L"  ›  " +
+                            (mode_ == TokenMode::Limited ? L"Limited token" : L"Full token");
+        std::wstring counts = std::to_wstring(view_.size()) +
+                              (view_.size() == runs_.size() ? L"" : L" of " + std::to_wstring(runs_.size())) +
+                              L" recent  ·  " + std::to_wstring(accounts_.size()) + L" accounts";
+        int cw = TextW(dc, f.caption, counts);
+        RECT cr{R - cw, crumb.top, R, crumb.bottom};
+        TextRight(dc, counts, cr, f.caption, text3);
+        crumb.right = cr.left - Sc(12);
+        TextLeft(dc, path, crumb, f.ui, text2);
+        y = crumb.bottom;
+        HLine(dc, mid.left, mid.right, y - 1, border);
+    }
+    y += Sc(10);
+
+    // --- the form: label column + fields ------------------------------------------------------
+    const int labW = Sc(84), fh = Sc(28);
+    auto lab = [&](const wchar_t* s) {
+        RECT lr{L, y, L + labW, y + fh};
+        TextLeft(dc, s, lr, f.ui, text3);
+    };
+    lab(L"Program");
+    rcPath_ = {L + labW, y, R, y + fh};
+    path_.Paint(dc, rcPath_, Ctx(), focus_ == Focus::Path);
+    y += fh + gap;
+    lab(L"Arguments");
+    rcArgs_ = {L + labW, y, R, y + fh};
+    args_.Paint(dc, rcArgs_, Ctx(), focus_ == Focus::Args);
+    y += fh + gap;
+    lab(L"Folder");
+    rcWork_ = {L + labW, y, R, y + fh};
+    work_.Paint(dc, rcWork_, Ctx(), focus_ == Focus::Work);
+    y += fh + gap;
+    if (who_ == Who::AnotherUser) {
+        lab(L"Account");
+        std::wstring name = accounts_.empty() ? std::wstring(L"(no local accounts)")
+                                              : accounts_[accountIdx_].name + L"   (click for the next)";
+        RECT ar{L + labW, y, std::min(R, L + labW + Sc(300)), y + fh};
+        SqButton(dc, ar, name, ID_ACCOUNT, 0, false, !accounts_.empty(), false, f.ui);
+        y += fh + gap;
+    }
+    {
+        RECT res{L + labW, y, R, y + Sc(22)};
+        if (!resultLine_.empty()) {
+            COLORREF c = hc ? GetSysColor(COLOR_WINDOWTEXT) : resultBad_ ? t.bad : t.good;
+            TextLeft(dc, resultLine_, res, f.ui, c);
+        } else {
+            TextLeft(dc, L"Enter in a field runs it. The result shows the identity Windows actually gave.",
+                     res, f.caption, text3);
+        }
+        y += Sc(30);
+    }
+
+    // --- recent launches: the list fills the rest --------------------------------------------
+    {
+        RECT hr{L, y, R, y + Sc(20)};
+        TextRight(dc, L"Enter re-fills the form; it never runs", hr, f.caption, text3);
+        TextLeft(dc, L"RECENT LAUNCHES", hr, f.caption, text3);
+        y += Sc(24);
+    }
+    rcList_ = {L, y, R, rc.bottom - P};
+    if (rcList_.bottom < rcList_.top + Sc(60)) rcList_.bottom = rcList_.top + Sc(60);
+    {   // the path column takes what the middle pane has left (DIPs; ListView scales them)
+        int wDip = MulDiv(R - L, 96, (int)host_->Dpi());
+        listTp_.SetColumns({{L"Path", std::max(160, wDip - (130 + 80 + 130) - 12)}, {L"Identity", 130},
+                            {L"Integrity", 80}, {L"When", 130}});
+    }
+    listTp_.Paint(dc, rcList_, Ctx(), focus_ == Focus::List);
+
+    // --- detail pane ----------------------------------------------------------------------------
+    FillSolid(dc, det, panel);
+    const int save = SaveDC(dc);
+    IntersectClipRect(dc, det.left, det.top, det.right, det.bottom);
+    int X = det.left + Sc(14), XR = det.right - Sc(14);
+    int dy = det.top + Sc(12);
+    const int rowH = Sc(22), keyW = Sc(96);
+    auto kv = [&](const std::wstring& k, const std::wstring& v, COLORREF vc) {
+        RECT kr{X, dy, X + keyW, dy + rowH}, vr{X + keyW, dy, XR, dy + rowH};
+        TextLeft(dc, k, kr, f.caption, text3);
+        TextLeft(dc, v, vr, f.ui, vc);
+        dy += rowH;
+    };
+    auto section = [&](const wchar_t* s) {
+        dy += Sc(10);
+        HLine(dc, X, XR, dy, border);
+        RECT hr{X, dy + Sc(4), XR, dy + Sc(22)};
+        TextLeft(dc, s, hr, f.caption, text3);
+        dy += Sc(24);
+    };
+    {
+        RECT tr{X, dy, XR, dy + Sc(26)};
+        TextLeft(dc, L"Run request", tr, f.semi, text1);
+        dy += Sc(30);
+    }
+    kv(L"Identity", WhoText((int)who_, who_ == Who::AnotherUser && !accounts_.empty()
+                                           ? accounts_[accountIdx_].name : L""), text1);
+    kv(L"Token", mode_ == TokenMode::Limited ? L"Limited" : L"Full", text1);
+    kv(L"Target", path_.Text().empty() ? L"—" : FileNameOf(path_.Text()), text1);
+    kv(L"Arguments", args_.Text().empty() ? L"—" : args_.Text(), text1);
+    kv(L"Folder", work_.Text().empty() ? L"The target's folder" : work_.Text(), text1);
+    kv(L"SYSTEM / TI", allowElevated_ ? L"Allowed until Hadron closes" : L"Off (turn on in the toolbar)",
+       allowElevated_ && !hc ? t.warn : text1);
+
+    section(L"HOW IT LAUNCHES");
+    {
+        std::wstring how = HowText();
+        int h = WrapH(dc, f.caption, how, XR - X);
+        RECT hr{X, dy, XR, dy + h};
+        DrawText(dc, how, hr, f.caption, text2, DT_WORDBREAK | DT_LEFT);
+        dy += h;
+    }
+
+    if (const LastRun* r = SelectedRun()) {
+        section(L"SELECTED LAUNCH");
+        kv(L"Path", r->path, text1);
+        if (!r->args.empty()) kv(L"Arguments", r->args, text1);
+        kv(L"Identity", IdentityLabel(r->who, r->mode, r->account), text1);
+        kv(L"Integrity", r->integrity.empty() ? L"—" : r->integrity, text1);
+        kv(L"When", WhenText(r->when), text1);
+    }
+
+    section(L"WINDOWS TOOLS");
+    {
+        RECT nr{X, dy, XR, dy + Sc(18)};
+        TextLeft(dc, L"Launched at the identity above", nr, f.caption, text3);
+        dy += Sc(22);
+        int colW = (XR - X - gap) / 2, bh = Sc(26);
+        for (size_t i = 0; i < tools_.size(); i++) {
+            int cx = X + (int)(i % 2) * (colW + gap);
+            RECT r{cx, dy, cx + colW, dy + bh};
+            if (r.bottom <= det.bottom)   // never a focus stop the user can't see
+                SqButton(dc, r, tools_[i].label, ID_TOOL, (int)i, false, !running, false, f.ui);
+            if (i % 2 == 1 || i + 1 == tools_.size()) dy += bh + gap;
+        }
+    }
+    RestoreDC(dc, save);
+}
+
+void RunAsModule::DrawConsole(HDC dc, const RECT& rc) {
+    const Theme& t = host_->Theme();
+    const Fonts& f = host_->Fonts();
+    const bool hc = t.highContrast;
+    const COLORREF text1 = hc ? GetSysColor(COLOR_WINDOWTEXT) : t.text1;
+    const COLORREF text2 = hc ? GetSysColor(COLOR_WINDOWTEXT) : t.text2;
+    const COLORREF text3 = hc ? GetSysColor(COLOR_GRAYTEXT) : t.text3;
+    const COLORREF warn = hc ? GetSysColor(COLOR_WINDOWTEXT) : t.warn;
+    const COLORREF border = hc ? GetSysColor(COLOR_WINDOWTEXT) : t.border;
+    clicks_.clear();
+    const bool running = worker_.Running();
+    const HFONT mono = f.mono, cap = f.caption;
+
+    const int P = Sc(8), gap = Sc(6), lh = Sc(22), labW = Sc(64);
+    int L = rc.left + P, R = rc.right - P;
+    int y = rc.top + Sc(6);
+    auto lab = [&](const wchar_t* s, int x0, int w) {
+        RECT r{x0, y, x0 + w, y + lh};
+        TextLeft(dc, s, r, cap, text3);
+    };
+    // A chip sized to its text, left to right on the current line.
+    int x = L;
+    auto chip = [&](const std::wstring& s, int id, int data, bool primary, bool enabled, bool selected) {
+        int w = TextW(dc, mono, s) + Sc(14);
+        RECT r{x, y, x + w, y + lh};
+        SqButton(dc, r, s, id, data, primary, enabled, selected, mono);
+        x = r.right + Sc(4);
+    };
+
+    // --- TARGET / ARGS / CWD --------------------------------------------------------------------
+    lab(L"TARGET", L, labW);
+    {
+        std::wstring b = L"F2 browse";
+        int bw = TextW(dc, mono, b) + Sc(14);
+        rcPath_ = {L + labW, y, R - bw - gap, y + lh};
+        path_.Paint(dc, rcPath_, Ctx(), focus_ == Focus::Path);
+        RECT br{R - bw, y, R, y + lh};
+        SqButton(dc, br, b, ID_BROWSE, 0, false, true, false, mono);
+    }
+    y += lh + Sc(4);
+    {
+        int half = (R - L - labW) / 2;
+        lab(L"ARGS", L, labW);
+        rcArgs_ = {L + labW, y, L + labW + half - gap, y + lh};
+        args_.Paint(dc, rcArgs_, Ctx(), focus_ == Focus::Args);
+        int cx = L + labW + half + gap;
+        lab(L"CWD", cx, Sc(40));
+        rcWork_ = {cx + Sc(40), y, R, y + lh};
+        work_.Paint(dc, rcWork_, Ctx(), focus_ == Focus::Work);
+    }
+    y += lh + Sc(4);
+
+    // --- AS / TOKEN / ACCOUNT / allow switch ------------------------------------------------------
+    lab(L"AS", L, labW);
+    x = L + labW;
+    const Who whoOrder[4] = {Who::ThisAdmin, Who::AnotherUser, Who::System, Who::TrustedInstaller};
+    for (Who w : whoOrder) chip(WhoKey(w), ID_WHO, (int)w, false, WhoEnabled(w), who_ == w);
+    x += Sc(14);
+    {
+        RECT r{x, y, x + Sc(50), y + lh};
+        TextLeft(dc, L"TOKEN", r, cap, text3);
+        x = r.right;
+    }
+    chip(L"full", ID_MODE, (int)TokenMode::Full, false, true, mode_ == TokenMode::Full);
+    chip(L"limited", ID_MODE, (int)TokenMode::Limited, false, true, mode_ == TokenMode::Limited);
+    if (who_ == Who::AnotherUser) {
+        x += Sc(14);
+        RECT r{x, y, x + Sc(64), y + lh};
+        TextLeft(dc, L"ACCOUNT", r, cap, text3);
+        x = r.right;
+        chip(accounts_.empty() ? std::wstring(L"(none)") : accounts_[accountIdx_].name, ID_ACCOUNT, 0, false,
+             !accounts_.empty(), false);
+    }
+    y += lh + Sc(4);
+    x = L + labW;
+    {
+        std::wstring s = L"F8 allow SYSTEM / TrustedInstaller";
+        int w = TextW(dc, mono, s) + Sc(32);
+        RECT r{x, y, x + w, y + lh};
+        SqCheck(dc, r, s, ID_ALLOW, allowElevated_, mono);
+        RECT wr{r.right + Sc(10), y, R, y + lh};
+        TextLeft(dc, allowElevated_ ? L"ON until Hadron closes: more power than an administrator; can damage Windows"
+                                    : L"off: more power than an administrator; can damage Windows",
+                 wr, cap, warn);
+    }
+    y += lh + Sc(6);
+
+    // --- RUN + result -------------------------------------------------------------------------------
+    {
+        x = L + labW;
+        chip(running ? L"F5 running…" : L"F5 run", ID_RUN, 0, true, !running, false);
+        RECT res{x + Sc(8), y, R, y + lh};
+        if (!resultLine_.empty()) {
+            COLORREF c = hc ? text1 : resultBad_ ? t.bad : t.good;
+            TextLeft(dc, L"> " + resultLine_, res, mono, c);
+        } else {
+            TextLeft(dc, L"> ready. Enter in a field runs it; the result is read back from the child's token.",
+                     res, mono, text3);
+        }
+    }
+    y += lh + Sc(6);
+    HLine(dc, rc.left, rc.right, y, border);
+    y += Sc(6);
+
+    // --- filter line: / search, show: chips, row n/m ------------------------------------------------
+    {
+        x = L;
+        RECT sl{x, y, x + Sc(14), y + lh};
+        TextLeft(dc, L"/", sl, mono, hc ? text1 : t.accent);
+        rcSearch_ = {x + Sc(14), y, x + Sc(14) + Sc(220), y + lh};
+        search_.Paint(dc, rcSearch_, Ctx(), focus_ == Focus::Search);
+        x = rcSearch_.right + Sc(16);
+        RECT shl{x, y, x + Sc(44), y + lh};
+        TextLeft(dc, L"show:", shl, cap, text3);
+        x = shl.right;
+        chip(L"all", ID_SHOW, -1, false, true, showWho_ < 0);
+        chip(L"admin", ID_SHOW, (int)Who::ThisAdmin, false, true, showWho_ == (int)Who::ThisAdmin);
+        chip(L"user", ID_SHOW, (int)Who::AnotherUser, false, true, showWho_ == (int)Who::AnotherUser);
+        chip(L"system", ID_SHOW, (int)Who::System, false, true, showWho_ == (int)Who::System);
+        chip(L"ti", ID_SHOW, (int)Who::TrustedInstaller, false, true, showWho_ == (int)Who::TrustedInstaller);
+        int sel = listCon_.Selected();
+        std::wstring rowTxt = L"row " + (sel >= 0 ? std::to_wstring(sel + 1) : std::wstring(L"-")) + L"/" +
+                              std::to_wstring(view_.size());
+        if (view_.size() != runs_.size()) rowTxt += L" of " + std::to_wstring(runs_.size());
+        RECT rr{x + Sc(8), y, R, y + lh};
+        TextRight(dc, rowTxt, rr, mono, text2);
+    }
+    y += lh + Sc(6);
+
+    // --- bottom detail (about 30%), three columns ------------------------------------------------
+    int detH = std::max(Sc(150), (int)((rc.bottom - rc.top) * 30 / 100));
+    RECT det{rc.left, rc.bottom - detH, rc.right, rc.bottom};
+
+    // --- the table: full width, every Console column ------------------------------------------------
+    {
+        int wDip = MulDiv(R - L, 96, (int)host_->Dpi());
+        int fixed = 30 + 60 + 170 + 150 + 80 + 110 + 150;
+        int pathW = std::max(200, wDip - fixed - 12);
+        listCon_.SetColumns({{L"!", 30}, {L"TYPE", 60}, {L"PATH", pathW}, {L"ARGS", 170}, {L"AS", 150},
+                             {L"TOKEN", 80}, {L"INTEGRITY", 110}, {L"WHEN", 150}});
+    }
+    rcList_ = {L, y, R, det.top - Sc(6)};
+    if (rcList_.bottom < rcList_.top + Sc(60)) rcList_.bottom = rcList_.top + Sc(60);
+    listCon_.Paint(dc, rcList_, Ctx(), focus_ == Focus::List);
+
+    FillSolid(dc, det, hc ? GetSysColor(COLOR_WINDOW) : t.panel);
+    HLine(dc, det.left, det.right, det.top, border);
+    int colW = (det.right - det.left) / 3;
+    VLine(dc, det.left + colW, det.top, det.bottom, border);
+    VLine(dc, det.left + 2 * colW, det.top, det.bottom, border);
+    const int rowH = Sc(18), keyW = Sc(56);
+    const int save = SaveDC(dc);
+
+    auto column = [&](int i, int* X, int* XR, int* dy) {
+        *X = det.left + i * colW + Sc(10);
+        *XR = det.left + (i + 1) * colW - Sc(10);
+        *dy = det.top + Sc(6);
+        RestoreDC(dc, save);
+        SaveDC(dc);
+        IntersectClipRect(dc, det.left + i * colW + 1, det.top + 1, det.left + (i + 1) * colW, det.bottom);
+    };
+    int X, XR, dy;
+    auto head = [&](const std::wstring& s) {
+        RECT r{X, dy, XR, dy + rowH};
+        TextLeft(dc, s, r, cap, text3);
+        dy += rowH + Sc(2);
+    };
+    auto kv = [&](const std::wstring& k, const std::wstring& v, COLORREF vc) {
+        RECT kr{X, dy, X + keyW, dy + rowH}, vr{X + keyW, dy, XR, dy + rowH};
+        TextLeft(dc, k, kr, mono, text3);
+        TextLeft(dc, v, vr, mono, vc);
+        dy += rowH;
+    };
+
+    // Column 1: the selected launch.
+    column(0, &X, &XR, &dy);
+    if (const LastRun* r = SelectedRun()) {
+        RECT nr{X, dy, XR, dy + rowH};
+        TextLeft(dc, FileNameOf(r->path), nr, f.semi, text1);
+        dy += rowH + Sc(4);
+        kv(L"path", r->path, text2);
+        kv(L"args", r->args.empty() ? L"-" : r->args, text2);
+        kv(L"as", IdentityLabel(r->who, r->mode, r->account), Elevated(r->who) ? warn : text1);
+        kv(L"il", r->integrity.empty() ? L"-" : r->integrity, warn);
+        kv(L"when", WhenText(r->when), text2);
+        dy += Sc(4);
+        RECT hr{X, dy, XR, dy + rowH};
+        TextLeft(dc, L"Enter re-fills the form (does not run)", hr, cap, text3);
+    } else {
+        head(L"SELECTED LAUNCH");
+        RECT hr{X, dy, XR, dy + rowH};
+        TextLeft(dc, view_.empty() ? L"No launches match." : L"Select a row (Up/Down in the table).", hr, mono,
+                 text3);
+    }
+
+    // Column 2: the request Run will make, and how.
+    column(1, &X, &XR, &dy);
+    head(L"REQUEST");
+    kv(L"as", WhoKey(who_), Elevated((int)who_) ? warn : text1);
+    kv(L"token", mode_ == TokenMode::Limited ? L"limited" : L"full", text1);
+    if (who_ == Who::AnotherUser)
+        kv(L"acct", accounts_.empty() ? L"(none)" : accounts_[accountIdx_].name, text1);
+    kv(L"cwd", work_.Text().empty() ? L"(target's folder)" : work_.Text(), text1);
+    kv(L"sys/ti", allowElevated_ ? L"ON" : L"off", allowElevated_ ? warn : text1);
+    dy += Sc(4);
+    {
+        std::wstring how = HowText();
+        int h = WrapH(dc, cap, how, XR - X);
+        RECT hr{X, dy, XR, dy + h};
+        DrawText(dc, how, hr, cap, text2, DT_WORDBREAK | DT_LEFT);
+    }
+
+    // Column 3: the Windows tools, launched at the selected identity.
+    column(2, &X, &XR, &dy);
+    head(L"WINDOWS TOOLS  (at the identity in REQUEST)");
+    {
+        int half = (XR - X - gap) / 2;
+        int top = dy;
+        for (size_t i = 0; i < tools_.size(); i++) {
+            int rows = (int)(tools_.size() + 1) / 2;
+            int c = (int)i / rows, r = (int)i % rows;
+            RECT br{X + c * (half + gap), top + r * (rowH + Sc(3)), X + c * (half + gap) + half,
+                    top + r * (rowH + Sc(3)) + rowH};
+            if (br.bottom > det.bottom) continue;
+            SqButton(dc, br, tools_[i].label, ID_TOOL, (int)i, false, !running, false, mono);
+        }
+    }
+    RestoreDC(dc, save);
+}
+
 void RunAsModule::DrawFocusRing(HDC dc) {
     const Theme& t = host_->Theme();
     if (focus_ == Focus::Click) {
@@ -653,8 +1366,20 @@ void RunAsModule::DrawFocusRing(HDC dc) {
 }
 
 void RunAsModule::Paint(HDC dc, const RECT& rc) {
+    Layout ly = host_->Layout();
+    if (!layoutKnown_ || ly != lastLayout_) {
+        // The filter and the sort column belong to the layout's own list: rebuild the rows for it.
+        layoutKnown_ = true;
+        lastLayout_ = ly;
+        if (ly == Layout::Baseline && focus_ == Focus::Search) focus_ = Focus::Path;   // no search box there
+        SortRuns();
+        RefillList();
+    }
+    rcPath_ = rcArgs_ = rcWork_ = rcList_ = rcSearch_ = rcSplit_ = RECT{};
     FillSolid(dc, rc, host_->Theme().bg);
-    DrawForm(dc, rc);
+    if (ly == Layout::ThreePane) DrawThreePane(dc, rc);
+    else if (ly == Layout::Console) DrawConsole(dc, rc);
+    else DrawForm(dc, rc);
     DrawFocusRing(dc);
 }
 
@@ -817,24 +1542,116 @@ void RunAsModule::OnClickId(int id, int data) {
     switch (id) {
     case ID_BROWSE: Browse(); break;
     case ID_WHO:
-        if (WhoEnabled((Who)data)) { who_ = (Who)data; Invalidate(); }
+        if (WhoEnabled((Who)data)) { who_ = (Who)data; Chrome(); Invalidate(); }
         break;
-    case ID_MODE: mode_ = (TokenMode)data; Invalidate(); break;
+    case ID_MODE: mode_ = (TokenMode)data; Chrome(); Invalidate(); break;
     case ID_ALLOW:
         allowElevated_ = !allowElevated_;
         if (!allowElevated_ && (who_ == Who::System || who_ == Who::TrustedInstaller))
             who_ = Who::ThisAdmin;
+        Chrome();
         Invalidate();
         break;
     case ID_ACCOUNT:
         if (!accounts_.empty()) {
             accountIdx_ = (accountIdx_ + 1) % (int)accounts_.size();
+            Chrome();
             Invalidate();
         }
         break;
     case ID_RUN: RunTarget(); break;
     case ID_TOOL: RunTool(data); break;
+    case ID_SHOW: showWho_ = data; RefillList(); Invalidate(); break;
     }
+}
+
+// F3: the next identity the switch allows (SYSTEM/TI are skipped while it is off).
+void RunAsModule::CycleWho() {
+    for (int k = 1; k <= 4; k++) {
+        Who w = (Who)(((int)who_ + k) % 4);
+        if (WhoEnabled(w)) { who_ = w; break; }
+    }
+    Chrome();
+    Invalidate();
+}
+
+void RunAsModule::SetDetailWidthFromX(int x) {
+    RECT cr{};
+    GetClientRect(hwnd_, &cr);
+    int px = cr.right - (x - splitGrab_);
+    int dip = MulDiv(px, 96, (int)host_->Dpi());
+    int maxDip = std::max(240, MulDiv(cr.right, 96, (int)host_->Dpi()) - 385);
+    detailW_ = std::clamp(dip, 240, maxDip);
+}
+
+// ============================================================================================
+// Layout chrome: Three-Pane tree nodes, Console F-keys and header line
+
+std::vector<NavNode> RunAsModule::NavNodes() {
+    std::vector<NavNode> n;
+    n.push_back({0, 0, L"RUN AS", L"", true, false});
+    const Who order[4] = {Who::ThisAdmin, Who::AnotherUser, Who::System, Who::TrustedInstaller};
+    for (Who w : order) {
+        NavNode node;
+        node.id = 1 + (int)w;
+        node.label = WhoName(w);
+        if (w == Who::AnotherUser) node.note = std::to_wstring(accounts_.size()) + L" accts";
+        if (!WhoEnabled(w)) { node.note = L"locked"; node.dim = true; }
+        n.push_back(node);
+    }
+    // The newest launches, newest first, whatever order the list is sorted in. Selecting one re-fills
+    // the form (like Enter in the list); it never runs anything.
+    recentNav_ = runs_;
+    std::stable_sort(recentNav_.begin(), recentNav_.end(),
+                     [](const LastRun& a, const LastRun& b) { return a.when > b.when; });
+    if (recentNav_.size() > kNavRecentMax) recentNav_.resize(kNavRecentMax);
+    n.push_back({0, 0, L"RECENT", runs_.empty() ? L"none" : std::to_wstring(runs_.size()), true, false});
+    for (size_t k = 0; k < recentNav_.size(); k++) {
+        const LastRun& r = recentNav_[k];
+        NavNode node;
+        node.id = kNavRecent + (int)k;
+        node.label = FileNameOf(r.path);
+        // Short: the host's tree column is narrow.
+        node.note = r.who == (int)Who::ThisAdmin ? L"admin"
+                  : r.who == (int)Who::TrustedInstaller ? L"TI" : WhoText(r.who, r.account);
+        if (r.mode == (int)TokenMode::Limited) node.note += L" \u00B7 ltd";
+        n.push_back(node);
+    }
+    return n;
+}
+
+void RunAsModule::OnNavSelect(int id) {
+    if (id >= 1 && id <= 4) {
+        Who w = (Who)(id - 1);
+        if (!Gate(w)) return;   // says to turn the switch on; nothing else changes
+        who_ = w;
+        Invalidate();
+        return;
+    }
+    int k = id - kNavRecent;
+    if (k >= 0 && k < (int)recentNav_.size()) Refill(recentNav_[k]);
+}
+
+std::vector<FKey> RunAsModule::FKeys() {
+    return {
+        {VK_F5, L"F5", L"Run"},
+        {VK_F2, L"F2", L"Browse"},
+        {VK_F3, L"F3", L"Identity"},
+        {VK_F4, L"F4", L"Full/Limited"},
+        {VK_F6, L"F6", L"Account"},
+        {VK_F8, L"F8", L"Allow SYSTEM/TI"},
+        {VK_OEM_2, L"/", L"Search"},
+        {VK_TAB, L"Tab", L"Next field"},
+    };
+}
+
+std::wstring RunAsModule::ConsoleHeader() {
+    std::wstring s = L"user=" + userName_ + L" elevated=" + (host_->IsElevated() ? L"yes" : L"NO") +
+                     L" as=" + WhoKey(who_) + L" token=" + (mode_ == TokenMode::Limited ? L"limited" : L"full") +
+                     L" sys/ti=" + (allowElevated_ ? L"ON" : L"off") +
+                     L" accounts=" + std::to_wstring(accounts_.size()) + L" recent=" + std::to_wstring(runs_.size());
+    if (demo_) s += L" src=demo";
+    return s;
 }
 
 // ============================================================================================
@@ -846,6 +1663,7 @@ void RunAsModule::CycleFocusStops(bool back) {
     stops.push_back({Focus::Path, 0, 0});
     stops.push_back({Focus::Args, 0, 0});
     stops.push_back({Focus::Work, 0, 0});
+    if (!IsRectEmpty(&rcSearch_)) stops.push_back({Focus::Search, 0, 0});
     for (const Click& c : clicks_) stops.push_back({Focus::Click, c.id, c.data});
     stops.push_back({Focus::List, 0, 0});
     int cur = -1;
@@ -863,10 +1681,16 @@ void RunAsModule::CycleFocusStops(bool back) {
 bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (!host_) return false;
     PaintCtx c = Ctx();
+    ListView& lv = List();
     int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
     POINT p{x, y};
     switch (msg) {
     case WM_MOUSEMOVE: {
+        if (splitDrag_) {
+            if (!(w & MK_LBUTTON)) { ReleaseCapture(); return true; }
+            SetDetailWidthFromX(x);
+            return true;
+        }
         if (Edit* e = DragEdit()) {
             if (!(w & MK_LBUTTON)) { e->CancelDrag(); return true; }   // button released elsewhere
             return e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);
@@ -874,17 +1698,21 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         int nid = -1, nd = 0;
         for (int i = (int)clicks_.size() - 1; i >= 0; i--)
             if (PtInRect(&clicks_[i].rc, p)) { nid = clicks_[i].id; nd = clicks_[i].data; break; }
-        bool ch = list_.OnMouse(msg, x, y, rcList_, c);
+        bool ch = lv.OnMouse(msg, x, y, rcList_, c);
         if (nid != hoverId_ || nd != hoverData_) { hoverId_ = nid; hoverData_ = nd; ch = true; }
         return ch;
     }
     case WM_LBUTTONDOWN: {
-        if (PtInRect(&rcPath_, p)) { focus_ = Focus::Path; path_.OnMouse(hwnd_, msg, x, y, rcPath_, c); return true; }
-        if (PtInRect(&rcArgs_, p)) { focus_ = Focus::Args; args_.OnMouse(hwnd_, msg, x, y, rcArgs_, c); return true; }
-        if (PtInRect(&rcWork_, p)) { focus_ = Focus::Work; work_.OnMouse(hwnd_, msg, x, y, rcWork_, c); return true; }
+        if (PtInRect(&rcSplit_, p)) {
+            splitDrag_ = true;
+            splitGrab_ = x - rcSplit_.right;
+            SetCapture(hwnd_);
+            return true;
+        }
+        if (Edit* e = EditAt(p)) { focus_ = FocusOf(e); e->OnMouse(hwnd_, msg, x, y, EditRect(e), c); return true; }
         if (PtInRect(&rcList_, p)) {
             focus_ = Focus::List;
-            list_.OnMouse(msg, x, y, rcList_, c);
+            lv.OnMouse(msg, x, y, rcList_, c);
             return true;
         }
         for (int i = (int)clicks_.size() - 1; i >= 0; i--)
@@ -896,14 +1724,15 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         return false;
     }
     case WM_LBUTTONUP:
+        if (splitDrag_) { ReleaseCapture(); return true; }   // WM_CAPTURECHANGED saves the width
         if (Edit* e = DragEdit()) return e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);
-        return list_.OnMouse(msg, x, y, rcList_, c);
+        return lv.OnMouse(msg, x, y, rcList_, c);
     case WM_LBUTTONDBLCLK: case WM_RBUTTONUP: {
-        Edit* e = PtInRect(&rcPath_, p) ? &path_ : PtInRect(&rcArgs_, p) ? &args_ : PtInRect(&rcWork_, p) ? &work_ : nullptr;
+        Edit* e = EditAt(p);
         // A double-click on the history list is its re-fill gesture (the list times the second
         // button-down); anywhere else it is ignored, so a double-click can't run a button twice.
         if (!e) return msg == WM_LBUTTONDBLCLK && PtInRect(&rcList_, p) ? OnInput(WM_LBUTTONDOWN, w, l) : false;
-        focus_ = e == &path_ ? Focus::Path : e == &args_ ? Focus::Args : Focus::Work;
+        focus_ = FocusOf(e);
         if (msg == WM_RBUTTONUP) Invalidate();   // show the focus before the menu opens
         e->OnMouse(hwnd_, msg, x, y, EditRect(e), c);
         return true;
@@ -911,27 +1740,60 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(w);
         POINT sp{x, y}; ScreenToClient(hwnd_, &sp);
-        if (PtInRect(&rcList_, sp)) return list_.OnWheel(delta, rcList_, c);
+        if (PtInRect(&rcList_, sp)) return lv.OnWheel(delta, rcList_, c);
         return false;
     }
     case WM_CHAR: {
         wchar_t ch = (wchar_t)w;
-        if (focus_ == Focus::Path) return path_.OnChar(ch);
-        if (focus_ == Focus::Args) return args_.OnChar(ch);
-        if (focus_ == Focus::Work) return work_.OnChar(ch);
+        if (swallowSlash_) { swallowSlash_ = false; if (ch == L'/') return false; }
+        if (Edit* e = FocusedEdit()) return e->OnChar(ch);
         return false;
     }
     case WM_KEYDOWN: {
         WPARAM vk = w;
+        swallowSlash_ = false;
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        // Function keys work from any focus (and from the Console F-key bar, which sends them here).
+        switch (vk) {
+        case VK_F2: case VK_F3: case VK_F4: case VK_F5: case VK_F6: case VK_F8:
+            if (hwnd_ && GetFocus() != hwnd_) SetFocus(hwnd_);
+            if (vk == VK_F5) RunTarget();
+            else if (vk == VK_F2) Browse();
+            else if (vk == VK_F3) CycleWho();
+            else if (vk == VK_F4) OnClickId(ID_MODE, (int)(mode_ == TokenMode::Full ? TokenMode::Limited
+                                                                                     : TokenMode::Full));
+            else if (vk == VK_F6) OnClickId(ID_ACCOUNT, 0);
+            else OnClickId(ID_ALLOW, 0);
+            return true;
+        }
+        Edit* fe = FocusedEdit();
+        // '/' jumps to the search box from anywhere but a text field. l == 0 is the F-key bar's click,
+        // which also works while a field has focus and is followed by no WM_CHAR.
+        if (vk == VK_OEM_2 && !shift && host_->Layout() != Layout::Baseline && (!fe || l == 0)) {
+            if (hwnd_ && GetFocus() != hwnd_) SetFocus(hwnd_);
+            focus_ = Focus::Search;
+            search_.SelectAll();
+            swallowSlash_ = l != 0;   // a real key press is followed by WM_CHAR '/'
+            return true;
+        }
         if (vk == VK_TAB) { CycleFocusStops(shift); return true; }
-        if (focus_ == Focus::Path) { if (vk == VK_RETURN) { RunTarget(); return true; } return path_.OnKey(vk, hwnd_); }
-        if (focus_ == Focus::Args) { if (vk == VK_RETURN) { RunTarget(); return true; } return args_.OnKey(vk, hwnd_); }
-        if (focus_ == Focus::Work) { if (vk == VK_RETURN) { RunTarget(); return true; } return work_.OnKey(vk, hwnd_); }
+        if (fe == &search_) {
+            if (vk == VK_ESCAPE) { search_.SetText(L""); RefillList(); return true; }
+            if (vk == VK_RETURN || vk == VK_DOWN) {
+                focus_ = Focus::List;
+                if (lv.Selected() < 0 && lv.RowCount() > 0) lv.Select(0);
+                return true;
+            }
+            return search_.OnKey(vk, hwnd_);
+        }
+        if (fe) {   // path / args / working folder: Enter runs
+            if (vk == VK_RETURN) { RunTarget(); return true; }
+            return fe->OnKey(vk, hwnd_);
+        }
         if (focus_ == Focus::List) {
             if (vk == VK_UP || vk == VK_DOWN || vk == VK_PRIOR || vk == VK_NEXT ||
                 vk == VK_HOME || vk == VK_END || vk == VK_RETURN) {
-                list_.OnKey(vk, rcList_, c);
+                lv.OnKey(vk, rcList_, c);
                 return true;
             }
             return false;
