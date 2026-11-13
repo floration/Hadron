@@ -175,20 +175,29 @@ and their output is committed so a C++-only build works. Copyrighted inputs (ven
 (the owner's NVRAM snapshot) are never committed.
 
 ## core/ui (theme, layouts, widgets)
-- **Two layouts** (`ui::Layout`): `Baseline` (default, Segoe UI card look) and `Console` (dense, Consolas). The
-  layout changes widget metrics and fonts, not the palette.
-- **Four themes** (`ui::ThemeId`): `Light`, `Dark`, `Fun` (colourful), `Boring` (the "Reading Room" look: warm charcoal with a sand accent, which it keeps
-  whatever the Windows accent is). Each supplies the neutral
-  tokens (bg/panels/border/text/warn/bad/good) in `ThemeBase()`.
+- **Three layouts** (`ui::Layout`, owner 2026-11-13), each matching its board on the UI directions canvas:
+  - `Baseline` (board 1, default): Segoe UI card look, module sidebar in the suite.
+  - `ThreePane` (board 7): the host draws a navigation tree (every module, and under the active one its
+    `Module::NavNodes()`) with a draggable splitter (`[host] tree_w`), wheel/scrollbar and Alt+Up/Down; the module
+    shows its list in the middle and its detail in a right pane. Square corners, 24px rows.
+  - `Console` (board 4): no sidebar. The host draws a one-line module tab strip (`1 DISKMAP  2 BIOS …`) followed by
+    `Module::ConsoleHeader()`, and an F-key bar from `Module::FKeys()` above the status bar (a click sends that key
+    through `OnInput`). The module shows a dense full-width Consolas table with its detail split in three columns
+    along the bottom.
+  Modules call `IHost::ChromeChanged()` when their sections, F-keys or header change. In the suite Ctrl+1..9 switches
+  module in every layout.
+- **Two themes** (`ui::ThemeId`, owner 2026-11-13): `Light` and `Dark`. Neutral tokens (bg/panels/border/text/warn/
+  bad/good) come from the canvas: in Dark each layout uses its own board (`ThemeBase(id, layout)`), in Light every
+  layout uses board 5 "Paper". Only the accent follows Windows. Saved `fun`/`boring` values fall back to Dark.
 - **Accent**: the main accent is the live **Windows accent colour** (`SystemAccent()` reads
   `HKCU\...\DWM\AccentColor`, then `ColorizationColor`, then `DwmGetColorizationColor`). Three more accents are the
   base hue rotated +90/+180/+270 (`RotateHue`, own HSL maths) — a square/tetradic split. When the Windows accent is
-  achromatic (grey/black/white, `IsAchromatic`), the theme's own `FallbackAccent()` is used. `ResolveLive(id)` does
-  this; `Resolve(id, accent)` is the deterministic form used by `--screenshot`/`--selftest` so goldens are stable.
-- **Host owns theme + layout**, chosen by `--theme light|dark|fun|boring` and `--layout baseline|console`. `--accent RRGGBB` (screenshot only) stands in for the Windows accent so design review can show accent-following deterministically; an achromatic value takes the theme fallback, as live. Modules
+  achromatic (grey/black/white, `IsAchromatic`), the board's own `FallbackAccent(id, layout)` is used. `ResolveLive(id, layout)` does
+  this; `Resolve(id, accent, layout)` is the deterministic form used by `--screenshot`/`--selftest` so goldens are stable.
+- **Host owns theme + layout**, chosen by `--theme light|dark` and `--layout baseline|threepane|console`. `--accent RRGGBB` (screenshot only) stands in for the Windows accent so design review can show accent-following deterministically; an achromatic value takes the theme fallback, as live. Modules
   read them through `IHost::Theme()`, `IHost::Fonts()`, `IHost::Layout()`; the suite chrome themes too. High contrast
   (`Theme::highContrast`) makes widgets fall back to the system colours. In an interactive run the status bar has
-  two chips, "Layout" (toggle) and "Theme" (click: next, right-click: previous), also on Ctrl+Shift+L / Ctrl+Shift+T.
+  two chips, "Layout" and "Theme" (click: next, right-click: previous), also on Ctrl+Shift+L / Ctrl+Shift+T.
   The choice is saved in `[host]` of settings.ini and shared by every exe; a `--layout`/`--theme` flag overrides it for
   that run. `--screenshot`/`--selftest` ignore the saved choice. On a change the host calls `OnDpiChanged` on every
   created module so layout-dependent fonts are rebuilt.
