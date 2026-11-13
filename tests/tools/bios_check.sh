@@ -4,7 +4,7 @@
 # 1. Builds the make_bios_snapshot.py fixture in a fresh temp folder from the embedded settings.db and
 #    zips it (Python zipfile, deflated) so both snapshot sources are exercised. Deletes nothing.
 # 2. --selftest standalone (folder fixture) and in the suite (--snapshot zip).
-# 3. Screenshots, one xvfb-run each: Baseline/Console x dark/light from the folder fixture, a non-solo
+# 3. Screenshots, one xvfb-run each: Baseline/Three-Pane/Console x dark/light from the folder fixture, a non-solo
 #    suite shot from the zip, the empty state, a goal shot (Goal column colours) and a detail-pane shot
 #    of a sourced entry (--select: Basis row and "Sources for numbers"), and the guarded-write plan
 #    overlay and value editor over a MockBackend (--write-demo plan|edit).
@@ -58,4 +58,9 @@ shot bios-detail-iccmax-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --goa
 # nothing real is read or written (the --screenshot latch blocks the real backend anyway).
 shot bios-write-plan "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --write-demo plan
 shot bios-write-edit-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --write-demo edit
+# The other layouts' own arrangements (layout spec 2026-11-13): Console's GOAL column and bottom
+# three-column detail with a goal, and the value editor in the Three-Pane and Console detail panes.
+shot bios-console-goal-iccmax-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --layout console --goal 5 --select "IA ICC Max Current Limit Override"
+shot bios-threepane-write-edit-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --layout threepane --write-demo edit
+shot bios-console-write-edit-dark "$BUILD/HadronBios.exe" --fixture "$FIX/snap" --layout console --write-demo edit
 echo "fixture left at $FIX (temp; not deleted by this script)"
