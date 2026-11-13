@@ -373,8 +373,8 @@ private:
     bool Console() const { return host_ && host_->Layout() == Layout::Console; }
     bool ThreePane() const { return host_ && host_->Layout() == Layout::ThreePane; }
     // core's ListView header and row heights per layout (widgets.cpp; private there), for scrolling and hit tests.
-    int LvHead() const { return Sc(Console() ? 24 : ThreePane() ? 26 : 32); }
-    int LvRow() const { return Sc(Console() ? 22 : ThreePane() ? 24 : 30); }
+    int LvHead() const { return ui::ListView::HeaderHeight(host_ ? host_->Layout() : Layout::Baseline, host_ ? host_->Dpi() : 96); }
+    int LvRow() const { return ui::ListView::RowHeight(host_ ? host_->Layout() : Layout::Baseline, host_ ? host_->Dpi() : 96); }
     // Corner radius: Baseline's own, Console's small one, and Three-Pane's square corners (2 px at most).
     int Rad(int baseline, int console) const { return ThreePane() ? Sc(2) : Console() ? Sc(console) : Sc(baseline); }
     // After a paint: when the tree sections, the F-keys or the header line changed, tell the host (posted, never

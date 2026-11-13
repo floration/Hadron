@@ -56,6 +56,10 @@ public:
     // so ink never costs legibility. Never the only signal: say the status in the cell text too.
     enum class Ink : unsigned char { Normal, Warn, Bad, Good };
 
+    // Row and header heights per layout, so modules that lay out around a list use the same numbers.
+    static int RowHeight(Layout l, UINT dpi);
+    static int HeaderHeight(Layout l, UINT dpi);
+
     void SetColumns(std::vector<Column> cols) { cols_ = std::move(cols); }
     void SetRows(std::vector<std::vector<std::wstring>> rows);
     // Optional, parallel to the rows of the last SetRows; missing entries are Normal. SetRows clears it,

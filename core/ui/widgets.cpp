@@ -100,12 +100,14 @@ bool ScrollBar::OnMouse(UINT msg, int x, int y, const RECT& track) {
 
 // ================================ ListView ====================================================
 
-int ListView::RowH(const PaintCtx& c) const {
-    return S(c.layout == Layout::Console ? 20 : c.layout == Layout::ThreePane ? 24 : 30, c.dpi);   // board 4: dense
+int ListView::RowHeight(Layout l, UINT dpi) {
+    return S(l == Layout::Console ? 20 : l == Layout::ThreePane ? 24 : 30, dpi);   // board 4: dense
 }
-int ListView::HeaderH(const PaintCtx& c) const {
-    return S(c.layout == Layout::Console ? 22 : c.layout == Layout::ThreePane ? 26 : 32, c.dpi);
+int ListView::HeaderHeight(Layout l, UINT dpi) {
+    return S(l == Layout::Console ? 22 : l == Layout::ThreePane ? 26 : 32, dpi);
 }
+int ListView::RowH(const PaintCtx& c) const    { return RowHeight(c.layout, c.dpi); }
+int ListView::HeaderH(const PaintCtx& c) const { return HeaderHeight(c.layout, c.dpi); }
 
 RECT ListView::BodyRect(const RECT& rc, const PaintCtx& c) const {
     RECT b = rc;
