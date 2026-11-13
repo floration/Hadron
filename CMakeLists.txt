@@ -65,7 +65,6 @@ target_compile_definitions(hadron_core PRIVATE
 include(cmake/HadronModule.cmake)
 
 # --- modules (each builds a static lib + its standalone exe) -------------------------------------
-hadron_add_module(hello NAME HadronHello DESC "Hadron Hello module")
 # Dev/reference gallery for core/ui; builds HadronUikit.exe but is not in the suite catalogue.
 hadron_add_module(uikit NAME HadronUikit DESC "Hadron core/ui gallery")
 hadron_add_module(diskmap NAME HadronDiskMap DESC "Hadron DiskMap: drive-space treemap and folder list")
@@ -136,4 +135,4 @@ add_executable(Hadron WIN32
   app/hadron.cpp
   core/host/registry.cpp
   "${HADRON_SUITE_RC}")
-target_link_libraries(Hadron PRIVATE mod_hello mod_diskmap mod_runas mod_bios mod_services hadron_core)
+target_link_libraries(Hadron PRIVATE mod_diskmap mod_runas mod_bios mod_services hadron_core)

@@ -55,8 +55,7 @@ jobs:
         run: |
           export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
           wineboot -i || true
-          wine build/HadronHello.exe --selftest
-          wine build/HadronHello.exe --selftest-update
+          wine build/Hadron.exe --selftest-update
           wine build/HadronUikit.exe --selftest
           python3 tests/fixtures/make_diskmap_tree.py dmfix
           wine build/HadronDiskMap.exe --selftest
@@ -69,8 +68,7 @@ jobs:
           export WINEDEBUG=-all WINEPREFIX="$PWD/.wine"
           mkdir -p shots
           shot() { xvfb-run -a -s "-screen 0 1600x1000x24 -dpi 96" wine "$@"; }
-          shot build/HadronHello.exe --screenshot shots/hello-standalone.png
-          shot build/Hadron.exe --screenshot shots/hello-suite.png
+          shot build/Hadron.exe --screenshot shots/suite-default.png
           for th in light dark; do
             for ly in baseline threepane console; do
               shot build/HadronUikit.exe --theme $th --layout $ly --screenshot shots/uikit-$ly-$th.png
@@ -138,8 +136,7 @@ jobs:
       - name: Selftests
         shell: pwsh
         run: |
-          build\HadronHello.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          build\HadronHello.exe --selftest-update; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          build\Hadron.exe --selftest-update; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronUikit.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tests\fixtures\make_diskmap_tree.py dmfix; if ($LASTEXITCODE) { exit $LASTEXITCODE }
           build\HadronDiskMap.exe --selftest; if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -242,8 +239,7 @@ jobs:
         shell: pwsh
         run: |
           mkdir shots
-          build\HadronHello.exe --screenshot shots\hello-standalone.png
-          build\Hadron.exe --screenshot shots\hello-suite.png
+          build\Hadron.exe --screenshot shots\suite-default.png
           foreach ($th in 'light','dark') {
             foreach ($ly in 'baseline','console') {
               build\HadronUikit.exe --theme $th --layout $ly --screenshot "shots\uikit-$ly-$th.png"

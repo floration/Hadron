@@ -22,8 +22,8 @@ enum class Admin { None, Optional, Required };
 enum class LogLevel { Debug, Info, Warn, Error };
 
 struct ModuleInfo {
-    const wchar_t* id;       // "hello": used by --module/--solo and in class/resource names
-    const wchar_t* name;     // "Hello"
+    const wchar_t* id;       // "diskmap": used by --module/--solo and in class/resource names
+    const wchar_t* name;     // "DiskMap"
     const wchar_t* summary;  // one line for the sidebar/catalog
     Admin admin;
 };
