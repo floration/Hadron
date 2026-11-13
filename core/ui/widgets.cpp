@@ -101,10 +101,10 @@ bool ScrollBar::OnMouse(UINT msg, int x, int y, const RECT& track) {
 // ================================ ListView ====================================================
 
 int ListView::RowH(const PaintCtx& c) const {
-    return S(c.layout == Layout::Console ? 22 : c.layout == Layout::ThreePane ? 24 : 30, c.dpi);
+    return S(c.layout == Layout::Console ? 20 : c.layout == Layout::ThreePane ? 24 : 30, c.dpi);   // board 4: dense
 }
 int ListView::HeaderH(const PaintCtx& c) const {
-    return S(c.layout == Layout::Console ? 24 : c.layout == Layout::ThreePane ? 26 : 32, c.dpi);
+    return S(c.layout == Layout::Console ? 22 : c.layout == Layout::ThreePane ? 26 : 32, c.dpi);
 }
 
 RECT ListView::BodyRect(const RECT& rc, const PaintCtx& c) const {
@@ -350,7 +350,8 @@ bool IsWordChar(wchar_t ch) { return iswalnum(ch) || ch == L'_'; }
 
 void TextField::Paint(HDC dc, const RECT& rc, const PaintCtx& c, bool focused) {
     Pal p{c.theme};
-    RoundFill(dc, rc, S(6, c.dpi), p.panel2(), focused ? p.accent() : p.border());
+    // Square outside Baseline (boards 4 and 7).
+    RoundFill(dc, rc, c.layout == Layout::Baseline ? S(6, c.dpi) : 0, p.panel2(), focused ? p.accent() : p.border());
     const int pad = S(10, c.dpi);
     RECT tr{rc.left + pad, rc.top, rc.right - pad, rc.bottom};
     if (text_.empty()) {
