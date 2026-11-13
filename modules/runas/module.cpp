@@ -1479,6 +1479,8 @@ void RunAsModule::DoRun(const LaunchRequest& req) {
 }
 
 void RunAsModule::RunTarget() {
+    // The worker may be inside CreateProcessWithLogonW with pwd_: never touch the password while it runs.
+    if (worker_.Running()) { resultLine_ = L"A launch is still running."; resultBad_ = true; Invalidate(); return; }
     if (path_.Text().empty()) {
         resultLine_ = L"Choose a program or file first.";
         resultBad_ = true;
@@ -1755,7 +1757,11 @@ bool RunAsModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         // Function keys work from any focus (and from the Console F-key bar, which sends them here).
         switch (vk) {
-        case VK_F2: case VK_F3: case VK_F4: case VK_F5: case VK_F6: case VK_F8:
+        case VK_F8:
+            // The SYSTEM/TI switch from the keyboard only where the bar shows it (Console); it is still never persisted.
+            if (!host_ || host_->Layout() != Layout::Console) return false;
+            [[fallthrough]];
+        case VK_F2: case VK_F3: case VK_F4: case VK_F5: case VK_F6:
             if (hwnd_ && GetFocus() != hwnd_) SetFocus(hwnd_);
             if (vk == VK_F5) RunTarget();
             else if (vk == VK_F2) Browse();

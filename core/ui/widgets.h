@@ -33,6 +33,7 @@ public:
     int  MaxOffset() const { return content_ > viewport_ ? content_ - viewport_ : 0; }
     bool Visible() const { return content_ > viewport_; }
     bool Dragging() const { return dragging_; }
+    void CancelDrag() { dragging_ = false; }   // call on WM_CAPTURECHANGED
 
     void Paint(HDC dc, const RECT& track, const PaintCtx& c);
     // msg: WM_LBUTTONDOWN / WM_MOUSEMOVE / WM_LBUTTONUP. Returns true if the offset changed.

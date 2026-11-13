@@ -2397,6 +2397,9 @@ bool DiskMapModule::OnKey(WPARAM vk, bool alt) {
 
 bool DiskMapModule::OnInput(UINT msg, WPARAM w, LPARAM l) {
     if (!host_) return false;
+    // F-key bar clicks (lParam 0) mean the command on the bar, whatever has keyboard focus.
+    if (msg == WM_KEYDOWN && l == 0 && w == VK_HOME) { if (st_ == St::Done) SetView(0); return true; }
+    if (msg == WM_KEYDOWN && l == 0 && w == VK_RETURN) { OpenSelected(false); return true; }
     PaintCtx c = Ctx();
     int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
     POINT p{x, y};

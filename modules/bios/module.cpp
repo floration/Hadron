@@ -1302,7 +1302,7 @@ void BiosModule::StageRecommended() {
     if (n) m += L" Review them with \"Review and write…\".";
     SetNotice(m, 0);
     host_->Log(LogLevel::Info, (L"bios: " + m).c_str());
-    if (n) { filter_ = F_STAGED; }
+    if (n) { filter_ = F_STAGED; form_ = -1; }   // a Three-Pane menu form would hide staged settings outside it
     Refilter();
 }
 

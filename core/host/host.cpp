@@ -165,6 +165,7 @@ private:
     struct TreeRow { int module; int nav; int depth; std::wstring label, note; bool header, dim; };
     std::vector<TreeRow> treeRows_;
     int treeW_ = 264;                 // 96-DPI units; [host] tree_w
+    int treeCursor_ = -1;             // last row Ctrl+Shift+Up/Down stepped to (-1: start from NavSelected)
     bool splitDrag_ = false;
     ui::ScrollBar treeSb_;
     std::vector<FKey> fkeys_;         // Console: the active module's F-key bar
@@ -298,20 +299,33 @@ void Host::RebuildChromeModel() {
 
 void Host::StepTree(int dir) {
     if (treeRows_.empty() || active_ < 0) return;
-    int sel = modules_[active_]->NavSelected(), cur = 0;
-    for (int i = 0; i < (int)treeRows_.size(); i++)
-        if (treeRows_[i].module == active_ && (sel >= 0 ? treeRows_[i].nav == sel : treeRows_[i].depth == 0)) { cur = i; break; }
+    // Walk from the row we stepped to last (treeCursor_), not from NavSelected(): a row the module refuses
+    // (a locked identity, a recent launch that only refills a form) must not trap the walk.
+    int cur = -1;
+    if (treeCursor_ >= 0 && treeCursor_ < (int)treeRows_.size() && treeRows_[treeCursor_].module == active_) cur = treeCursor_;
+    if (cur < 0) {
+        int sel = modules_[active_]->NavSelected();
+        for (int i = 0; i < (int)treeRows_.size(); i++)
+            if (treeRows_[i].module == active_ && (sel >= 0 ? treeRows_[i].nav == sel : treeRows_[i].depth == 0)) { cur = i; break; }
+        if (cur < 0) cur = 0;
+    }
     for (int i = cur + dir; i >= 0 && i < (int)treeRows_.size(); i += dir) {
         const TreeRow row = treeRows_[i];
         if (row.header) continue;
+        bool moduleChange = row.module != active_;
         Activate(row.module);
         if (row.nav >= 0) modules_[row.module]->OnNavSelect(row.nav);
         if (content_[row.module]) InvalidateRect(content_[row.module], nullptr, FALSE);
         RebuildChromeModel();
-        // keep the new row in view
+        // the rows under a module change when it becomes active: find the same row again
+        treeCursor_ = -1;
+        for (int k = 0; k < (int)treeRows_.size(); k++)
+            if (treeRows_[k].module == row.module && treeRows_[k].nav == row.nav && treeRows_[k].depth == row.depth &&
+                treeRows_[k].label == row.label) { treeCursor_ = k; break; }
+        if (treeCursor_ < 0) treeCursor_ = moduleChange ? 0 : i;
         RECT cl; GetClientRect(frame_, &cl);
         RECT b = TreeBody(cl);
-        int y = i * treeRowH(), vh = b.bottom - b.top;
+        int y = treeCursor_ * treeRowH(), vh = b.bottom - b.top;
         if (y < treeSb_.Offset()) treeSb_.SetOffset(y);
         else if (y + treeRowH() > treeSb_.Offset() + vh) treeSb_.SetOffset(y + treeRowH() - vh);
         InvalidateChrome();
@@ -411,7 +425,8 @@ void Host::PaintFKeys(HDC dc, const RECT& cl) {
         int w = ks.cx + S(5, dpi_) + ls.cx + S(2, dpi_);   // +2: GDI extents run short of the drawn glyphs under some fonts
         if (x + w > bar.right - S(8, dpi_)) break;
         RECT kr{x, bar.top, x + ks.cx, bar.bottom}, lr{x + ks.cx + S(5, dpi_), bar.top, x + w, bar.bottom};
-        SetTextColor(dc, t.highContrast ? GetSysColor(COLOR_HIGHLIGHT) : t.accent);
+        // The raw Windows accent can be unreadable on the panel (a pale accent on Paper): fall back to text1.
+        SetTextColor(dc, t.highContrast ? GetSysColor(COLOR_HIGHLIGHT) : ui::Contrast(t.accent, t.panel) >= 4.5 ? t.accent : t.text1);
         DrawTextW(dc, k.key.c_str(), -1, &kr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
         SetTextColor(dc, t.highContrast ? GetSysColor(COLOR_WINDOWTEXT) : t.text2);
         DrawTextW(dc, k.label.c_str(), -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
@@ -533,6 +548,17 @@ void Host::SetLook(ui::Layout l, ui::ThemeId t) {
     for (size_t i = 0; i < modules_.size(); i++)
         if (content_[i]) modules_[i]->OnDpiChanged(dpi_);
     ApplyCaptionColour();
+    if (frame_ && layoutChanged && !shooting_ && !IsZoomed(frame_)) {
+        // Three-Pane's tree and Console's bars take room: grow the window so the content keeps its minimum.
+        RECT cl; GetClientRect(frame_, &cl);
+        RECT cr = ContentRect(cl);
+        int needW = S(kMinContentW, dpi_) - (cr.right - cr.left), needH = S(kMinContentH, dpi_) - (cr.bottom - cr.top);
+        if (needW > 0 || needH > 0) {
+            RECT wr; GetWindowRect(frame_, &wr);
+            SetWindowPos(frame_, nullptr, 0, 0, (wr.right - wr.left) + std::max(0, needW), (wr.bottom - wr.top) + std::max(0, needH),
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
     LayoutContent();
     if (frame_) RedrawWindow(frame_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
     sys::Write(LogLevel::Info, std::wstring(L"look: ") + ui::LayoutName(l) + L" / " + ui::ThemeName(t));
@@ -625,7 +651,7 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_GETMINMAXINFO: {
         if (shooting_) break;   // --screenshot sets its own exact client size
-        RECT r{0, 0, sidebarW() + S(kMinContentW, dpi_), S(kMinContentH, dpi_) + statusH()};
+        RECT r{0, 0, sidebarW() + S(kMinContentW, dpi_), S(kMinContentH, dpi_) + statusH() + topH() + (Con() ? S(22, dpi_) : 0)};
         AdjustWindowRectEx(&r, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrW(h, GWL_EXSTYLE));
         auto* mm = reinterpret_cast<MINMAXINFO*>(l);
         LONG minW = r.right - r.left, minH = r.bottom - r.top;
@@ -658,7 +684,9 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
         RECT cl; GetClientRect(h, &cl);
         if (splitDrag_) {
             int w = MulDiv(p.x, 96, (int)dpi_);
-            treeW_ = std::clamp(w, 180, std::max(180, std::min(480, MulDiv(cl.right, 96, (int)dpi_) / 2)));
+            // Never squeeze the content below the minimum the modules are laid out for.
+            int roomFor = MulDiv(cl.right, 96, (int)dpi_) - 5 - kMinContentW;
+            treeW_ = std::clamp(w, 180, std::max(180, std::min(480, roomFor)));
             LayoutContent();
             InvalidateChrome();
         } else if (treeSb_.Dragging()) {
@@ -680,13 +708,22 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
             treeSb_.OnMouse(WM_LBUTTONUP, GET_X_LPARAM(l), GET_Y_LPARAM(l), track); }
         if (GetCapture() == h) ReleaseCapture();
         return 0;
+    case WM_CAPTURECHANGED:
+        if ((HWND)l != h) {   // capture lost (Alt+Tab, a dialog): end any drag, keep the width reached so far
+            if (splitDrag_) {
+                splitDrag_ = false;
+                store_.Section(L"host").SetStr(L"tree_w", std::to_wstring(treeW_));
+            }
+            treeSb_.CancelDrag();
+        }
+        return 0;
     case WM_MOUSEWHEEL: {
         POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
         ScreenToClient(h, &p);
         RECT cl; GetClientRect(h, &cl);
         RECT sb = SidebarRect(cl);
         if (Tree() && PtInRect(&sb, p)) {
-            treeSb_.SetOffset(treeSb_.Offset() - GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA * 3 * treeRowH());
+            treeSb_.SetOffset(treeSb_.Offset() - MulDiv(GET_WHEEL_DELTA_WPARAM(w), 3 * treeRowH(), WHEEL_DELTA));   // touchpads send < 120
             InvalidateChrome();
             return 0;
         }
@@ -739,6 +776,7 @@ LRESULT Host::OnFrame(HWND h, UINT m, WPARAM w, LPARAM l) {
                         RECT r = TreeRowRect(i, cl);
                         if (!PtInRect(&r, p) || treeRows_[i].header) continue;
                         TreeRow row = treeRows_[i];
+                        treeCursor_ = -1;
                         Activate(row.module);
                         if (row.nav >= 0) {
                             modules_[row.module]->OnNavSelect(row.nav);
@@ -973,7 +1011,9 @@ int Host::Run(const CommandLine& cl) {
             Activate((int)(msg.wParam - '1'));
             continue;
         }
-        if (msg.message == WM_SYSKEYDOWN && Tree() && (msg.wParam == VK_UP || msg.wParam == VK_DOWN)) {
+        // Ctrl+Shift+Up/Down walks the Three-Pane tree (Alt+Up stays with the modules, e.g. DiskMap's "up a folder").
+        if (msg.message == WM_KEYDOWN && Tree() && (msg.wParam == VK_UP || msg.wParam == VK_DOWN) &&
+            (GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_SHIFT) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
             StepTree(msg.wParam == VK_DOWN ? +1 : -1);
             continue;
         }

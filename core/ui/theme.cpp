@@ -47,7 +47,7 @@ const Theme& ThemeBase(ThemeId id, Layout layout) {
         RGB(244,242,238), RGB(255,255,255), RGB(235,232,225), RGB(217,213,204), RGB(217,213,204),
         RGB(29,31,35),    RGB(58,61,68),    RGB(92,96,104),
         RGB(31,95,191), RGB(31,95,191), RGB(31,95,191), RGB(31,95,191),
-        RGB(154,91,0),    RGB(179,38,30),   RGB(26,127,71),   // warn/bad: darkened for 4.5:1 on paper (reasoning)
+        RGB(133,78,0),    RGB(170,34,26),   RGB(21,110,60),   // darkened for 4.5:1 on panel2 too (zebra rows)
         false,
     };
     static const Theme baseline{   // 1 · Baseline

@@ -4626,7 +4626,9 @@ bool ServicesModule::OnConsoleInput(UINT msg, WPARAM w, LPARAM l, bool* handled)
     ListView& lv = ActiveList();
     const int n = plan ? (int)plan_.rows.size() : mode_ == Mode::Presets ? (int)preV_.size() : mode_ == Mode::Measure ? (int)measV_.size()
                                                                                                   : (int)V_.size();
-    const bool barKey = w == kVkUndo || w == kVkMeasure || w == kVkTick || w == kVkSave;   // a click on the host's F-key bar
+    // A click on the host's F-key bar. Those codes are VK_NAVIGATION_* in the SDK, so require lParam 0 too:
+    // a real key press always carries a repeat count, so it can never trigger them.
+    const bool barKey = l == 0 && (w == kVkUndo || w == kVkMeasure || w == kVkTick || w == kVkSave);
     if (focus_ == Focus::Name && msg == WM_KEYDOWN && !(w >= VK_F1 && w <= VK_F12) && !barKey) return false;   // the name field: shared handler
     auto setSel = [&](int k) {
         if (n <= 0) return false;
@@ -4916,6 +4918,7 @@ void ServicesModule::OnNavSelect(int id) {
         int k = id - NAV_PRESET;
         if (!loaded_ || items_.empty() || (k >= 2 && !kbOk_)) return;
         if (mode_ == Mode::Plan && NavSelected() == id) return;   // already open: keep its ticks
+        toList();   // close the open plan first, so its switches (registry fallback, override) never carry over
         OnClickId(ID_PRESET + k);   // opens the plan (a new plan starts from its own defaults)
     } else if (id == NAV_PRESETS || id == NAV_MEASURE) {
         if (!loaded_) return;
